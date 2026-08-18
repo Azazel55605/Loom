@@ -37,9 +37,15 @@ The living inventory of every UI component in Loom. Conventions governing how
 these are built live in [`UI_GUIDELINES.md`](./UI_GUIDELINES.md) and change
 rarely; this file changes constantly.
 
-**No components exist yet** — `apps/` has not been scaffolded and the shared UI
-kit in `crates/core` has not been started. The table below is seeded with its
-header only. Fill it in as the first components land.
+The shared UI kit in `crates/core` has not been started yet, so every component
+below currently lives in `apps/web-frontend/src/components/`. Once the kit
+exists, components consumed by more than one client should move into it and the
+"Used in" column should list each consumer.
 
 | Component | Source | Variants | Used in | Notes |
 | --------- | ------ | -------- | ------- | ----- |
+| `Card` | shadcn | — | web-frontend | Includes `CardHeader`, `CardTitle`, `CardDescription`, `CardContent`, `CardFooter`. Uses the `.surface-elevated` class so the blur/reduced-transparency tokens apply. |
+| `Badge` | shadcn | `default`, `secondary`, `destructive`, `outline` | web-frontend | `default` resolves from the accent token via Tailwind's `primary` colour. |
+| `Skeleton` | shadcn | — | web-frontend | Loading state for the health fetch. Animation is suppressed by the global `prefers-reduced-motion` rule in `index.css`. |
+| `Alert` | shadcn | `default`, `destructive` | web-frontend | Includes `AlertTitle`, `AlertDescription`. Error state for an unreachable backend; icon from `lucide-react`. |
+| `AccentThemeProvider` | custom | — | web-frontend | Theme provider, not a visual component. Writes the `--accent` HSL triplet to the document root and exposes `useAccentTheme()`. No Radix primitive needed — it renders no interactive UI. |

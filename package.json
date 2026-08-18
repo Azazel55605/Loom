@@ -2,7 +2,15 @@
   "name": "loom",
   "private": true,
   "scripts": {
+    "build": "pnpm -r --if-present build",
+    "build:core": "cargo build --release --package loom-core",
+    "build:desktop": "pnpm --filter desktop tauri build",
+    "build:mobile": "pnpm --filter mobile tauri android build",
+    "build:web-backend": "cargo build --release --package loom-web-backend",
+    "build:web-frontend": "pnpm --filter web-frontend build",
+    "test": "pnpm -r --if-present test",
     "versions:sync": "node scripts/sync-versions.mjs",
     "versions:sync:check": "node scripts/sync-versions.mjs --check"
-  }
+  },
+  "packageManager": "pnpm@11.3.0"
 }

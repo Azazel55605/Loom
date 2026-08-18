@@ -1,0 +1,33 @@
+# Builds both images from local source. Use this for local development and for
+# a test environment where nothing has been published to a registry yet.
+#
+#   docker compose -f docker-compose.local.yml up --build
+#
+# To run published images instead, use docker-compose.yml.
+
+services:
+  web-backend:
+    build:
+      # Repo root: the crate is part of a Cargo workspace and cannot build
+      # without the workspace manifest and its sibling crates.
+      context: .
+      dockerfile: crates/web-backend/Dockerfile
+    ports: ["8080:8080"]
+    environment:
+      - LOOM_BIND_ADDR=0.0.0.0:8080
+      - LOOM_LOG_LEVEL=info
+    restart: unless-stopped
+
+  web-frontend:
+    build:
+      # Repo root: this app is a pnpm workspace member, so the lockfile it
+      # installs from lives at the root, not in apps/web-frontend.
+      context: .
+      dockerfile: apps/web-frontend/Dockerfile
+      args:
+        # Baked in at build time — the browser resolves this, so it must be an
+        # address reachable from the user's machine, not a compose service name.
+        - VITE_API_URL=${VITE_API_URL:-http://localhost:8080}
+    ports: ["3000:80"]
+    depends_on: [web-backend]
+    restart: unless-stopped

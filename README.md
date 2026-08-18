@@ -1,6 +1,7 @@
 # Loom
 
-[![CI](https://github.com/azazel/loom/actions/workflows/ci.yml/badge.svg)](https://github.com/azazel/loom/actions/workflows/ci.yml)
+<!-- Placeholder: replace <owner> with the GitHub owner once this repo has a remote. -->
+[![CI](https://github.com/<owner>/loom/actions/workflows/ci.yml/badge.svg)](https://github.com/<owner>/loom/actions/workflows/ci.yml)
 
 A modular, extensible homelab management platform — not just a dashboard. Loom
 can *act* on your services through their APIs, not merely show you whether
@@ -53,9 +54,7 @@ pnpm versions:sync:check
 
 Version bumps go through `versions.json` — edit the entry, run
 `pnpm versions:sync`, never hand-edit a manifest. See
-[`docs/VERSIONING.md`](docs/VERSIONING.md). Contributors and AI agents should
-read [`docs/AGENT_INSTRUCTIONS.md`](docs/AGENT_INSTRUCTIONS.md) (symlinked as
-`AGENTS.md` and `CLAUDE.md`).
+[`docs/VERSIONING.md`](docs/VERSIONING.md).
 
 ## License
 

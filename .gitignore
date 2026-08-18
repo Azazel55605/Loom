@@ -29,3 +29,6 @@ node_modules/
 AGENTS.md
 CLAUDE.md
 docs/AGENT_INSTRUCTIONS.md
+
+# Frontend build output
+apps/*/dist/

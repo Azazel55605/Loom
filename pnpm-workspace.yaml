@@ -1,0 +1,7 @@
+packages:
+  - "apps/*"
+
+# esbuild ships a prebuilt platform binary via a postinstall script; without
+# this approval pnpm skips it and `vite build` fails.
+allowBuilds:
+  esbuild: true

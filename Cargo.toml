@@ -5,7 +5,7 @@ members = ["crates/core", "crates/web-backend"]
 [workspace.package]
 edition = "2021"
 license = "MIT"
-repository = "https://github.com/azazel/loom"
+repository = "https://github.com/<owner>/loom"
 rust-version = "1.82"
 
 [workspace.dependencies]

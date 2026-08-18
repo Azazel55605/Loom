@@ -1,4 +1,4 @@
-//! Shared library for [Loom](https://github.com/azazel/loom).
+//! Shared library for Loom.
 //!
 //! `loom-core` is a library and nothing else. It holds the pieces that more
 //! than one part of Loom needs:

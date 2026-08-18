@@ -1,0 +1,74 @@
+name: Release web-frontend
+
+# Tags follow `v<semver>-<component>`, e.g. `v0.1.0-web-frontend`, so each
+# product releases independently — matching versions.json. See docs/VERSIONING.md.
+on:
+  push:
+    tags:
+      - 'v*.*.*-web-frontend'
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  release:
+    name: Build and push image
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # Safety check: the tag and versions.json must agree, or the release is
+      # publishing something other than what the repo says it is.
+      - name: Verify tag matches versions.json
+        id: version
+        run: |
+          set -euo pipefail
+          tag="${GITHUB_REF_NAME}"
+          tag_version="${tag#v}"
+          tag_version="${tag_version%-web-frontend}"
+          file_version="$(jq -r '."web-frontend"' versions.json)"
+
+          echo "tag version:          $tag_version"
+          echo "versions.json entry:  $file_version"
+
+          if [ "$tag_version" != "$file_version" ]; then
+            echo "::error::Tag $tag implies version $tag_version but versions.json says $file_version. Update versions.json, run 'pnpm versions:sync', and re-tag."
+            exit 1
+          fi
+
+          echo "version=$tag_version" >> "$GITHUB_OUTPUT"
+
+      # GHCR requires a lowercase namespace; GitHub owners may contain capitals.
+      - name: Compute image name
+        id: image
+        run: echo "name=ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/loom-web-frontend" >> "$GITHUB_OUTPUT"
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: apps/web-frontend/Dockerfile
+          push: true
+          # VITE_API_URL is baked into the bundle at build time (static SPA), so
+          # the published image points at whatever is set here. Override it with
+          # a repository variable named VITE_API_URL; a runtime-configurable API
+          # URL is a known follow-up. See apps/web-frontend/Dockerfile.
+          build-args: |
+            VITE_API_URL=${{ vars.VITE_API_URL || 'http://localhost:8080' }}
+          tags: |
+            ${{ steps.image.outputs.name }}:${{ steps.version.outputs.version }}
+            ${{ steps.image.outputs.name }}:latest
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
