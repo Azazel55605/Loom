@@ -8,6 +8,9 @@
     "build:mobile": "pnpm --filter mobile tauri android build",
     "build:web-backend": "cargo build --release --package loom-web-backend",
     "build:web-frontend": "pnpm --filter web-frontend build",
+    "clean": "node scripts/clean.mjs",
+    "clean:deep": "node scripts/clean.mjs --deep",
+    "clean:dry": "node scripts/clean.mjs --dry-run",
     "test": "pnpm -r --if-present test",
     "versions:sync": "node scripts/sync-versions.mjs",
     "versions:sync:check": "node scripts/sync-versions.mjs --check"

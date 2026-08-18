@@ -191,6 +191,43 @@ persist generated secrets and instance config once that system exists.
 Note that the frontend image bakes `VITE_API_URL` in at build time; see
 `apps/web-frontend/Dockerfile`.
 
+## Cleaning build output
+
+```sh
+pnpm clean          # build artifacts from every component
+pnpm clean:dry      # show what would go, delete nothing
+pnpm clean:deep     # the above, plus generated projects and node_modules
+```
+
+Build output gets large fast — the two Tauri `target/` directories and the
+Android Gradle output dominate, and a full local build of everything runs to
+well over 10 GB.
+
+`cargo clean` on its own is not enough. This repo contains **three separate
+Cargo workspaces** — the root one, plus a detached workspace inside each Tauri
+app — so a single `cargo clean` at the root leaves the desktop and mobile
+targets untouched. The Gradle output under `gen/android` is not Cargo's at all
+and is usually the third-largest item.
+
+`pnpm clean` removes:
+
+| | |
+| --- | --- |
+| `target/`, `apps/desktop/src-tauri/target/`, `apps/mobile/src-tauri/target/` | via `cargo clean` per workspace, falling back to deletion if Cargo is unavailable |
+| `apps/*/dist/` | Vite output |
+| `gen/android/{build,app/build,app/.cxx,.gradle}` | Gradle output |
+
+It leaves `node_modules` and the generated `gen/android` project in place, so
+the next build only recompiles — it does not re-download or re-scaffold.
+
+`pnpm clean:deep` additionally removes `node_modules` and `src-tauri/gen/`.
+After that you need `pnpm install` again, and
+`pnpm --filter mobile tauri android init` (which requires the Android SDK)
+before the next Android build. The script prints this reminder.
+
+Reported sizes are apparent sizes; because Cargo hardlinks heavily, `du` may
+show a smaller figure than the total reclaimed.
+
 ## Testing
 
 ```sh
