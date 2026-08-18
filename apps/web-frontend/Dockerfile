@@ -4,12 +4,15 @@
 # member of the pnpm workspace, so installing needs the root pnpm-lock.yaml and
 # pnpm-workspace.yaml — neither of which exists inside apps/web-frontend.
 #
-# NOTE: VITE_API_URL is baked in at BUILD time, not read at runtime. This is a
-# static SPA served by nginx: there is no server-side process to read an
-# environment variable per request, so changing the API URL requires rebuilding
-# the image. A runtime-configurable API URL (an entrypoint that rewrites a
-# placeholder, or a /config.json fetched on boot) is a known follow-up and is
-# not solved here.
+# The API is reached SAME-ORIGIN: nginx proxies /api to the backend, so no API
+# host is compiled into the bundle and the same image works for every
+# deployment. The backend address is a runtime setting (LOOM_BACKEND_ORIGIN),
+# not a build argument. See docs/adr/0006-frontend-api-same-origin.md.
+#
+# VITE_API_URL still exists as a build-time escape hatch for pointing the bundle
+# at an absolute backend URL instead; it is unset by default and, when used,
+# makes requests cross-origin (and therefore subject to the backend's CORS
+# policy).
 
 # Node 22.13+ is required, not optional: pnpm 11 imports `node:sqlite`, which
 # does not exist in Node 20, so `pnpm fetch` dies with ERR_UNKNOWN_BUILTIN_MODULE
@@ -41,14 +44,24 @@ RUN pnpm fetch
 COPY apps ./apps
 RUN pnpm install --offline --frozen-lockfile
 
-ARG VITE_API_URL
+# Escape hatch only — normally unset, so the bundle uses its relative /api base.
+# Passing an empty value is treated as unset by the app (see resolveApiUrl).
+ARG VITE_API_URL=""
 ENV VITE_API_URL=$VITE_API_URL
 
 RUN pnpm --filter web-frontend build
 
 FROM nginx:alpine AS runtime
 
-COPY apps/web-frontend/nginx.conf /etc/nginx/conf.d/default.conf
+# Rendered by the image's entrypoint at container start, substituting
+# LOOM_BACKEND_ORIGIN below.
+COPY apps/web-frontend/nginx.conf /etc/nginx/templates/default.conf.template
 COPY --from=builder /build/apps/web-frontend/dist /usr/share/nginx/html
+
+# Where nginx forwards /api. The default is the Compose service name, so the
+# stack works with no configuration at all — see
+# docs/adr/0004-zero-config-startup.md. Override it when the backend lives
+# elsewhere.
+ENV LOOM_BACKEND_ORIGIN=http://web-backend:8080
 
 EXPOSE 80

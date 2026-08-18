@@ -15,10 +15,27 @@ import { Skeleton } from "@/components/ui/skeleton";
 /**
  * Base URL of the web-backend API.
  *
- * Baked in at build time — this is a static SPA, so there is no server to read
- * an environment variable at request time. See apps/web-frontend/Dockerfile.
+ * Relative by default: the frontend's own server proxies `/api` to the backend,
+ * so requests stay same-origin and no backend host is compiled into the bundle.
+ * That is what lets one published image work for every deployment — an absolute
+ * URL baked in at build time can only ever be correct for whoever built it.
+ * See docs/adr/0006-frontend-api-same-origin.md.
+ *
+ * `VITE_API_URL` overrides it with an absolute URL for setups without that
+ * proxy; those requests are cross-origin and rely on the backend's CORS policy.
  */
-const API_URL = import.meta.env.VITE_API_URL ?? "http://localhost:8080";
+const API_URL = resolveApiUrl();
+
+/**
+ * `??` is deliberately not used: a declared-but-empty `VITE_API_URL` (which is
+ * what an unset Docker build arg produces) arrives as `""`, and `""` is neither
+ * null nor undefined, so it would silently win and every request would go to
+ * the wrong path.
+ */
+function resolveApiUrl(): string {
+  const configured = import.meta.env.VITE_API_URL?.trim();
+  return configured ? configured : "/api";
+}
 
 /** Shape of the web-backend `/health` response. */
 type Health = {
@@ -65,7 +82,7 @@ export default function App() {
             <Badge variant="secondary">frontend v{__APP_VERSION__}</Badge>
           </div>
           <CardDescription>
-            Modular homelab management. Connected to {API_URL}
+            Modular homelab management. Connected to {API_URL === "/api" ? "this host" : API_URL}
           </CardDescription>
         </CardHeader>
 

@@ -17,4 +17,17 @@ export default defineConfig({
       "@": path.resolve(import.meta.dirname, "./src"),
     },
   },
+  server: {
+    // Mirrors the nginx /api proxy the production image uses, so `pnpm dev`
+    // exercises the same same-origin path rather than a special case.
+    // Override the target with LOOM_BACKEND_ORIGIN when the backend is not on
+    // the default port.
+    proxy: {
+      "/api": {
+        target: process.env.LOOM_BACKEND_ORIGIN ?? "http://localhost:8080",
+        changeOrigin: true,
+        rewrite: (path) => path.replace(/^\/api/, ""),
+      },
+    },
+  },
 });

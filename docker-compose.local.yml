@@ -36,11 +36,11 @@ services:
       # installs from lives at the root, not in apps/web-frontend.
       context: .
       dockerfile: apps/web-frontend/Dockerfile
-      args:
-        # Baked in at build time — the browser resolves this, so it must be an
-        # address reachable from the user's machine, not a compose service name.
-        - VITE_API_URL=${VITE_API_URL:-http://localhost:8080}
     ports: ["3000:80"]
+    environment:
+      # nginx proxies /api here, so the browser only ever talks to the frontend's
+      # own origin. Defaults to the service name; no configuration needed.
+      - LOOM_BACKEND_ORIGIN=${LOOM_BACKEND_ORIGIN:-http://web-backend:8080}
     depends_on: [web-backend]
     restart: unless-stopped
 

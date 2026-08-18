@@ -188,8 +188,14 @@ Locally built images are tagged `loom-web-backend:local` and
 Both Compose files mount a `loom-data` volume at `/data`, where the backend will
 persist generated secrets and instance config once that system exists.
 
-Note that the frontend image bakes `VITE_API_URL` in at build time; see
-`apps/web-frontend/Dockerfile`.
+The frontend serves the API under its own origin: nginx proxies `/api` to
+`LOOM_BACKEND_ORIGIN` (default `http://web-backend:8080`), so the browser never
+makes a cross-origin request and no backend host is compiled into the bundle.
+One image works at any hostname. See
+[`adr/0006-frontend-api-same-origin.md`](./adr/0006-frontend-api-same-origin.md).
+
+`pnpm dev` proxies `/api` the same way, targeting `http://localhost:8080` unless
+`LOOM_BACKEND_ORIGIN` says otherwise.
 
 ## Cleaning build output
 

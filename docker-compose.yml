@@ -27,6 +27,10 @@ services:
   web-frontend:
     image: ghcr.io/${LOOM_IMAGE_OWNER:-loom-project}/loom-web-frontend:${LOOM_WEB_FRONTEND_TAG:-latest}
     ports: ["3000:80"]
+    environment:
+      # nginx proxies /api here, so the browser only ever talks to the frontend's
+      # own origin. Defaults to the service name; no configuration needed.
+      - LOOM_BACKEND_ORIGIN=${LOOM_BACKEND_ORIGIN:-http://web-backend:8080}
     depends_on: [web-backend]
     restart: unless-stopped
 

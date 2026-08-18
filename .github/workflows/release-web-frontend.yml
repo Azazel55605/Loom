@@ -61,12 +61,10 @@ jobs:
           context: .
           file: apps/web-frontend/Dockerfile
           push: true
-          # VITE_API_URL is baked into the bundle at build time (static SPA), so
-          # the published image points at whatever is set here. Override it with
-          # a repository variable named VITE_API_URL; a runtime-configurable API
-          # URL is a known follow-up. See apps/web-frontend/Dockerfile.
-          build-args: |
-            VITE_API_URL=${{ vars.VITE_API_URL || 'http://localhost:8080' }}
+          # No VITE_API_URL: the bundle calls /api relative to its own origin
+          # and nginx proxies it, so one published image works for every
+          # deployment. Baking a URL here would make the image usable only by
+          # whoever it was built for. See docs/adr/0006-frontend-api-same-origin.md.
           tags: |
             ${{ steps.image.outputs.name }}:${{ steps.version.outputs.version }}
             ${{ steps.image.outputs.name }}:latest
