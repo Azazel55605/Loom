@@ -8,7 +8,7 @@ invocations, so every contributor and CI job builds the same way.
 | Tool | Needed for | Notes |
 | --- | --- | --- |
 | Rust (stable) | `core`, `web-backend`, desktop/mobile Tauri shells | Workspace pins `rust-version = "1.82"`. Install via [rustup](https://rustup.rs/). |
-| Node 20+ | all frontend builds | |
+| Node 22.13+ | all frontend builds | Required by the pinned pnpm 11, which uses `node:sqlite`. Node 20 fails with `ERR_UNKNOWN_BUILTIN_MODULE`. |
 | pnpm | all frontend builds, script orchestration | `corepack enable` — the version is pinned by `packageManager` in the root `package.json`. |
 | Docker + Docker Compose | running the containerized stack | Only needed for container workflows, not for local builds. |
 | Tauri system dependencies | desktop and mobile builds | OS-specific (webview, build tools, Android SDK/NDK). Follow [Tauri's prerequisites guide](https://tauri.app/start/prerequisites/) — deliberately not duplicated here, since per-OS package lists go stale quickly. |

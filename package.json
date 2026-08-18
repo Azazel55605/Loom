@@ -12,5 +12,8 @@
     "versions:sync": "node scripts/sync-versions.mjs",
     "versions:sync:check": "node scripts/sync-versions.mjs --check"
   },
-  "packageManager": "pnpm@11.3.0"
+  "packageManager": "pnpm@11.3.0",
+  "engines": {
+    "node": ">=22.13"
+  }
 }
