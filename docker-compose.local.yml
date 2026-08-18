@@ -10,6 +10,9 @@
 
 services:
   web-backend:
+    # Tagged `:local` so locally built images are never confused with the
+    # published `:latest` ones that docker-compose.yml pulls from GHCR.
+    image: loom-web-backend:local
     build:
       # Repo root: the crate is part of a Cargo workspace and cannot build
       # without the workspace manifest and its sibling crates.
@@ -27,6 +30,7 @@ services:
     restart: unless-stopped
 
   web-frontend:
+    image: loom-web-frontend:local
     build:
       # Repo root: this app is a pnpm workspace member, so the lockfile it
       # installs from lives at the root, not in apps/web-frontend.

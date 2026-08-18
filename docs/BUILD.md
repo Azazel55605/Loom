@@ -59,18 +59,50 @@ rather than failing the run, so this stays correct as `apps/` grows.
 
 ## Components not yet scaffolded
 
-`apps/desktop` and `apps/mobile` do not exist yet. Their scripts are already
-wired up, and running one today prints:
+`apps/mobile` does not exist yet (`apps/desktop` is now scaffolded). Its script
+is already wired up, and running it today prints:
 
 ```
 No projects matched the filters in "<repo root>"
 ```
 
 **This exits 0 — it is a silent no-op, not an error.** Don't read a passing
-exit code from `pnpm build:desktop` as "the desktop app built". The same
+exit code from `pnpm build:mobile` as "the mobile app built". The same
 applies to `pnpm build` and `pnpm test`: they succeed while doing nothing for
 components that don't exist. Once the apps are scaffolded, the commands start
 working with no changes to the root `package.json`.
+
+## Desktop specifics
+
+`pnpm build:desktop` runs `tauri build`, which compiles the Rust shell and emits
+platform bundles under `apps/desktop/src-tauri/target/release/bundle/`. It needs
+Tauri's system dependencies (see Prerequisites) — on Debian/Ubuntu that is
+`libwebkit2gtk-4.1-dev`, `librsvg2-dev`, `libxdo-dev` and `libssl-dev`.
+
+Bundle targets are `deb`, `rpm`, `msi`, `nsis`, `dmg` and `app`; Tauri keeps
+whichever are valid for the host OS. **AppImage is deliberately not built** — it
+is more trouble than it is worth, and the deb, rpm, Arch and Flatpak packages
+cover Linux.
+
+`apps/desktop/src-tauri` is deliberately **its own Cargo workspace**, detached
+from the root one, so `cargo build --workspace` and CI's Rust job do not require
+those libraries.
+
+### Icons
+
+`apps/desktop/icon.svg` is the source of truth for the app icon. Everything in
+`apps/desktop/src-tauri/icons/` (png/ico/icns plus the Android and iOS sets) is
+generated from it — never hand-edit those. To regenerate after changing the SVG:
+
+```sh
+rsvg-convert -w 1024 -h 1024 apps/desktop/icon.svg -o /tmp/loom-icon.png
+pnpm --filter desktop tauri icon /tmp/loom-icon.png
+```
+
+Packaging beyond Tauri's own bundles lives in `packaging/` — Arch PKGBUILDs and
+a Flatpak manifest, both exercised by `.github/workflows/release-desktop.yml`.
+macOS builds are unsigned; see
+[`DESKTOP_MACOS_UNSIGNED.md`](./DESKTOP_MACOS_UNSIGNED.md).
 
 ## Desktop local testing
 
@@ -91,7 +123,7 @@ Tauri's own scaffold generates — verify it exists rather than adding a second 
 Containers are built through Docker Compose, **not** the pnpm scripts above.
 
 ```sh
-# Build both images from local source
+# Build both images from local source (tagged loom-*:local)
 docker compose -f docker-compose.local.yml build
 
 # Run published images from GHCR instead of building
@@ -103,6 +135,10 @@ every variable has a working default, so an unmodified Compose file boots. Copy
 `.env.example` to `.env` only to override the image namespace, pin tags, or
 change runtime defaults. See
 [`adr/0004-zero-config-startup.md`](./adr/0004-zero-config-startup.md).
+
+Locally built images are tagged `loom-web-backend:local` and
+`loom-web-frontend:local`, so they never collide with the `:latest` images
+`docker-compose.yml` pulls from GHCR.
 
 Both Compose files mount a `loom-data` volume at `/data`, where the backend will
 persist generated secrets and instance config once that system exists.

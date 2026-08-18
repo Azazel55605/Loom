@@ -1,0 +1,63 @@
+# Maintainer: Loom contributors
+#
+# VCS package: builds the desktop client from the current git HEAD. Unlike
+# ../loom-desktop/PKGBUILD this needs no published release to exist, which is
+# why CI validates this variant.
+#
+# Replace <owner> below with the GitHub owner before publishing to the AUR.
+
+pkgname=loom-desktop-git
+pkgver=0.0.0.r0.g0000000
+pkgrel=1
+pkgdesc="Loom desktop client — a modular, extensible homelab management platform (git)"
+arch=('x86_64')
+url="https://github.com/<owner>/loom"
+license=('MIT')
+depends=('webkit2gtk-4.1' 'gtk3' 'hicolor-icon-theme')
+makedepends=('git' 'rust' 'cargo' 'nodejs' 'pnpm' 'pkgconf' 'libsoup3' 'openssl')
+provides=('loom-desktop')
+conflicts=('loom-desktop')
+options=('!strip' '!debug' '!lto')
+source=("${pkgname}::git+https://github.com/<owner>/loom.git")
+sha256sums=('SKIP')
+
+pkgver() {
+  cd "${srcdir}/${pkgname}"
+  # Standard AUR VCS convention. Falls back to a commit-count version when the
+  # repository has no tags yet — which is the case today, so without the
+  # fallback `makepkg` would abort before it ever reaches build().
+  if git describe --long --tags >/dev/null 2>&1; then
+    git describe --long --tags | sed 's/^v//;s/\([^-]*-g\)/r\1/;s/-/./g'
+  else
+    printf "0.0.0.r%s.g%s" "$(git rev-list --count HEAD)" "$(git rev-parse --short HEAD)"
+  fi
+}
+
+build() {
+  cd "${srcdir}/${pkgname}"
+
+  # Keep Cargo and pnpm state inside the build directory so makepkg stays
+  # self-contained and does not write to the packager's home.
+  export CARGO_HOME="${srcdir}/cargo"
+  export PNPM_HOME="${srcdir}/pnpm"
+  export npm_config_store_dir="${srcdir}/pnpm-store"
+
+  pnpm install --frozen-lockfile
+  # Only the .deb bundle: package() repackages its payload, and building the
+  # other bundle formats here would be wasted work.
+  pnpm --filter desktop tauri build --bundles deb
+}
+
+package() {
+  cd "${srcdir}/${pkgname}"
+
+  local deb
+  deb=$(find apps/desktop/src-tauri/target/release/bundle/deb -name '*.deb' -print -quit)
+
+  # A .deb is an ar archive; extract its data.tar.* payload straight into $pkgdir.
+  bsdtar -xOf "${deb}" data.tar.gz | bsdtar -xf - -C "${pkgdir}"
+
+  install -Dm644 "${pkgdir}/usr/share/applications/Loom.desktop" \
+    "${pkgdir}/usr/share/applications/loom-desktop.desktop"
+  rm -f "${pkgdir}/usr/share/applications/Loom.desktop"
+}

@@ -1,0 +1,179 @@
+name: Release desktop
+
+# Tags follow `v<semver>-<component>`, e.g. `v0.1.0-desktop`, so each product
+# releases independently — matching versions.json. See docs/VERSIONING.md.
+on:
+  push:
+    tags:
+      - 'v*.*.*-desktop'
+
+permissions:
+  contents: write
+
+jobs:
+  check-version:
+    name: Verify tag matches versions.json
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # Safety check: the tag and versions.json must agree, or the release is
+      # publishing something other than what the repo says it is.
+      - name: Compare tag against versions.json
+        id: version
+        run: |
+          set -euo pipefail
+          tag="${GITHUB_REF_NAME}"
+          tag_version="${tag#v}"
+          tag_version="${tag_version%-desktop}"
+          file_version="$(jq -r '."desktop"' versions.json)"
+
+          echo "tag version:          $tag_version"
+          echo "versions.json entry:  $file_version"
+
+          if [ "$tag_version" != "$file_version" ]; then
+            echo "::error::Tag $tag implies version $tag_version but versions.json says $file_version. Update versions.json, run 'pnpm versions:sync', and re-tag."
+            exit 1
+          fi
+
+          echo "version=$tag_version" >> "$GITHUB_OUTPUT"
+
+  build-tauri:
+    name: Bundle (${{ matrix.os }})
+    needs: check-version
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, ubuntu-22.04, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # Pinned to ubuntu-22.04 rather than ubuntu-latest: the deb and rpm link
+      # against the builder's glibc, so building on the oldest supported distro
+      # keeps the packages installable on the widest range of systems.
+      - name: Install Linux system dependencies
+        if: matrix.os == 'ubuntu-22.04'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev \
+            libappindicator3-dev \
+            librsvg2-dev \
+            libxdo-dev \
+            libssl-dev \
+            build-essential
+
+      - name: Install pnpm
+        uses: pnpm/action-setup@v4
+
+      - name: Install Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: pnpm
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Rust build
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: apps/desktop/src-tauri -> target
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      # tauri-action builds the bundles configured in tauri.conf.json, keeping
+      # only those valid for the current OS (dmg/app on macOS, msi/nsis on
+      # Windows, deb/rpm on Linux), then attaches them to the release.
+      #
+      # NOTE: nothing here is code-signed or notarized. macOS artifacts will be
+      # blocked by Gatekeeper — see docs/DESKTOP_MACOS_UNSIGNED.md. Signing is a
+      # known follow-up.
+      - name: Build and attach bundles
+        uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          projectPath: apps/desktop
+          tagName: ${{ github.ref_name }}
+          releaseName: Loom Desktop v${{ needs.check-version.outputs.version }}
+          releaseBody: |
+            Desktop client v${{ needs.check-version.outputs.version }}.
+
+            Unsigned build — macOS users see docs/DESKTOP_MACOS_UNSIGNED.md.
+          # Draft, so nothing reaches users until a human reviews the artifacts.
+          releaseDraft: true
+          prerelease: false
+
+  build-flatpak:
+    name: Bundle (flatpak)
+    needs: check-version
+    runs-on: ubuntu-latest
+    container:
+      # Matches the GNOME runtime the manifest targets, and ships flatpak-builder.
+      image: bilelmoussaoui/flatpak-github-actions:gnome-47
+      options: --privileged
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # NOTE: this validates that the app builds and bundles. Flathub submission
+      # is a separate process — the manifest lives in Flathub's own repository,
+      # goes through their review, and must build without network access.
+      # See packaging/flatpak/dev.loom.Desktop.yml.
+      - name: Build flatpak bundle
+        uses: flatpak/flatpak-github-actions/flatpak-builder@v6
+        with:
+          bundle: loom-desktop-${{ needs.check-version.outputs.version }}.flatpak
+          manifest-path: packaging/flatpak/dev.loom.Desktop.yml
+          cache-key: flatpak-builder-${{ github.sha }}
+
+  validate-arch-pkgbuild:
+    name: Validate PKGBUILD (arch)
+    needs: check-version
+    runs-on: ubuntu-latest
+    container:
+      image: archlinux:base-devel
+    steps:
+      - name: Install dependencies
+        run: |
+          pacman -Syu --noconfirm git nodejs pnpm rust webkit2gtk-4.1 \
+            gtk3 libsoup3 openssl pkgconf
+
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # makepkg refuses to run as root, so build as an unprivileged user.
+      - name: Create build user
+        run: |
+          useradd -m builder
+          echo "builder ALL=(ALL) NOPASSWD: ALL" >> /etc/sudoers
+          cp packaging/arch/loom-desktop-git/PKGBUILD /home/builder/PKGBUILD
+          chown -R builder:builder /home/builder
+
+      # The PKGBUILD ships `<owner>` as a deliberate placeholder, so point it at
+      # whichever repository is running this workflow.
+      - name: Point the PKGBUILD at this repository
+        run: |
+          sed -i "s|https://github.com/<owner>/loom|${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}|g" \
+            /home/builder/PKGBUILD
+          grep -n "github.com" /home/builder/PKGBUILD
+
+      # A full `makepkg` compiles the Tauri app from source, which is the point:
+      # it proves the PKGBUILD is structurally valid and actually buildable
+      # without a published release existing.
+      #
+      # NOTE: this validates only. Publishing to the AUR (SSH deploy key,
+      # .SRCINFO generation, push to aur.archlinux.org) is a follow-up once the
+      # pipeline is otherwise proven.
+      - name: Run makepkg
+        run: sudo -u builder bash -c 'cd /home/builder && makepkg --noconfirm --nocheck --syncdeps'
+
+      - name: Show built package
+        run: ls -lh /home/builder/*.pkg.tar.* || true

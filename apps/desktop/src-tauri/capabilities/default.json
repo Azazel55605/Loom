@@ -1,0 +1,7 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "default",
+  "description": "Baseline capability for the main window. The UI talks to web-backend over plain HTTP from the webview, so no extra permissions are needed yet.",
+  "windows": ["main"],
+  "permissions": ["core:default"]
+}

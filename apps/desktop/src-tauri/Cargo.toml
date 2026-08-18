@@ -1,0 +1,28 @@
+[package]
+name = "loom-desktop"
+description = "Loom desktop client (Tauri)."
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+rust-version = "1.82"
+
+# Deliberately its own workspace, detached from the Cargo workspace at the repo
+# root. Tauri needs system libraries (webkit2gtk and friends) that the server
+# crates do not, so folding this into the root workspace would make
+# `cargo build --workspace` — which CI runs on a plain runner — require them
+# too. Keeping it separate also lets the desktop app move on its own release
+# cadence, per docs/VERSIONING.md.
+[workspace]
+
+[lib]
+# The Tauri v2 mobile targets require the app to be reachable as a library.
+name = "loom_desktop_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = [] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"

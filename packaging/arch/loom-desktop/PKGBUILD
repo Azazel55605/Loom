@@ -1,0 +1,46 @@
+# Maintainer: Loom contributors
+#
+# Release package: repackages the .deb published by the desktop release
+# workflow (.github/workflows/release-desktop.yml) rather than building from
+# source. See ../loom-desktop-git/PKGBUILD for the build-from-source variant.
+#
+# VERSIONING: pkgver below is maintained BY HAND against the "desktop" entry in
+# versions.json. scripts/sync-versions.mjs deliberately does not write it — a
+# PKGBUILD carries pkgrel alongside pkgver (a packaging revision that moves
+# independently of upstream version), and pkgver has its own validity rules,
+# so it does not map cleanly onto the one-string-per-product model the sync
+# script uses. Teaching sync-versions a "pkgbuild" target kind that rewrites
+# pkgver and resets pkgrel=1 is a possible future enhancement.
+
+pkgname=loom-desktop
+pkgver=0.1.0
+pkgrel=1
+pkgdesc="Loom desktop client — a modular, extensible homelab management platform"
+arch=('x86_64')
+url="https://github.com/<owner>/loom"
+license=('MIT')
+depends=('webkit2gtk-4.1' 'gtk3' 'hicolor-icon-theme')
+provides=('loom-desktop')
+conflicts=('loom-desktop-git')
+# The upstream .deb ships an already-stripped release binary.
+options=('!strip' '!debug')
+source=("${pkgname}-${pkgver}.deb::${url}/releases/download/v${pkgver}-desktop/Loom_${pkgver}_amd64.deb")
+# Replace with the real digest at release time (`updpkgsums`). SKIP is only
+# acceptable while the release artifacts do not exist yet.
+sha256sums=('SKIP')
+
+package() {
+  # A .deb is an ar archive; the payload we want is its data.tar.* member.
+  # bsdtar reads both formats, so this needs no dpkg on the host.
+  bsdtar -xOf "${srcdir}/${pkgname}-${pkgver}.deb" data.tar.gz \
+    | bsdtar -xf - -C "${pkgdir}"
+
+  # Paths below are what a real Tauri build emits, verified against
+  # apps/desktop/src-tauri/target/release/bundle/deb:
+  #   usr/bin/loom-desktop
+  #   usr/share/applications/Loom.desktop
+  #   usr/share/icons/hicolor/{32x32,128x128,256x256@2}/apps/loom-desktop.png
+  install -Dm644 "${pkgdir}/usr/share/applications/Loom.desktop" \
+    "${pkgdir}/usr/share/applications/loom-desktop.desktop"
+  rm -f "${pkgdir}/usr/share/applications/Loom.desktop"
+}
