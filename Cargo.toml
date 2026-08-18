@@ -13,5 +13,8 @@ loom-core = { path = "crates/core" }
 axum = "0.8"
 serde = { version = "1", features = ["derive"] }
 tokio = { version = "1", features = ["full"] }
+# CORS headers for the browser clients; hand-rolling correct preflight
+# handling is not worth it, and tower-http is already axum's ecosystem.
+tower-http = { version = "0.6", features = ["cors"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
