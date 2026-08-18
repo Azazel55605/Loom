@@ -1,6 +1,9 @@
 # Builds both images from local source. Use this for local development and for
 # a test environment where nothing has been published to a registry yet.
 #
+# No .env file is required — every variable has a working default.
+# See docs/adr/0004-zero-config-startup.md.
+#
 #   docker compose -f docker-compose.local.yml up --build
 #
 # To run published images instead, use docker-compose.yml.
@@ -16,6 +19,11 @@ services:
     environment:
       - LOOM_BIND_ADDR=0.0.0.0:8080
       - LOOM_LOG_LEVEL=info
+      # Where the backend will persist generated secrets and instance config.
+      # Optional, defaulted — see docs/adr/0004-zero-config-startup.md.
+      - LOOM_DATA_DIR=/data
+    volumes:
+      - loom-data:/data
     restart: unless-stopped
 
   web-frontend:
@@ -31,3 +39,6 @@ services:
     ports: ["3000:80"]
     depends_on: [web-backend]
     restart: unless-stopped
+
+volumes:
+  loom-data:

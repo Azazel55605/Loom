@@ -98,9 +98,14 @@ docker compose -f docker-compose.local.yml build
 docker compose up
 ```
 
-`docker compose up` uses `docker-compose.yml` and requires `.env` — copy
-`.env.example` and set `LOOM_IMAGE_OWNER`. Compose fails fast with a clear
-message if it is unset.
+`docker compose up` uses `docker-compose.yml` and needs **no `.env` file** —
+every variable has a working default, so an unmodified Compose file boots. Copy
+`.env.example` to `.env` only to override the image namespace, pin tags, or
+change runtime defaults. See
+[`adr/0004-zero-config-startup.md`](./adr/0004-zero-config-startup.md).
+
+Both Compose files mount a `loom-data` volume at `/data`, where the backend will
+persist generated secrets and instance config once that system exists.
 
 Note that the frontend image bakes `VITE_API_URL` in at build time; see
 `apps/web-frontend/Dockerfile`.
