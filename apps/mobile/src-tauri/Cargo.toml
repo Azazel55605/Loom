@@ -1,0 +1,27 @@
+[package]
+name = "loom-mobile"
+description = "Loom mobile client (Tauri, Android)."
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+rust-version = "1.82"
+
+# Its own workspace, detached from the Cargo workspace at the repo root — the
+# Android build cross-compiles to targets the server crates neither need nor
+# support, and CI's `cargo build --workspace` must not pull this in. Same
+# reasoning as apps/desktop/src-tauri.
+[workspace]
+
+[lib]
+# Android loads the app as a shared library, so cdylib is required here rather
+# than optional: `tauri android build` links this into the APK.
+name = "loom_mobile_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = [] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"

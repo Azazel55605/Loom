@@ -11,7 +11,8 @@ invocations, so every contributor and CI job builds the same way.
 | Node 22.13+ | all frontend builds | Required by the pinned pnpm 11, which uses `node:sqlite`. Node 20 fails with `ERR_UNKNOWN_BUILTIN_MODULE`. |
 | pnpm | all frontend builds, script orchestration | `corepack enable` — the version is pinned by `packageManager` in the root `package.json`. |
 | Docker + Docker Compose | running the containerized stack | Only needed for container workflows, not for local builds. |
-| Tauri system dependencies | desktop and mobile builds | OS-specific (webview, build tools, Android SDK/NDK). Follow [Tauri's prerequisites guide](https://tauri.app/start/prerequisites/) — deliberately not duplicated here, since per-OS package lists go stale quickly. |
+| Tauri system dependencies | desktop and mobile builds | OS-specific (webview, build tools). Follow [Tauri's prerequisites guide](https://tauri.app/start/prerequisites/) — deliberately not duplicated here, since per-OS package lists go stale quickly. |
+| JDK 21 + Android SDK/NDK | mobile builds only | Needed by Gradle and Tauri's Android tooling; see [Mobile specifics](#mobile-specifics). Not required for any other component. |
 
 ## Install dependencies
 
@@ -32,7 +33,7 @@ fetched by Cargo on first build; no separate step.
 | web-backend | `pnpm build:web-backend` | `target/release/loom-web-backend` binary |
 | web-frontend | `pnpm build:web-frontend` | `apps/web-frontend/dist/` static site |
 | desktop | `pnpm build:desktop` | Platform installers in `apps/desktop/src-tauri/target/release/bundle/` |
-| mobile | `pnpm build:mobile` | Android APK/AAB via Gradle |
+| mobile | `pnpm build:mobile` | Unsigned APK + AAB via Gradle, under `apps/mobile/src-tauri/gen/android/app/build/outputs/` |
 
 The Cargo packages are named `loom-core` and `loom-web-backend` — a crate named
 `core` would collide with Rust's built-in `core`. The `pnpm build:*` scripts
@@ -57,20 +58,10 @@ cargo build --release --workspace
 `--if-present` means a package without a `build` script is skipped silently
 rather than failing the run, so this stays correct as `apps/` grows.
 
-## Components not yet scaffolded
-
-`apps/mobile` does not exist yet (`apps/desktop` is now scaffolded). Its script
-is already wired up, and running it today prints:
-
-```
-No projects matched the filters in "<repo root>"
-```
-
-**This exits 0 — it is a silent no-op, not an error.** Don't read a passing
-exit code from `pnpm build:mobile` as "the mobile app built". The same
-applies to `pnpm build` and `pnpm test`: they succeed while doing nothing for
-components that don't exist. Once the apps are scaffolded, the commands start
-working with no changes to the root `package.json`.
+> Every component is now scaffolded, so `pnpm -r` commands no longer skip
+> anything. If a future `apps/*` package has no `build` or `test` script,
+> `--if-present` still skips it silently — a passing exit code is not by itself
+> proof that a given component built.
 
 ## Desktop specifics
 
@@ -103,6 +94,60 @@ Packaging beyond Tauri's own bundles lives in `packaging/` — Arch PKGBUILDs an
 a Flatpak manifest, both exercised by `.github/workflows/release-desktop.yml`.
 macOS builds are unsigned; see
 [`DESKTOP_MACOS_UNSIGNED.md`](./DESKTOP_MACOS_UNSIGNED.md).
+
+## Mobile specifics
+
+**Android only — iOS is out of scope.**
+
+```sh
+pnpm build:mobile      # === pnpm --filter mobile tauri android build
+```
+
+Output lands in `apps/mobile/src-tauri/gen/android/app/build/outputs/`:
+`apk/universal/<variant>/*.apk` and `bundle/universal<Variant>/*.aab`.
+
+### Extra prerequisites
+
+Beyond the shared Tauri dependencies, mobile needs:
+
+- **JDK 21** (Gradle / Android Gradle Plugin).
+- **Android SDK** with a platform and build-tools, plus the **NDK**.
+- The four Rust Android targets:
+
+  ```sh
+  rustup target add aarch64-linux-android armv7-linux-androideabi \
+      i686-linux-android x86_64-linux-android
+  ```
+
+- `ANDROID_HOME`, `NDK_HOME` and `JAVA_HOME` exported. Point them at your own
+  SDK install — paths are machine-specific and intentionally not committed
+  anywhere in this repo.
+
+Without an Android SDK/NDK, `pnpm build:mobile` cannot run at all; nothing else
+in the repo needs it.
+
+### The Gradle project is generated, not committed
+
+`apps/mobile/src-tauri/gen/` is gitignored. A fresh checkout has no Android
+project until you generate one:
+
+```sh
+pnpm --filter mobile tauri android init
+```
+
+This derives `applicationId`, `versionCode` and `versionName` from
+`tauri.conf.json`, which is why that file is the source of truth and the
+generated Gradle files must never be hand-edited. See
+[`VERSIONING.md`](./VERSIONING.md). CI runs the same `init` step for the same
+reason.
+
+### Signing
+
+Debug builds are signed with Gradle's debug keystore and are **not** release
+artifacts. **Release signing is not implemented** — no keystore, no Play Store
+publishing. It is a deliberate follow-up, mirroring how desktop code-signing was
+deferred, and needs a keystore in GitHub Secrets plus a Gradle signing config.
+`.github/workflows/release-mobile.yml` therefore builds a debug APK only.
 
 ## Desktop local testing
 

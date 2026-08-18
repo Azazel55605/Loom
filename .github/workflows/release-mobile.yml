@@ -1,0 +1,114 @@
+name: Release mobile
+
+# Tags follow `v<semver>-<component>`, e.g. `v0.1.0-mobile`, so each product
+# releases independently — matching versions.json. See docs/VERSIONING.md.
+#
+# SCOPE: Android only. iOS is deliberately out of scope.
+on:
+  push:
+    tags:
+      - 'v*.*.*-mobile'
+
+permissions:
+  contents: read
+
+jobs:
+  check-version:
+    name: Verify tag matches versions.json
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # Safety check: the tag and versions.json must agree, or the release is
+      # publishing something other than what the repo says it is.
+      - name: Compare tag against versions.json
+        id: version
+        run: |
+          set -euo pipefail
+          tag="${GITHUB_REF_NAME}"
+          tag_version="${tag#v}"
+          tag_version="${tag_version%-mobile}"
+          file_version="$(jq -r '."mobile"' versions.json)"
+
+          echo "tag version:          $tag_version"
+          echo "versions.json entry:  $file_version"
+
+          if [ "$tag_version" != "$file_version" ]; then
+            echo "::error::Tag $tag implies version $tag_version but versions.json says $file_version. Update versions.json, run 'pnpm versions:sync', and re-tag."
+            exit 1
+          fi
+
+          echo "version=$tag_version" >> "$GITHUB_OUTPUT"
+
+  build-android:
+    name: Build debug APK
+    needs: check-version
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install pnpm
+        uses: pnpm/action-setup@v4
+
+      - name: Install Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: pnpm
+
+      # Tauri's Android tooling runs Gradle, which needs a JDK. 21 is the
+      # current LTS the Android Gradle Plugin supports.
+      - name: Install JDK
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+
+      - name: Install Android SDK
+        uses: android-actions/setup-android@v3
+        with:
+          packages: 'platforms;android-36 build-tools;36.0.0 ndk;27.0.12077973'
+
+      - name: Point Tauri at the NDK
+        run: echo "NDK_HOME=$ANDROID_HOME/ndk/27.0.12077973" >> "$GITHUB_ENV"
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-linux-android,armv7-linux-androideabi,i686-linux-android,x86_64-linux-android
+
+      - name: Cache Rust build
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: apps/mobile/src-tauri -> target
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      # Required: src-tauri/gen/ is gitignored, so the Gradle project does not
+      # exist in a fresh checkout. This generates it from tauri.conf.json, which
+      # is what makes the identifier and versionCode authoritative there.
+      - name: Initialise Android project
+        run: pnpm --filter mobile tauri android init
+
+      # DEBUG BUILD ONLY — the APK is unsigned (debug-keystore signed by Gradle)
+      # and is not installable as a Play Store artifact.
+      #
+      # NOTE: release signing is a deliberate follow-up, consistent with how
+      # desktop code-signing/notarization was deferred. It needs a keystore held
+      # in GitHub Secrets, the signing config wired into the Gradle project, and
+      # a decision about Play Store publishing. Not attempted here: proving the
+      # pipeline comes first.
+      - name: Build unsigned debug APK
+        run: pnpm --filter mobile tauri android build --debug
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: loom-mobile-${{ needs.check-version.outputs.version }}-debug-apk
+          path: apps/mobile/src-tauri/gen/android/app/build/outputs/apk/**/debug/*.apk
+          if-no-files-found: error

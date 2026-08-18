@@ -3,5 +3,6 @@
   "web-backend": "0.1.0",
   "web-frontend": "0.1.0",
   "desktop": "0.1.0",
-  "mobile": "0.1.0"
+  "mobile": "0.1.0",
+  "mobile-android-version-code": 1
 }

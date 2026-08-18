@@ -1,0 +1,17 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" width="1024" height="1024">
+  <rect width="1024" height="1024" rx="232" fill="#09090b"/>
+  <g fill="none" stroke="#fafafa" stroke-width="60" stroke-linecap="round">
+    <!-- warp: left thread over the top weft, under the bottom weft -->
+    <path d="M420 300 V548"/>
+    <path d="M420 660 V724"/>
+    <!-- warp: right thread under the top weft, over the bottom weft -->
+    <path d="M604 300 V364"/>
+    <path d="M604 476 V724"/>
+    <!-- weft: top thread under the left warp, over the right warp -->
+    <path d="M300 420 H364"/>
+    <path d="M476 420 H724"/>
+    <!-- weft: bottom thread over the left warp, under the right warp -->
+    <path d="M300 604 H548"/>
+    <path d="M660 604 H724"/>
+  </g>
+</svg>

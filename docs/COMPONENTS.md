@@ -39,18 +39,18 @@ rarely; this file changes constantly.
 
 The shared UI kit in `crates/core` has not been started yet, so each client
 carries its own copy under `apps/<app>/src/components/`. Several components are
-now duplicated between `web-frontend` and `desktop` — that duplication is
+now duplicated across `web-frontend`, `desktop` and `mobile` — that duplication is
 precisely what the shared kit is meant to remove, and the "Used in" column below
 is what makes it visible. Components consumed by more than one client should
 move into the kit once it exists.
 
 | Component | Source | Variants | Used in | Notes |
 | --------- | ------ | -------- | ------- | ----- |
-| `Card` | shadcn | — | web-frontend, desktop | Includes `CardHeader`, `CardTitle`, `CardDescription`, `CardContent`, `CardFooter`. Uses the `.surface-elevated` class so the blur/reduced-transparency tokens apply. |
-| `Badge` | shadcn | `default`, `secondary`, `destructive`, `outline` | web-frontend, desktop | `default` resolves from the accent token via Tailwind's `primary` colour. |
+| `Card` | shadcn | — | web-frontend, desktop, mobile | Includes `CardHeader`, `CardTitle`, `CardDescription`, `CardContent`, `CardFooter`. Uses the `.surface-elevated` class so the blur/reduced-transparency tokens apply. |
+| `Badge` | shadcn | `default`, `secondary`, `destructive`, `outline` | web-frontend, desktop, mobile | `default` resolves from the accent token via Tailwind's `primary` colour. |
 | `Skeleton` | shadcn | — | web-frontend | Loading state for the health fetch. Animation is suppressed by the global `prefers-reduced-motion` rule in `index.css`. |
-| `Alert` | shadcn | `default`, `destructive` | web-frontend, desktop | Includes `AlertTitle`, `AlertDescription`. Error state for an unreachable backend; icon from `lucide-react`. |
-| `Input` | shadcn | — | desktop | Used as-is for the server URL field. Themed replacement for a native `<input>`, per docs/UI_GUIDELINES.md. |
-| `Button` | shadcn | `default`, `destructive`, `outline`, `secondary`, `ghost`, `link` (sizes `default`, `sm`, `lg`, `icon`) | desktop | Submit control for the server URL form. |
-| `ServerUrlField` | custom | — | desktop | Thin composition of `Input` + `Button`, not a new primitive — it adds the form wrapper (submit on Enter) and labelling only. Exists because desktop builds must reach a user-chosen server at runtime, whereas web-frontend bakes its API URL in at build time. No Radix primitive needed: the underlying elements are already shadcn components. |
-| `AccentThemeProvider` | custom | — | web-frontend, desktop | Theme provider, not a visual component. Writes the `--accent` HSL triplet to the document root and exposes `useAccentTheme()`. No Radix primitive needed — it renders no interactive UI. |
+| `Alert` | shadcn | `default`, `destructive` | web-frontend, desktop, mobile | Includes `AlertTitle`, `AlertDescription`. Error state for an unreachable backend; icon from `lucide-react`. |
+| `Input` | shadcn | — | desktop, mobile | Used as-is for the server URL field. Themed replacement for a native `<input>`, per docs/UI_GUIDELINES.md. |
+| `Button` | shadcn | `default`, `destructive`, `outline`, `secondary`, `ghost`, `link` (sizes `default`, `sm`, `lg`, `icon`) | desktop, mobile | Submit control for the server URL form. |
+| `ServerUrlField` | custom | — | desktop, mobile | Thin composition of `Input` + `Button`, not a new primitive — it adds the form wrapper (submit on Enter) and labelling only. Exists because desktop builds must reach a user-chosen server at runtime, whereas web-frontend bakes its API URL in at build time. No Radix primitive needed: the underlying elements are already shadcn components. |
+| `AccentThemeProvider` | custom | — | web-frontend, desktop, mobile | Theme provider, not a visual component. Writes the `--accent` HSL triplet to the document root and exposes `useAccentTheme()`. No Radix primitive needed — it renders no interactive UI. |
