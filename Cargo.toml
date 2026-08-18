@@ -1,0 +1,17 @@
+[workspace]
+resolver = "2"
+members = ["crates/core", "crates/web-backend"]
+
+[workspace.package]
+edition = "2021"
+license = "MIT"
+repository = "https://github.com/azazel/loom"
+rust-version = "1.82"
+
+[workspace.dependencies]
+loom-core = { path = "crates/core" }
+axum = "0.8"
+serde = { version = "1", features = ["derive"] }
+tokio = { version = "1", features = ["full"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }

@@ -1,0 +1,10 @@
+[package]
+name = "loom-core"
+description = "Shared library for Loom: connector logic, business logic, and (later) the shared UI kit."
+edition.workspace = true
+license.workspace = true
+version = "0.1.0"
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]

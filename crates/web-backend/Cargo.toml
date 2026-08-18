@@ -1,0 +1,20 @@
+[package]
+name = "loom-web-backend"
+description = "The Loom server: the one running daemon, and the only thing clients talk to."
+edition.workspace = true
+license.workspace = true
+version = "0.1.0"
+repository.workspace = true
+rust-version.workspace = true
+
+[[bin]]
+name = "loom-web-backend"
+path = "src/main.rs"
+
+[dependencies]
+loom-core.workspace = true
+axum.workspace = true
+serde.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true

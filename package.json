@@ -1,0 +1,8 @@
+{
+  "name": "loom",
+  "private": true,
+  "scripts": {
+    "versions:sync": "node scripts/sync-versions.mjs",
+    "versions:sync:check": "node scripts/sync-versions.mjs --check"
+  }
+}

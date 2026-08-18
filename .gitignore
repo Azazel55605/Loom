@@ -1,0 +1,31 @@
+# Rust build output
+/target
+**/*.rs.bk
+
+# Cargo.lock is intentionally NOT ignored: this workspace produces a binary,
+# so the lockfile is committed for reproducible builds.
+
+# Local environment — real secrets never get committed. Copy .env.example.
+.env
+.env.local
+.env.*.local
+
+# OS cruft
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Editors
+.idea/
+*.swp
+*.swo
+*~
+# .vscode/ is intentionally kept — shared editor config may be committed.
+
+# Node
+node_modules/
+
+# User content
+AGENTS.md
+CLAUDE.md
+docs/AGENT_INSTRUCTIONS.md
