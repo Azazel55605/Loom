@@ -431,6 +431,90 @@ that ignores this array learns nothing it could not have learned by trying. Note
 that today the server does not yet check these on connector routes at all — see
 [Known temporary behavior](#known-temporary-behavior).
 
+### Permission enforcement
+
+Every route except `/health`, `/setup/status`, `/setup`, `/auth/login`,
+`/auth/refresh`, and `/auth/logout` requires a valid access token and a grant.
+
+**401 and 403 mean different things and are not interchangeable.** 401 is "you
+are not authenticated" — no token, a bad signature, an expired token — and a
+client should refresh and retry. 403 is "you are authenticated and the answer is
+still no"; refreshing will not change it. Returning 401 for a permission failure
+makes a client retry the login it already completed.
+
+The check reads the **claims in the access token**, not the database. That is
+what keeps an authenticated request to one signature verification, and it means
+a grant added or revoked right now reaches a user on their next refresh — at
+most 15 minutes. See [ADR 0008](./adr/0008-auth-model.md).
+
+#### Scope matching
+
+A grant matches a check when the key matches and the grant's scope covers what
+was asked for:
+
+| Grant scope | Covers |
+| --- | --- |
+| `resourceType` null, `resourceId` null | every resource of every type, and any global check |
+| `resourceType` set, `resourceId` null | every resource of that type |
+| `resourceType` and `resourceId` set | exactly that one resource |
+
+The asymmetry is deliberate and load-bearing:
+
+- **A global grant satisfies a scoped check.** "May control every connector"
+  plainly includes "may control this one".
+- **A scoped grant does not satisfy a global check.** Holding
+  `connectors.control` over one connector is not authority over connectors in
+  general. Treating it as such would silently widen every narrow grant into a
+  broad one, which would defeat the point of scoping.
+
+#### What each route requires
+
+| Route | Permission | Scope checked |
+| --- | --- | --- |
+| `GET /connectors` | `connectors.view` | global |
+| `POST /connectors/{id}/actions/{actionId}` | `connectors.control` | `connector` / `{id}` |
+| `GET /users`, `POST /users`, `PATCH /users/{id}`, `DELETE /users/{id}` | `users.manage` | global |
+| `GET /groups`, `POST /groups`, `PATCH /groups/{id}`, `DELETE /groups/{id}` | `groups.manage` | global |
+| `GET /permissions` | `groups.manage` | global |
+
+`GET /connectors` requires a **global** `connectors.view`, so a user holding
+only a connector-scoped view grant is refused rather than shown a filtered list.
+Filtering the response to what the caller may see would be friendlier and is the
+natural next step — it is not built because nothing issues scoped view grants
+yet, and a filter with no way to create the case it filters cannot be tested
+against reality.
+
+A 403 on the action route is returned **before** the connector id is looked up,
+so an unauthorized caller gets the same response whether or not the id exists.
+Otherwise the endpoint would report 404 for unknown ids and 403 for real ones,
+which is a way to enumerate what is configured.
+
+### Safeguards
+
+Two rules protect an instance from being administered into a state nobody can
+administer it out of. Both return **409 Conflict** and change nothing.
+
+**The last active administrator cannot be removed.** Deactivating, deleting, or
+removing from the protected group the only remaining active member of it is
+refused. Losing it means losing `users.manage` and `groups.manage` instance-wide
+with no way back short of editing the database by hand. The check runs inside
+the same transaction as the write it guards, against the state the commit *would*
+produce, so every route to an empty administrator set is caught by one rule.
+
+**Nobody may remove themselves.** Refused even when other administrators exist,
+because an accidental self-deletion is unrecoverable by the person best placed
+to notice it. Deleting someone else remains available for a genuine departure.
+
+**The protected group cannot be deleted.** Checked on an `isProtected` column,
+not on the group's name — a name is a label users change, and a check comparing
+against the literal string `Administrators` would stop protecting the group the
+moment someone renamed it. The flag guards deletion only: the group may still be
+renamed and re-granted, which are legitimate administrative acts.
+
+Neither user safeguard is a security control. An administrator can still grant
+someone else the Administrators group and have them do it. They guard against
+mistakes, which is the failure mode that actually happens.
+
 ### Access token claims
 
 For clients that decode the JWT rather than calling `/auth/session`:
@@ -591,6 +675,208 @@ A 200 with `success: false` is a normal answer, not an error; see
 | 502 | `ConnectorError::Unreachable` or `ConnectorError::AuthFailed`. |
 | 500 | `ConnectorError::Internal`. |
 | 404 | The feature is not compiled in. |
+
+## Administration
+
+All of these require a **global** grant, and all return **403** without one and
+**401** without a valid token. Those two cases are not repeated in the tables
+below.
+
+### `GET /users`
+
+Requires `users.manage`.
+
+**Response 200:**
+
+```json
+[
+  {
+    "id": "9d1f8c2e-4b7a-4c3d-9e21-0a5b6c7d8e9f",
+    "username": "admin",
+    "isActive": true,
+    "createdAt": "2026-08-19T17:04:11.882401Z",
+    "groupIds": ["00000000-0000-4000-8000-000000000001"]
+  }
+]
+```
+
+**There is no password field, and there must never be one.** A password hash is
+not secret in the way a password is, but publishing it hands an attacker an
+offline target they can work on at their own pace.
+
+### `POST /users`
+
+Requires `users.manage`.
+
+```json
+{
+  "username": "housemate",
+  "password": "a-good-password",
+  "groupIds": ["<group id>"]
+}
+```
+
+`groupIds` may be omitted or empty — an account with no groups can sign in and
+do nothing, which is a valid state. The password floor is **8 characters**, the
+same constant `POST /setup` uses, so the rule cannot drift between the two ways
+an account is created.
+
+**Response 201** — the created user, in the `GET /users` shape.
+
+| Status | Meaning |
+| --- | --- |
+| 201 | Created. |
+| 400 | Empty username, password under 8 characters, or an unknown group id. |
+| 409 | That username is taken. |
+
+### `PATCH /users/{id}`
+
+Requires `users.manage`. Both fields are optional; an absent field is left
+alone.
+
+```json
+{ "isActive": false, "groupIds": ["<group id>"] }
+```
+
+`groupIds` **replaces** membership wholesale rather than applying a delta: the
+caller states the membership it wants and gets exactly that, with no dependence
+on what it believed the previous state to be.
+
+**Response 200** — the updated user.
+
+| Status | Meaning |
+| --- | --- |
+| 200 | Applied. |
+| 400 | An unknown group id. |
+| 404 | No such user. |
+| 409 | [A safeguard refused it](#safeguards): this is you, or it would leave no active administrator. |
+
+### `DELETE /users/{id}`
+
+Requires `users.manage`. **Response 204**, no body.
+
+A hard delete: the row goes, and `ON DELETE CASCADE` takes the user's group
+memberships and refresh tokens with it — which also ends their sessions, since a
+refresh token that no longer exists cannot be redeemed.
+
+Hard rather than soft because nothing yet references a user row historically —
+no audit log, no "created by", no ownership. **That should be revisited the
+moment one exists**, at which point deleting a user either orphans history or
+silently rewrites it, and deactivation becomes the right default. Deactivation
+is already available through `PATCH`.
+
+| Status | Meaning |
+| --- | --- |
+| 204 | Deleted. |
+| 404 | No such user. |
+| 409 | [A safeguard refused it](#safeguards). |
+
+### `GET /groups`
+
+Requires `groups.manage`.
+
+**Response 200:**
+
+```json
+[
+  {
+    "id": "00000000-0000-4000-8000-000000000001",
+    "name": "Administrators",
+    "description": "Full access to every permission across every resource.",
+    "createdAt": "2026-08-19T00:00:00Z",
+    "isProtected": true,
+    "memberCount": 1,
+    "permissions": [
+      { "key": "connectors.control", "resourceType": null, "resourceId": null }
+    ]
+  }
+]
+```
+
+`isProtected` marks a group that cannot be deleted. Clients should hide or
+disable the delete control for it rather than let the user find out through a
+409.
+
+### `POST /groups`
+
+Requires `groups.manage`.
+
+```json
+{
+  "name": "Viewers",
+  "description": "Read-only access.",
+  "permissions": [
+    { "key": "connectors.view", "resourceType": null, "resourceId": null }
+  ]
+}
+```
+
+**Response 201** — the created group. New groups are never protected.
+
+| Status | Meaning |
+| --- | --- |
+| 201 | Created. |
+| 400 | Empty name, or a permission key not in the catalog. |
+| 409 | That name is taken. |
+
+An unregistered permission key is a **400**, not a silently stored grant. The
+foreign key onto `permissions` is what enforces it, so a typo like
+`connectors.contorl` fails loudly instead of becoming a grant that authorizes
+nothing and looks correct in a UI.
+
+### `PATCH /groups/{id}`
+
+Requires `groups.manage`. All fields optional; absent means unchanged.
+
+```json
+{ "name": "Operators", "description": null, "permissions": [] }
+```
+
+`permissions` replaces the group's grants wholesale, on the same reasoning as
+user membership.
+
+A protected group **may** be renamed and re-granted — only deletion is refused.
+Blocking edits would push operators into working around the safeguard rather
+than with it.
+
+| Status | Meaning |
+| --- | --- |
+| 200 | Applied. |
+| 400 | Empty name, or an unregistered permission key. |
+| 404 | No such group. |
+
+### `DELETE /groups/{id}`
+
+Requires `groups.manage`. **Response 204**, no body.
+
+Memberships and grants go with it via cascade. Users are not touched: losing a
+group removes what it granted, not the accounts that held it.
+
+| Status | Meaning |
+| --- | --- |
+| 204 | Deleted. |
+| 404 | No such group. |
+| 409 | The group is protected. See [Safeguards](#safeguards). |
+
+### `GET /permissions`
+
+Requires `groups.manage` — assigning grants is the only thing this is for.
+
+**Response 200:**
+
+```json
+[
+  { "key": "connectors.control", "description": "Execute actions on connectors." },
+  { "key": "connectors.view",    "description": "View connectors and their status." },
+  { "key": "groups.manage",      "description": "Create and modify groups and their permission grants." },
+  { "key": "system.settings",    "description": "Change instance-wide settings." },
+  { "key": "users.manage",       "description": "Create, modify, and deactivate user accounts." }
+]
+```
+
+The catalog exists so a client can build a grant-assignment form without
+hardcoding a list that would silently fall out of date the next time a migration
+registers a key.
 
 ## `ConnectorError` to HTTP status
 
@@ -782,21 +1068,18 @@ A connector needing no configuration returns an empty schema object rather than
 Authentication is real. Several things around it are not finished, and the first
 one is the important one.
 
-- **Authorization is not enforced.** This is the big one. Permissions are
-  computed, stored, and delivered in access-token claims, but **no middleware
-  consults them**: `GET /connectors` and `POST /connectors/{id}/actions/...`
-  accept any caller, authenticated or not, exactly as they did under the stub.
-  An instance running this build is authenticated but **not access-controlled**.
-  The enforcement middleware is the deliberate next step; until it lands, do not
-  expose an instance to anyone you would not give full control to.
-- **There are no user or group management endpoints.** The only account that can
-  be created is the first administrator, through `POST /setup`. Adding users,
-  creating groups, and granting scoped permissions all require editing the
-  database directly for now.
 - **The Administrators group is seeded, not maintained.** It receives a global
   grant of every permission registered at migration time. A future migration
   adding a permission key must also decide whether Administrators gets it —
   adding a row to `permissions` alone does not extend the group.
+- **`system.settings` is registered and granted but enforced nowhere**, because
+  no settings endpoint exists yet.
+- **`GET /connectors` requires a global view grant** rather than filtering the
+  list per grant. See [Permission enforcement](#permission-enforcement).
+- **Permission changes take up to 15 minutes to take effect** for a signed-in
+  user, since checks read the access token's claims. Revoking a grant does not
+  end a session already holding it; deactivating or deleting the account does,
+  at their next refresh.
 - **Logout is per-token.** Revoking one refresh token leaves other devices
   signed in, and cannot recall an access token already issued. There is no "sign
   out everywhere".

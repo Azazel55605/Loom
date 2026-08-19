@@ -20,8 +20,18 @@ use loom_core::connector::{ConnectorAction, ConnectorError, ConnectorMetadata, C
 use serde::Serialize;
 use serde_json::Value;
 
+use crate::auth::extract::{
+    AuthenticatedUser, ConnectorsControl, ConnectorsView, Permission, RequirePermission,
+};
 use crate::error::ErrorBody;
 use crate::state::AppState;
+
+/// The `resource_type` connectors are scoped by in `group_permissions`.
+///
+/// One constant rather than a literal at each call site: a typo in a scope
+/// string does not fail to compile, it silently fails to match, which means a
+/// grant that quietly authorizes nothing.
+pub const CONNECTOR_RESOURCE_TYPE: &str = "connector";
 
 /// One entry in `GET /connectors`.
 ///
@@ -46,7 +56,20 @@ pub struct ConnectorListEntry {
 }
 
 /// `GET /connectors`
-pub async fn list_connectors(State(state): State<AppState>) -> Json<Vec<ConnectorListEntry>> {
+///
+/// Requires a **global** `connectors.view` grant.
+///
+/// Worth noting what that excludes: a user granted `connectors.view` scoped to
+/// a single connector is refused here rather than shown a one-element list. The
+/// alternative — accept any `connectors.view` grant and filter the response to
+/// what the caller may see — is friendlier and is what this should become once
+/// scoped view grants are actually issued. It is not built yet because nothing
+/// issues them, and a filter with no way to create the case it filters is a
+/// feature that cannot be tested against reality.
+pub async fn list_connectors(
+    _caller: RequirePermission<ConnectorsView>,
+    State(state): State<AppState>,
+) -> Json<Vec<ConnectorListEntry>> {
     let mut entries = Vec::with_capacity(state.connectors.len());
 
     for connector in state.connectors.iter() {
@@ -67,11 +90,31 @@ pub async fn list_connectors(State(state): State<AppState>) -> Json<Vec<Connecto
 }
 
 /// `POST /connectors/{id}/actions/{action_id}`
+///
+/// Requires `connectors.control` over this specific connector. A global grant
+/// covers every connector; a grant scoped to `connector:<id>` covers only that
+/// one.
+///
+/// The check runs **before** the connector is looked up, so a caller without
+/// permission gets 403 whether or not the id exists. Looking up first would
+/// answer 404 for an unknown id and 403 for a known one, turning this endpoint
+/// into a way to enumerate which connectors are configured.
 pub async fn execute_action(
+    caller: AuthenticatedUser,
     State(state): State<AppState>,
     Path((id, action_id)): Path<(String, String)>,
     body: Bytes,
 ) -> Response {
+    // Resource-scoped, so the requirement is checked here rather than in the
+    // signature: the resource id only exists once the path has been parsed.
+    if let Some(denied) = caller.deny_unless(
+        ConnectorsControl::KEY,
+        Some(CONNECTOR_RESOURCE_TYPE),
+        Some(&id),
+    ) {
+        return denied;
+    }
+
     let Some(connector) = state.connector(&id) else {
         return ErrorBody::message(StatusCode::NOT_FOUND, format!("no such connector: {id}"));
     };

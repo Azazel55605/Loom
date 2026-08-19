@@ -256,6 +256,106 @@ mod tests {
             .expect("valid request")
     }
 
+    fn post_json_auth(uri: &str, token: &str, body: serde_json::Value) -> Request<Body> {
+        Request::builder()
+            .method("POST")
+            .uri(uri)
+            .header("content-type", "application/json")
+            .header("authorization", format!("Bearer {token}"))
+            .body(Body::from(body.to_string()))
+            .expect("valid request")
+    }
+
+    fn patch_json_auth(uri: &str, token: &str, body: serde_json::Value) -> Request<Body> {
+        Request::builder()
+            .method("PATCH")
+            .uri(uri)
+            .header("content-type", "application/json")
+            .header("authorization", format!("Bearer {token}"))
+            .body(Body::from(body.to_string()))
+            .expect("valid request")
+    }
+
+    fn delete_auth(uri: &str, token: &str) -> Request<Body> {
+        Request::builder()
+            .method("DELETE")
+            .uri(uri)
+            .header("authorization", format!("Bearer {token}"))
+            .body(Body::empty())
+            .expect("valid request")
+    }
+
+    fn bearer(token: &str) -> String {
+        format!("Bearer {token}")
+    }
+
+    /// Creates a user, puts them in a group with exactly `grants`, and returns
+    /// their access token.
+    ///
+    /// Goes through the real endpoints rather than writing rows directly, so
+    /// the fixtures exercise the same validation and enforcement paths the
+    /// tests are about.
+    async fn user_with_grants(
+        app: &Router,
+        admin: &str,
+        username: &str,
+        grants: serde_json::Value,
+    ) -> String {
+        let (status, group) = send(
+            app,
+            post_json_auth(
+                "/groups",
+                admin,
+                serde_json::json!({
+                    "name": format!("{username}-group"),
+                    "description": null,
+                    "permissions": grants,
+                }),
+            ),
+        )
+        .await;
+        assert_eq!(
+            status,
+            StatusCode::CREATED,
+            "group create failed: {group:#}"
+        );
+        let group_id = group["id"].as_str().expect("group id").to_owned();
+
+        let (status, created) = send(
+            app,
+            post_json_auth(
+                "/users",
+                admin,
+                serde_json::json!({
+                    "username": username,
+                    "password": "a-good-password",
+                    "groupIds": [group_id],
+                }),
+            ),
+        )
+        .await;
+        assert_eq!(
+            status,
+            StatusCode::CREATED,
+            "user create failed: {created:#}"
+        );
+
+        let (status, tokens) = send(
+            app,
+            post_json(
+                "/auth/login",
+                serde_json::json!({ "username": username, "password": "a-good-password" }),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "login failed: {tokens:#}");
+
+        tokens["accessToken"]
+            .as_str()
+            .expect("accessToken")
+            .to_owned()
+    }
+
     fn setup_body() -> serde_json::Value {
         serde_json::json!({
             "instanceName": "Example Homelab",
@@ -586,10 +686,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn connector_routes_still_work_after_the_stub_was_removed() {
+    async fn connector_routes_work_for_an_administrator() {
         let app = test_app().await;
+        let (access, _) = setup_and_login(&app.router).await;
 
-        let (status, body) = send(&app.router, get("/connectors")).await;
+        let (status, body) =
+            send(&app.router, get_with_auth("/connectors", &bearer(&access))).await;
         assert_eq!(status, StatusCode::OK);
         let entries = body.as_array().expect("array");
         assert_eq!(entries.len(), 1);
@@ -606,7 +708,11 @@ mod tests {
 
         let (status, body) = send(
             &app.router,
-            post_json("/connectors/mock/actions/restart", serde_json::json!({})),
+            post_json_auth(
+                "/connectors/mock/actions/restart",
+                &access,
+                serde_json::json!({}),
+            ),
         )
         .await;
         assert_eq!(status, StatusCode::OK);
@@ -614,9 +720,752 @@ mod tests {
 
         let (status, _) = send(
             &app.router,
-            post_json("/connectors/nope/actions/ping", serde_json::json!({})),
+            post_json_auth(
+                "/connectors/nope/actions/ping",
+                &access,
+                serde_json::json!({}),
+            ),
         )
         .await;
         assert_eq!(status, StatusCode::NOT_FOUND);
+    }
+
+    /// Unauthenticated access must be 401, not 403: there is no identity yet.
+    #[tokio::test]
+    async fn connector_routes_reject_an_anonymous_caller() {
+        let app = test_app().await;
+        setup_and_login(&app.router).await;
+
+        let (list, _) = send(&app.router, get("/connectors")).await;
+        assert_eq!(list, StatusCode::UNAUTHORIZED);
+
+        let (action, _) = send(
+            &app.router,
+            post_json("/connectors/mock/actions/ping", serde_json::json!({})),
+        )
+        .await;
+        assert_eq!(action, StatusCode::UNAUTHORIZED);
+    }
+
+    /* ---------------------------------------------------------------- */
+    /* Permission enforcement                                            */
+    /* ---------------------------------------------------------------- */
+
+    /// Authenticated but ungranted must be **403, not 401**. A 401 would tell
+    /// the client to retry the login it already completed.
+    #[tokio::test]
+    async fn a_user_without_a_grant_is_forbidden_not_unauthorized() {
+        let app = test_app().await;
+        let (admin, _) = setup_and_login(&app.router).await;
+        let nobody = user_with_grants(&app.router, &admin, "nobody", serde_json::json!([])).await;
+
+        for request in [
+            get_with_auth("/connectors", &bearer(&nobody)),
+            get_with_auth("/users", &bearer(&nobody)),
+            get_with_auth("/groups", &bearer(&nobody)),
+            get_with_auth("/permissions", &bearer(&nobody)),
+        ] {
+            let (status, body) = send(&app.router, request).await;
+            assert_eq!(status, StatusCode::FORBIDDEN, "body was {body:#}");
+            assert!(body["error"].as_str().is_some_and(|e| !e.is_empty()));
+        }
+
+        let (status, _) = send(
+            &app.router,
+            post_json_auth(
+                "/connectors/mock/actions/ping",
+                &nobody,
+                serde_json::json!({}),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+    }
+
+    /// The three cases the resource-scoped check has to get right.
+    #[tokio::test]
+    async fn connector_action_respects_scoped_global_and_absent_grants() {
+        let app = test_app().await;
+        let (admin, _) = setup_and_login(&app.router).await;
+
+        // 1. A grant naming exactly the mock connector.
+        let scoped = user_with_grants(
+            &app.router,
+            &admin,
+            "scoped",
+            serde_json::json!([{
+                "key": "connectors.control",
+                "resourceType": "connector",
+                "resourceId": "mock",
+            }]),
+        )
+        .await;
+
+        // 2. A global grant.
+        let global = user_with_grants(
+            &app.router,
+            &admin,
+            "global",
+            serde_json::json!([{
+                "key": "connectors.control",
+                "resourceType": null,
+                "resourceId": null,
+            }]),
+        )
+        .await;
+
+        // 3. A grant for a *different* connector.
+        let elsewhere = user_with_grants(
+            &app.router,
+            &admin,
+            "elsewhere",
+            serde_json::json!([{
+                "key": "connectors.control",
+                "resourceType": "connector",
+                "resourceId": "some-other-connector",
+            }]),
+        )
+        .await;
+
+        let act = |token: &str| {
+            post_json_auth(
+                "/connectors/mock/actions/ping",
+                token,
+                serde_json::json!({}),
+            )
+        };
+
+        let (status, body) = send(&app.router, act(&scoped)).await;
+        assert_eq!(status, StatusCode::OK, "scoped grant must work: {body:#}");
+
+        let (status, body) = send(&app.router, act(&global)).await;
+        assert_eq!(status, StatusCode::OK, "global grant must work: {body:#}");
+
+        // The whole point of scoping: a grant for another connector authorizes
+        // nothing here.
+        let (status, _) = send(&app.router, act(&elsewhere)).await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+
+        // And a connector-scoped grant is not authority over connectors at
+        // large, so the global-only list endpoint still refuses it.
+        let (status, _) = send(&app.router, get_with_auth("/connectors", &bearer(&scoped))).await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+    }
+
+    /// A 403 must not depend on whether the resource exists, or the endpoint
+    /// becomes a way to enumerate configured connectors.
+    #[tokio::test]
+    async fn an_unauthorized_action_does_not_reveal_whether_the_connector_exists() {
+        let app = test_app().await;
+        let (admin, _) = setup_and_login(&app.router).await;
+        let nobody = user_with_grants(&app.router, &admin, "nobody", serde_json::json!([])).await;
+
+        let (real, real_body) = send(
+            &app.router,
+            post_json_auth(
+                "/connectors/mock/actions/ping",
+                &nobody,
+                serde_json::json!({}),
+            ),
+        )
+        .await;
+        let (fake, fake_body) = send(
+            &app.router,
+            post_json_auth(
+                "/connectors/ghost/actions/ping",
+                &nobody,
+                serde_json::json!({}),
+            ),
+        )
+        .await;
+
+        assert_eq!(real, StatusCode::FORBIDDEN);
+        assert_eq!(fake, StatusCode::FORBIDDEN);
+        assert_eq!(real_body, fake_body);
+    }
+
+    /* ---------------------------------------------------------------- */
+    /* User and group administration                                     */
+    /* ---------------------------------------------------------------- */
+
+    #[tokio::test]
+    async fn users_are_listed_without_password_hashes() {
+        let app = test_app().await;
+        let (admin, _) = setup_and_login(&app.router).await;
+
+        let (status, body) = send(&app.router, get_with_auth("/users", &bearer(&admin))).await;
+
+        assert_eq!(status, StatusCode::OK);
+        let users = body.as_array().expect("array");
+        assert_eq!(users.len(), 1);
+        assert_eq!(users[0]["username"], "admin");
+        assert_eq!(users[0]["isActive"], true);
+        assert_eq!(users[0]["groupIds"].as_array().expect("groups").len(), 1);
+
+        // The serialized text must not contain a hash anywhere, under any key.
+        let serialized = body.to_string();
+        assert!(!serialized.contains("password"), "leaked: {serialized}");
+        assert!(!serialized.contains("argon2"), "leaked: {serialized}");
+    }
+
+    #[tokio::test]
+    async fn creating_a_user_enforces_the_same_password_floor_as_setup() {
+        let app = test_app().await;
+        let (admin, _) = setup_and_login(&app.router).await;
+
+        let (status, body) = send(
+            &app.router,
+            post_json_auth(
+                "/users",
+                &admin,
+                serde_json::json!({ "username": "shorty", "password": "short" }),
+            ),
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert!(body["error"].as_str().expect("error").contains("8"));
+    }
+
+    #[tokio::test]
+    async fn duplicate_usernames_conflict() {
+        let app = test_app().await;
+        let (admin, _) = setup_and_login(&app.router).await;
+
+        let (status, _) = send(
+            &app.router,
+            post_json_auth(
+                "/users",
+                &admin,
+                serde_json::json!({ "username": "admin", "password": "a-good-password" }),
+            ),
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::CONFLICT);
+    }
+
+    #[tokio::test]
+    async fn the_permission_catalog_lists_every_registered_key() {
+        let app = test_app().await;
+        let (admin, _) = setup_and_login(&app.router).await;
+
+        let (status, body) =
+            send(&app.router, get_with_auth("/permissions", &bearer(&admin))).await;
+
+        assert_eq!(status, StatusCode::OK);
+        let keys: Vec<&str> = body
+            .as_array()
+            .expect("array")
+            .iter()
+            .map(|entry| entry["key"].as_str().expect("key"))
+            .collect();
+
+        assert_eq!(
+            keys,
+            vec![
+                "connectors.control",
+                "connectors.view",
+                "groups.manage",
+                "system.settings",
+                "users.manage",
+            ]
+        );
+    }
+
+    /* ---------------------------------------------------------------- */
+    /* Safeguards — a bug here locks an operator out of their instance    */
+    /* ---------------------------------------------------------------- */
+
+    #[tokio::test]
+    async fn the_last_administrator_cannot_be_deactivated() {
+        let app = test_app().await;
+        let (admin, _) = setup_and_login(&app.router).await;
+
+        // A second user who is NOT an administrator, so deactivating the admin
+        // would genuinely leave nobody.
+        let (status, other) = send(
+            &app.router,
+            post_json_auth(
+                "/users",
+                &admin,
+                serde_json::json!({ "username": "regular", "password": "a-good-password" }),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED);
+        let _ = other;
+
+        let (status, users) = send(&app.router, get_with_auth("/users", &bearer(&admin))).await;
+        assert_eq!(status, StatusCode::OK);
+        let admin_id = users
+            .as_array()
+            .expect("array")
+            .iter()
+            .find(|user| user["username"] == "admin")
+            .expect("admin present")["id"]
+            .as_str()
+            .expect("id")
+            .to_owned();
+
+        // Another administrator performs the change, so the self-removal rule
+        // is not what is being tested here.
+        let (status, _) = send(
+            &app.router,
+            post_json_auth(
+                "/users",
+                &admin,
+                serde_json::json!({
+                    "username": "admin2",
+                    "password": "a-good-password",
+                    "groupIds": ["00000000-0000-4000-8000-000000000001"],
+                }),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED);
+
+        let (status, tokens) = send(
+            &app.router,
+            post_json(
+                "/auth/login",
+                serde_json::json!({ "username": "admin2", "password": "a-good-password" }),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let admin2 = tokens["accessToken"].as_str().expect("token").to_owned();
+
+        // With two administrators, deactivating one is allowed.
+        let (status, body) = send(
+            &app.router,
+            patch_json_auth(
+                &format!("/users/{admin_id}"),
+                &admin2,
+                serde_json::json!({ "isActive": false }),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body:#}");
+
+        // Now admin2 is the last one, and cannot be removed by anyone.
+        let (status, users) = send(&app.router, get_with_auth("/users", &bearer(&admin2))).await;
+        assert_eq!(status, StatusCode::OK);
+        let admin2_id = users
+            .as_array()
+            .expect("array")
+            .iter()
+            .find(|user| user["username"] == "admin2")
+            .expect("admin2 present")["id"]
+            .as_str()
+            .expect("id")
+            .to_owned();
+
+        // Reactivate the first admin so a non-self caller exists again, then
+        // have them try to remove the last *active* administrator.
+        let (status, _) = send(
+            &app.router,
+            patch_json_auth(
+                &format!("/users/{admin_id}"),
+                &admin2,
+                serde_json::json!({ "isActive": true }),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+
+        // Two active admins again; remove one, leaving exactly one.
+        let (status, _) = send(
+            &app.router,
+            patch_json_auth(
+                &format!("/users/{admin2_id}"),
+                &admin,
+                serde_json::json!({ "isActive": false }),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+
+        // `admin` is now the only active administrator. admin2 is deactivated,
+        // so use admin's own token — and the self-removal rule catches it first,
+        // which is itself the protection. Verify the last-admin rule directly by
+        // stripping admin's groups via a second administrator instead.
+        let (status, body) = send(
+            &app.router,
+            patch_json_auth(
+                &format!("/users/{admin_id}"),
+                &admin,
+                serde_json::json!({ "groupIds": [] }),
+            ),
+        )
+        .await;
+        assert_eq!(
+            status,
+            StatusCode::CONFLICT,
+            "removing the last administrator's group must be refused: {body:#}"
+        );
+        assert!(body["error"]
+            .as_str()
+            .expect("error")
+            .contains("no active administrator"));
+
+        // And the instance is still administrable.
+        let (status, _) = send(&app.router, get_with_auth("/users", &bearer(&admin))).await;
+        assert_eq!(status, StatusCode::OK);
+    }
+
+    /// Deletion of the final administrator must be refused by the last-admin
+    /// safeguard itself.
+    ///
+    /// The caller here holds `users.manage` through an ordinary group and is
+    /// **not** an administrator, so nothing about this is caught by the
+    /// self-removal rule — an earlier version of this test leaned on that
+    /// accidentally and kept passing when the safeguard was disabled.
+    #[tokio::test]
+    async fn the_last_administrator_cannot_be_deleted() {
+        let app = test_app().await;
+        let (admin, _) = setup_and_login(&app.router).await;
+
+        // A user manager who is not in the protected group.
+        let manager = user_with_grants(
+            &app.router,
+            &admin,
+            "manager",
+            serde_json::json!([{
+                "key": "users.manage",
+                "resourceType": null,
+                "resourceId": null,
+            }]),
+        )
+        .await;
+
+        // A second administrator, so the first delete is legitimately allowed.
+        let (status, _) = send(
+            &app.router,
+            post_json_auth(
+                "/users",
+                &admin,
+                serde_json::json!({
+                    "username": "admin2",
+                    "password": "a-good-password",
+                    "groupIds": ["00000000-0000-4000-8000-000000000001"],
+                }),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED);
+
+        let (_, users) = send(&app.router, get_with_auth("/users", &bearer(&admin))).await;
+        let find = |name: &str| {
+            users
+                .as_array()
+                .expect("array")
+                .iter()
+                .find(|user| user["username"] == name)
+                .expect("user present")["id"]
+                .as_str()
+                .expect("id")
+                .to_owned()
+        };
+        let admin_id = find("admin");
+        let admin2_id = find("admin2");
+
+        // Two administrators: deleting one is fine.
+        let (status, body) = send(
+            &app.router,
+            delete_auth(&format!("/users/{admin_id}"), &manager),
+        )
+        .await;
+        assert_eq!(status, StatusCode::NO_CONTENT, "{body:#}");
+
+        // One left. The manager is not that administrator and is not deleting
+        // themselves, so only the last-admin safeguard can refuse this.
+        let (status, body) = send(
+            &app.router,
+            delete_auth(&format!("/users/{admin2_id}"), &manager),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CONFLICT, "{body:#}");
+        assert!(body["error"]
+            .as_str()
+            .expect("error")
+            .contains("no active administrator"));
+
+        // The row survived, and the instance still has an administrator.
+        let (status, users) = send(&app.router, get_with_auth("/users", &bearer(&manager))).await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(users
+            .as_array()
+            .expect("array")
+            .iter()
+            .any(|user| user["username"] == "admin2" && user["isActive"] == true));
+    }
+
+    /// Deactivating the final administrator must be refused too — the same
+    /// safeguard, reached by a different route. Again performed by a
+    /// non-administrator manager so the self-removal rule cannot mask it.
+    #[tokio::test]
+    async fn the_last_administrator_cannot_be_deactivated_by_someone_else() {
+        let app = test_app().await;
+        let (admin, _) = setup_and_login(&app.router).await;
+
+        let manager = user_with_grants(
+            &app.router,
+            &admin,
+            "manager",
+            serde_json::json!([{
+                "key": "users.manage",
+                "resourceType": null,
+                "resourceId": null,
+            }]),
+        )
+        .await;
+
+        let (_, users) = send(&app.router, get_with_auth("/users", &bearer(&admin))).await;
+        let admin_id = users
+            .as_array()
+            .expect("array")
+            .iter()
+            .find(|user| user["username"] == "admin")
+            .expect("admin present")["id"]
+            .as_str()
+            .expect("id")
+            .to_owned();
+
+        let (status, body) = send(
+            &app.router,
+            patch_json_auth(
+                &format!("/users/{admin_id}"),
+                &manager,
+                serde_json::json!({ "isActive": false }),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CONFLICT, "{body:#}");
+
+        // And stripping their group membership is refused by the same check.
+        let (status, body) = send(
+            &app.router,
+            patch_json_auth(
+                &format!("/users/{admin_id}"),
+                &manager,
+                serde_json::json!({ "groupIds": [] }),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CONFLICT, "{body:#}");
+
+        // Still an administrator, still active.
+        let (_, users) = send(&app.router, get_with_auth("/users", &bearer(&admin))).await;
+        let row = users
+            .as_array()
+            .expect("array")
+            .iter()
+            .find(|user| user["username"] == "admin")
+            .expect("admin present")
+            .clone();
+        assert_eq!(row["isActive"], true);
+        assert_eq!(row["groupIds"].as_array().expect("groups").len(), 1);
+    }
+
+    #[tokio::test]
+    async fn a_user_cannot_deactivate_or_delete_themselves() {
+        let app = test_app().await;
+        let (admin, _) = setup_and_login(&app.router).await;
+
+        // A second administrator exists, so the last-admin rule is not what is
+        // doing the refusing here.
+        let (status, _) = send(
+            &app.router,
+            post_json_auth(
+                "/users",
+                &admin,
+                serde_json::json!({
+                    "username": "admin2",
+                    "password": "a-good-password",
+                    "groupIds": ["00000000-0000-4000-8000-000000000001"],
+                }),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED);
+
+        let (_, users) = send(&app.router, get_with_auth("/users", &bearer(&admin))).await;
+        let admin_id = users
+            .as_array()
+            .expect("array")
+            .iter()
+            .find(|user| user["username"] == "admin")
+            .expect("admin present")["id"]
+            .as_str()
+            .expect("id")
+            .to_owned();
+
+        let (status, body) = send(
+            &app.router,
+            patch_json_auth(
+                &format!("/users/{admin_id}"),
+                &admin,
+                serde_json::json!({ "isActive": false }),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CONFLICT);
+        assert!(body["error"].as_str().expect("error").contains("your own"));
+
+        let (status, body) = send(
+            &app.router,
+            delete_auth(&format!("/users/{admin_id}"), &admin),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CONFLICT);
+        assert!(body["error"].as_str().expect("error").contains("your own"));
+
+        // Still active and still there.
+        let (_, users) = send(&app.router, get_with_auth("/users", &bearer(&admin))).await;
+        let admin_row = users
+            .as_array()
+            .expect("array")
+            .iter()
+            .find(|user| user["username"] == "admin")
+            .expect("admin still present")
+            .clone();
+        assert_eq!(admin_row["isActive"], true);
+    }
+
+    #[tokio::test]
+    async fn the_protected_group_cannot_be_deleted_even_after_a_rename() {
+        let app = test_app().await;
+        let (admin, _) = setup_and_login(&app.router).await;
+
+        let (status, groups) = send(&app.router, get_with_auth("/groups", &bearer(&admin))).await;
+        assert_eq!(status, StatusCode::OK);
+        let administrators = groups
+            .as_array()
+            .expect("array")
+            .iter()
+            .find(|group| group["isProtected"] == true)
+            .expect("a protected group exists")
+            .clone();
+        let group_id = administrators["id"].as_str().expect("id").to_owned();
+        assert_eq!(administrators["name"], "Administrators");
+        assert_eq!(administrators["memberCount"], 1);
+
+        let (status, body) = send(
+            &app.router,
+            delete_auth(&format!("/groups/{group_id}"), &admin),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CONFLICT);
+        assert!(body["error"].as_str().expect("error").contains("protected"));
+
+        // Renaming is allowed — and must not disable the protection, which is
+        // exactly what a name-matching check would do.
+        let (status, renamed) = send(
+            &app.router,
+            patch_json_auth(
+                &format!("/groups/{group_id}"),
+                &admin,
+                serde_json::json!({ "name": "Overlords" }),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{renamed:#}");
+        assert_eq!(renamed["name"], "Overlords");
+        assert_eq!(renamed["isProtected"], true);
+
+        let (status, _) = send(
+            &app.router,
+            delete_auth(&format!("/groups/{group_id}"), &admin),
+        )
+        .await;
+        assert_eq!(
+            status,
+            StatusCode::CONFLICT,
+            "a rename must not remove the protection"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_ordinary_group_can_be_created_edited_and_deleted() {
+        let app = test_app().await;
+        let (admin, _) = setup_and_login(&app.router).await;
+
+        let (status, created) = send(
+            &app.router,
+            post_json_auth(
+                "/groups",
+                &admin,
+                serde_json::json!({
+                    "name": "Viewers",
+                    "description": "Read-only access.",
+                    "permissions": [{
+                        "key": "connectors.view",
+                        "resourceType": null,
+                        "resourceId": null,
+                    }],
+                }),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED, "{created:#}");
+        assert_eq!(created["isProtected"], false);
+        let group_id = created["id"].as_str().expect("id").to_owned();
+
+        let (status, updated) = send(
+            &app.router,
+            patch_json_auth(
+                &format!("/groups/{group_id}"),
+                &admin,
+                serde_json::json!({
+                    "permissions": [
+                        { "key": "connectors.view", "resourceType": null, "resourceId": null },
+                        {
+                            "key": "connectors.control",
+                            "resourceType": "connector",
+                            "resourceId": "mock",
+                        },
+                    ],
+                }),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{updated:#}");
+        assert_eq!(updated["permissions"].as_array().expect("array").len(), 2);
+
+        let (status, _) = send(
+            &app.router,
+            delete_auth(&format!("/groups/{group_id}"), &admin),
+        )
+        .await;
+        assert_eq!(status, StatusCode::NO_CONTENT);
+    }
+
+    /// An unregistered permission key must be refused, not stored as a grant
+    /// that silently authorizes nothing.
+    #[tokio::test]
+    async fn an_unregistered_permission_key_is_rejected() {
+        let app = test_app().await;
+        let (admin, _) = setup_and_login(&app.router).await;
+
+        let (status, _) = send(
+            &app.router,
+            post_json_auth(
+                "/groups",
+                &admin,
+                serde_json::json!({
+                    "name": "Typo",
+                    "description": null,
+                    "permissions": [{
+                        "key": "connectors.contorl",
+                        "resourceType": null,
+                        "resourceId": null,
+                    }],
+                }),
+            ),
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::BAD_REQUEST);
     }
 }

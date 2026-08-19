@@ -8,14 +8,16 @@
 //! and call these paths directly. See
 //! `docs/adr/0006-frontend-api-same-origin.md`.
 
-use axum::routing::{get, post};
+use axum::routing::{get, patch, post};
 use axum::Router;
 
 use crate::state::AppState;
 
 pub mod auth;
 pub mod connectors;
+pub mod groups;
 pub mod setup;
+pub mod users;
 
 /// Every application route, ready to be merged into the root router.
 pub fn routes() -> Router<AppState> {
@@ -31,4 +33,18 @@ pub fn routes() -> Router<AppState> {
             "/connectors/{id}/actions/{action_id}",
             post(connectors::execute_action),
         )
+        .route("/users", get(users::list_users).post(users::create_user))
+        .route(
+            "/users/{id}",
+            patch(users::update_user).delete(users::delete_user),
+        )
+        .route(
+            "/groups",
+            get(groups::list_groups).post(groups::create_group),
+        )
+        .route(
+            "/groups/{id}",
+            patch(groups::update_group).delete(groups::delete_group),
+        )
+        .route("/permissions", get(groups::list_permissions))
 }

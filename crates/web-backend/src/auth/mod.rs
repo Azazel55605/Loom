@@ -9,6 +9,7 @@
 //! no idea any of this exists, which is the boundary `docs/ARCHITECTURE.md`
 //! requires.
 
+pub mod extract;
 pub mod password;
 pub mod permissions;
 pub mod secret;
