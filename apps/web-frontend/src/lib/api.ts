@@ -130,6 +130,24 @@ export type ConnectorSummary = {
   actions: ConnectorAction[];
 };
 
+/** `GET /setup/status` and `POST /setup` response. */
+export type SetupStatus = {
+  /** `false` when the instance still needs first-run setup. */
+  setupComplete: boolean;
+};
+
+/**
+ * `POST /setup` request.
+ *
+ * The stub reads and discards every value. The shape is what the real
+ * implementation needs, so the wizard is built against it now.
+ */
+export type SetupRequest = {
+  instanceName: string;
+  adminUsername: string;
+  adminPassword: string;
+};
+
 /** `POST /auth/login` response. */
 export type LoginResponse = {
   token: string;
@@ -170,19 +188,74 @@ export type Health = {
 export class ApiError extends Error {
   readonly status: number;
   readonly connectorError?: ConnectorError;
+  /**
+   * Whether the response carried an error body of the backend's own shape.
+   *
+   * This is what separates "the handler ran and rejected you" from "there is no
+   * handler". A 404 from `POST /connectors/{id}/actions/{actionId}` naming an
+   * unknown action arrives with `{"error": …}`; a 404 because the whole route
+   * is absent from the routing table arrives with nothing. The two need
+   * different explanations, and the status code alone cannot tell them apart.
+   */
+  readonly hasErrorBody: boolean;
 
-  constructor(status: number, message: string, connectorError?: ConnectorError) {
+  constructor(
+    status: number,
+    message: string,
+    options: { connectorError?: ConnectorError; hasErrorBody?: boolean } = {},
+  ) {
     super(message);
     this.name = "ApiError";
     this.status = status;
-    this.connectorError = connectorError;
+    this.connectorError = options.connectorError;
+    this.hasErrorBody = options.hasErrorBody ?? false;
   }
 
   /** True when the backend rejected our token and the session is over. */
   get isUnauthorized(): boolean {
     return this.status === 401;
   }
+
+  /**
+   * True when a setup attempt lost the race — the instance was already
+   * configured.
+   *
+   * Not an error from the caller's point of view: the end state is the one it
+   * was trying to reach, so the right response is to carry on to login.
+   */
+  get isAlreadyComplete(): boolean {
+    return this.status === 409;
+  }
+
+  /**
+   * True when the route itself does not exist — a 404 with no error body of
+   * ours behind it.
+   *
+   * In practice this means a backend built without the `dev-stub-auth` feature,
+   * which is every Docker image.
+   */
+  get isMissingRoute(): boolean {
+    return this.status === 404 && !this.hasErrorBody;
+  }
 }
+
+/**
+ * What a 404 on an auth or connector route actually means.
+ *
+ * These routes exist only in a backend built with the non-default
+ * `dev-stub-auth` feature. A backend without it does not 401 or return an empty
+ * list — the routes are absent from the routing table entirely, so the response
+ * is a 404 that says nothing about the cause. Every Docker image is such a
+ * build, deliberately and permanently: the feature must never ship, so a
+ * container can never serve these endpoints.
+ *
+ * Reporting the raw 404 sends people looking for a typo in a URL that is
+ * correct. This says the real thing instead.
+ */
+export const MISSING_STUB_BACKEND_MESSAGE =
+  "This backend has no auth or connector endpoints. They exist only in a " +
+  "development build started with `--features dev-stub-auth`, and never in a " +
+  "Docker image — see docs/BUILD.md.";
 
 /** The shared error body: `{ "error": string }`, plus `connectorError` when a
  *  connector produced the failure. */
@@ -240,14 +313,19 @@ async function toApiError(response: Response): Promise<ApiError> {
 
     try {
       const parsed = JSON.parse(text) as ErrorBody;
-      return new ApiError(
-        response.status,
-        parsed.error ?? fallback,
-        parsed.connectorError,
-      );
+      return new ApiError(response.status, parsed.error ?? fallback, {
+        connectorError: parsed.connectorError,
+        // Only a body carrying our own `error` field proves a handler produced
+        // this. Valid JSON alone does not.
+        hasErrorBody: typeof parsed.error === "string",
+      });
     } catch {
-      // A plain-text rejection from the extractor layer.
-      return new ApiError(response.status, text.trim() || fallback);
+      // A plain-text rejection from the extractor layer — axum's 415 and 422
+      // reject before any handler runs, but they are still deliberate answers
+      // about this request rather than a missing route.
+      return new ApiError(response.status, text.trim() || fallback, {
+        hasErrorBody: true,
+      });
     }
   } catch {
     return new ApiError(response.status, fallback);
@@ -261,6 +339,29 @@ async function toApiError(response: Response): Promise<ApiError> {
 /** `GET /health` — the only route present in a default backend build. */
 export function getHealth(signal?: AbortSignal): Promise<Health> {
   return request<Health>("/health", { signal });
+}
+
+/**
+ * `GET /setup/status` — whether this instance still needs first-run setup.
+ *
+ * Unauthenticated, necessarily: it is asked before anyone can hold a token.
+ */
+export function getSetupStatus(signal?: AbortSignal): Promise<SetupStatus> {
+  return request<SetupStatus>("/setup/status", { signal });
+}
+
+/**
+ * `POST /setup` — completes first-run setup.
+ *
+ * Throws an `ApiError` with status 409 when setup was already completed, which
+ * a caller should treat as success: the instance is configured, which is the
+ * outcome it wanted. See `isAlreadyComplete`.
+ */
+export function completeSetup(
+  data: SetupRequest,
+  signal?: AbortSignal,
+): Promise<SetupStatus> {
+  return request<SetupStatus>("/setup", { method: "POST", body: data, signal });
 }
 
 /**

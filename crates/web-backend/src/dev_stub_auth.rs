@@ -29,6 +29,7 @@
 //! with a `connectorError` field carrying the serialized
 //! [`ConnectorError`] when the failure came from a connector.
 
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use axum::{
@@ -68,13 +69,30 @@ const TOKEN_LIFETIME_HOURS: i64 = 1;
 #[derive(Clone)]
 pub struct StubState {
     connectors: Arc<Vec<Arc<dyn Connector>>>,
+    /// Whether first-run setup has been completed.
+    ///
+    /// **In memory only, and reset to `false` on every backend start.** The
+    /// real implementation persists this to the data volume described in
+    /// `docs/adr/0004-zero-config-startup.md`, because "has this instance been
+    /// set up" is precisely the state that must survive a restart — an
+    /// instance that forgets it was configured would walk its owner through the
+    /// wizard again after every deploy, and worse, would accept a *new* admin
+    /// from anyone who reached it first.
+    ///
+    /// It is deliberately not persisted here. Persisting it means designing
+    /// where instance state lives and how the setup secret is generated, and
+    /// doing that against a stub means doing it twice. An `AtomicBool` needs no
+    /// lock and is enough to prove the contract the clients are built against.
+    setup_complete: Arc<AtomicBool>,
 }
 
 impl StubState {
-    /// The registry the stub boots with: one happy-path [`MockConnector`].
+    /// The registry the stub boots with: one happy-path [`MockConnector`], and
+    /// setup not yet done.
     pub fn with_mock_connector() -> Self {
         Self {
             connectors: Arc::new(vec![Arc::new(MockConnector::default())]),
+            setup_complete: Arc::new(AtomicBool::new(false)),
         }
     }
 
@@ -98,6 +116,8 @@ impl StubState {
 /// `docs/adr/0006-frontend-api-same-origin.md`.
 pub fn routes() -> Router {
     Router::new()
+        .route("/setup/status", get(setup_status))
+        .route("/setup", post(complete_setup))
         .route("/auth/login", post(login))
         .route("/auth/session", get(session))
         .route("/connectors", get(list_connectors))
@@ -138,6 +158,77 @@ impl ErrorBody {
             }),
         )
             .into_response()
+    }
+}
+
+/// `GET /setup/status` response body.
+///
+/// One field, deliberately. The client's only question before it can route is
+/// "does this instance still need setting up", and answering it with anything
+/// richer invites clients to branch on details that are not settled yet.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SetupStatusResponse {
+    setup_complete: bool,
+}
+
+/// `POST /setup` request body.
+///
+/// Every field is read and discarded. The shape is the point: it is what the
+/// real implementation will need — a name for the instance and the first
+/// administrator's credentials — so the wizard is built against it now and does
+/// not change when the fields start being used.
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct SetupRequest {
+    #[allow(dead_code, reason = "the stub records no instance configuration")]
+    instance_name: String,
+    #[allow(dead_code, reason = "the stub creates no accounts")]
+    admin_username: String,
+    /// Discarded immediately and never logged. The real implementation hashes
+    /// this with a memory-hard KDF; the stub must not be mistaken for a step
+    /// toward that, so it stores nothing at all rather than storing it weakly.
+    #[allow(dead_code, reason = "the stub creates no accounts")]
+    admin_password: String,
+}
+
+/// Reports whether first-run setup has been completed.
+///
+/// Unauthenticated by necessity, not by oversight: a client has to be able to
+/// ask this *before* anyone can possibly have credentials. The real
+/// implementation keeps it unauthenticated for the same reason, which is why it
+/// must never grow fields that leak anything about a configured instance.
+async fn setup_status(State(state): State<StubState>) -> Json<SetupStatusResponse> {
+    Json(SetupStatusResponse {
+        setup_complete: state.setup_complete.load(Ordering::SeqCst),
+    })
+}
+
+/// Completes first-run setup, once.
+///
+/// The values are discarded — see [`SetupRequest`]. What is real is the
+/// transition and its exactly-once guarantee: `compare_exchange` means two
+/// racing requests cannot both win, and the loser gets a 409 rather than
+/// silently overwriting the first administrator. That is the property the
+/// clients are built against, and it is the one that genuinely matters in the
+/// real implementation, where losing it means a second caller can seize an
+/// instance that is already configured.
+async fn complete_setup(
+    State(state): State<StubState>,
+    Json(_request): Json<SetupRequest>,
+) -> Response {
+    match state
+        .setup_complete
+        .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+    {
+        Ok(_) => Json(SetupStatusResponse {
+            setup_complete: true,
+        })
+        .into_response(),
+        Err(_) => ErrorBody::message(
+            StatusCode::CONFLICT,
+            "setup has already been completed for this instance".to_owned(),
+        ),
     }
 }
 
@@ -194,6 +285,12 @@ struct ConnectorListEntry {
 }
 
 /// Accepts anything and issues the fixed token.
+///
+/// Deliberately **not** gated on `setupComplete`. Real auth will gate it
+/// naturally — there is nothing to log in against until an administrator
+/// account exists, so a pre-setup login has no credentials to check rather than
+/// being blocked by an explicit test. Adding that check here would be inventing
+/// a rule the stub cannot enforce anyway, since it accepts any credentials.
 async fn login(Json(_credentials): Json<LoginRequest>) -> Json<LoginResponse> {
     Json(LoginResponse {
         token: DEV_STUB_TOKEN,

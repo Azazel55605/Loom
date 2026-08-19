@@ -1,4 +1,8 @@
-import { ApiError, type ConnectorError } from "@/lib/api";
+import {
+  ApiError,
+  MISSING_STUB_BACKEND_MESSAGE,
+  type ConnectorError,
+} from "@/lib/api";
 
 /**
  * Turns a failure into one sentence a person can act on.
@@ -11,6 +15,14 @@ import { ApiError, type ConnectorError } from "@/lib/api";
  */
 export function describeConnectorError(error: unknown): string {
   if (error instanceof ApiError) {
+    // A 404 with no error body behind it is not a missing record — the route
+    // does not exist at all, which means a backend built without the
+    // `dev-stub-auth` feature. Say that, rather than passing on "404 Not
+    // Found" and sending people hunting for a typo in a URL that is correct.
+    // A 404 that *does* carry a body (an unknown connector or action id) is a
+    // real answer and keeps its own message.
+    if (error.isMissingRoute) return MISSING_STUB_BACKEND_MESSAGE;
+
     // The backend's rendered message is the better text; the structured value
     // is the fallback for the rare body that carries only the latter.
     if (error.message) return error.message;

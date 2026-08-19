@@ -80,8 +80,19 @@ cargo run --package loom-web-backend --features dev-stub-auth
 pnpm --filter web-frontend dev
 ```
 
-Then open the URL Vite prints (`http://localhost:5173` by default) and sign in
-with **any username and password**. The stub accepts everything — see
+Then open **`http://localhost:3000`**.
+
+**On a freshly started backend you land on `/setup`, not `/login`.** That is
+expected, not a bug: the backend reports `setupComplete: false`, and setup
+outranks authentication because an instance with no administrator has nothing to
+log in against. Fill in the wizard — the stub discards every value — and you are
+sent on to the login screen. Because the stub holds setup state **in memory
+only**, it resets on every backend restart, so the wizard reappears each time
+you restart the backend. The real implementation persists it to the data volume
+in [ADR 0004](./adr/0004-zero-config-startup.md); that difference is called out
+in the startup `WARN` line.
+
+Then sign in with **any username and password**. The stub accepts everything — see
 [`API_CONTRACT.md`](./API_CONTRACT.md). That is the intended behaviour, not a
 bug and not a bypass you have stumbled onto: there is no credential storage
 behind it yet, deliberately. You should land on a dashboard showing one
@@ -109,6 +120,12 @@ See [ADR 0006](./adr/0006-frontend-api-same-origin.md) and the path table in
 [`API_CONTRACT.md`](./API_CONTRACT.md).
 
 Nothing needs configuring for the default case. Two escape hatches exist:
+
+The dev server uses port **3000**, the same port Compose publishes the frontend
+on, so the app is at one URL regardless of how it is running. The backend is on
+**8080** either way. Those are the only two ports involved; `strictPort` makes
+the dev server fail loudly rather than drift to 3001 if something already holds
+3000.
 
 | Variable | Where it is read | Effect |
 | --- | --- | --- |

@@ -115,8 +115,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     tracing::warn!(
         "dev-stub-auth is COMPILED IN: /auth/login accepts ANY username and \
          password, and the connector routes require no authentication at all. \
-         This build is for local development only and must not be exposed to any \
-         network you do not fully control. See docs/API_CONTRACT.md."
+         First-run setup state is held IN MEMORY and resets to incomplete on \
+         every restart, so the setup wizard reappears after each start — the \
+         real implementation persists it to the data volume. This build is for \
+         local development only and must not be exposed to any network you do \
+         not fully control. See docs/API_CONTRACT.md."
     );
 
     let listener = tokio::net::TcpListener::bind(&bind_addr).await?;
@@ -140,9 +143,23 @@ mod tests {
     use http_body_util::BodyExt;
     use tower::ServiceExt;
 
-    /// Sends one request through the real router and returns status plus body.
+    /// Sends one request through a fresh router and returns status plus body.
+    ///
+    /// Each call builds its own `app()`, so tests cannot leak state into one
+    /// another. Use [`send`] where a test needs several requests to reach the
+    /// *same* instance.
     async fn call(request: Request<Body>) -> (StatusCode, serde_json::Value) {
-        let response = app()
+        send(&app(), request).await
+    }
+
+    /// Sends one request through a given router, leaving it usable afterwards.
+    ///
+    /// Needed because some state is per-router — first-run setup in particular
+    /// — so a test that completes setup and then reads it back must talk to one
+    /// instance rather than two.
+    async fn send(app: &Router, request: Request<Body>) -> (StatusCode, serde_json::Value) {
+        let response = app
+            .clone()
             .oneshot(request)
             .await
             .expect("the router is infallible");
@@ -223,6 +240,23 @@ mod tests {
             ))
             .await;
             assert_eq!(action, StatusCode::NOT_FOUND);
+        }
+
+        #[tokio::test]
+        async fn setup_routes_do_not_exist() {
+            let (status, _) = call(get("/setup/status")).await;
+            assert_eq!(status, StatusCode::NOT_FOUND);
+
+            let (complete, _) = call(post_json(
+                "/setup",
+                serde_json::json!({
+                    "instanceName": "Home",
+                    "adminUsername": "admin",
+                    "adminPassword": "hunter2",
+                }),
+            ))
+            .await;
+            assert_eq!(complete, StatusCode::NOT_FOUND);
         }
     }
 
@@ -313,6 +347,101 @@ mod tests {
             .await;
 
             assert_eq!(status, StatusCode::UNAUTHORIZED);
+        }
+
+        /// Setup starts incomplete on a fresh backend, which is what sends a
+        /// first-run client to the wizard.
+        #[tokio::test]
+        async fn setup_starts_incomplete() {
+            let (status, body) = call(get("/setup/status")).await;
+
+            assert_eq!(status, StatusCode::OK);
+            assert_eq!(body["setupComplete"], false);
+
+            println!("GET /setup/status (fresh) -> {status}\n{body:#}");
+        }
+
+        #[tokio::test]
+        async fn completing_setup_flips_the_flag() {
+            // One router for the whole test: the state is per-router, so a
+            // second `app()` would start over with setup incomplete.
+            let app = app();
+
+            let (status, body) = send(
+                &app,
+                post_json(
+                    "/setup",
+                    serde_json::json!({
+                        "instanceName": "Example Homelab",
+                        "adminUsername": "admin",
+                        "adminPassword": "hunter2",
+                    }),
+                ),
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK);
+            assert_eq!(body["setupComplete"], true);
+            println!("POST /setup -> {status}\n{body:#}");
+
+            let (status, body) = send(&app, get("/setup/status")).await;
+            assert_eq!(status, StatusCode::OK);
+            assert_eq!(body["setupComplete"], true);
+        }
+
+        /// A second setup must not silently seize an instance that is already
+        /// configured — the property that actually matters once these values
+        /// are real.
+        #[tokio::test]
+        async fn setup_twice_conflicts() {
+            let app = app();
+            let request = || {
+                post_json(
+                    "/setup",
+                    serde_json::json!({
+                        "instanceName": "Example Homelab",
+                        "adminUsername": "admin",
+                        "adminPassword": "hunter2",
+                    }),
+                )
+            };
+
+            let (first, _) = send(&app, request()).await;
+            assert_eq!(first, StatusCode::OK);
+
+            let (second, body) = send(&app, request()).await;
+            assert_eq!(second, StatusCode::CONFLICT);
+            assert!(
+                body["error"].as_str().is_some_and(|e| !e.is_empty()),
+                "a 409 must carry the shared error body, got {body:#}"
+            );
+
+            println!("POST /setup (already complete) -> {second}\n{body:#}");
+        }
+
+        /// Setup state is per-instance and starts fresh: a new router has not
+        /// been set up, even though another test just completed setup on its
+        /// own. This is the in-memory behaviour the real implementation
+        /// replaces with persistence.
+        #[tokio::test]
+        async fn setup_state_does_not_leak_between_instances() {
+            let configured = app();
+            let (status, _) = send(
+                &configured,
+                post_json(
+                    "/setup",
+                    serde_json::json!({
+                        "instanceName": "Example Homelab",
+                        "adminUsername": "admin",
+                        "adminPassword": "hunter2",
+                    }),
+                ),
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK);
+
+            let (status, body) = send(&app(), get("/setup/status")).await;
+            assert_eq!(status, StatusCode::OK);
+            assert_eq!(body["setupComplete"], false);
         }
 
         #[tokio::test]

@@ -139,6 +139,91 @@ deliberate change, not a drive-by fix.
 
 Only 200 is returned; the handler is infallible.
 
+### `GET /setup/status`
+
+Requires `dev-stub-auth`. **Unauthenticated by necessity**, not by oversight: a
+client must be able to ask this before anyone can possibly hold a credential.
+
+**Request:** no body, no headers.
+
+**Response 200:**
+
+```json
+{ "setupComplete": false }
+```
+
+| Field | JSON type | Meaning | Nullability |
+| --- | --- | --- | --- |
+| `setupComplete` | boolean | `false` when the instance still needs first-run setup. | Always present. |
+
+One field on purpose. The client's only question before it can route is whether
+this instance still needs setting up, and a richer response would invite clients
+to branch on details that are not settled yet. It must never grow a field that
+reveals anything about a configured instance, since it answers to anyone who can
+reach the port.
+
+| Status | Meaning |
+| --- | --- |
+| 200 | The status was read. This is the only outcome. |
+| 404 | The feature is not compiled in. |
+
+### `POST /setup`
+
+Requires `dev-stub-auth`. Unauthenticated, for the same reason: there is nobody
+to authenticate as until this call succeeds.
+
+**Request:**
+
+```json
+{
+  "instanceName": "Example Homelab",
+  "adminUsername": "admin",
+  "adminPassword": "a-password"
+}
+```
+
+| Field | JSON type | Meaning |
+| --- | --- | --- |
+| `instanceName` | string | Display name for this Loom instance. |
+| `adminUsername` | string | The first administrator's username. |
+| `adminPassword` | string | The first administrator's password. |
+
+**Every value is read and discarded** in the current stub — no account is
+created, nothing is hashed, nothing is stored. The shape is what matters: it is
+what the real implementation needs, so the wizard is built against it now and
+does not change when the fields start being used.
+
+**Response 200** — setup transitioned from incomplete to complete:
+
+```json
+{ "setupComplete": true }
+```
+
+**Response 409** — setup was already complete:
+
+```json
+{ "error": "setup has already been completed for this instance" }
+```
+
+The 409 is not defensive tidiness. The transition is exactly-once, enforced with
+a compare-and-exchange, so two racing requests cannot both win and the loser is
+told rather than silently overwriting the first administrator. In the real
+implementation, losing that property means a second caller can seize an instance
+that is already configured — so clients are built against it from the start,
+even though the stub has nothing worth seizing.
+
+A client that gets a 409 should treat the instance as set up and continue to
+login, not surface an error: the end state is the one it wanted. This happens
+legitimately when setup completes in another tab.
+
+| Status | Meaning |
+| --- | --- |
+| 200 | Setup completed. The instance is now configured. |
+| 400 | The body is not valid JSON. |
+| 409 | Setup was already complete. Nothing changed. |
+| 415 / 422 | Wrong content type, or a body that is not a `SetupRequest` — rejected by the extractor before the handler runs, as plain text. See [Error body](#error-body). |
+| 404 | The feature is not compiled in. |
+
 ### `POST /auth/login`
 
 Requires `dev-stub-auth`. **Accepts any credentials.**
@@ -551,6 +636,15 @@ None of the following is a security measure. Do not read the stub as one.
   nothing; `restart` and `ping` simulate their effects and echo their
   parameters. It is a permanent test fixture, not scaffolding — see the module
   docs in `crates/core/src/connector/mock.rs`.
+- **Setup state is in memory and resets on every backend restart.** A fresh
+  backend always reports `setupComplete: false`, so the wizard reappears after
+  each start. The real implementation persists this to the data volume in
+  [ADR 0004](./adr/0004-zero-config-startup.md) — "has this instance been set
+  up" is exactly the state that must survive a restart, since an instance that
+  forgets would re-run the wizard after every deploy and, worse, would accept a
+  new administrator from whoever reached it first.
+- **`POST /setup` stores nothing.** No account is created, no password is
+  hashed, no instance name is recorded. Only the flag moves.
 - **There is no persistence of any kind.** No database exists yet: no users, no
   password hashes, no sessions, no revocation list, no connector configuration.
   This is deferred deliberately — designing persistence and secret generation
