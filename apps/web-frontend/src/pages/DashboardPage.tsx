@@ -7,7 +7,7 @@ import { AppShell } from "@/components/AppShell";
 import { ConnectorCard } from "@/components/ConnectorCard";
 import { Card, CardContent, CardHeader } from "@/components/ui/card";
 import { Skeleton } from "@/components/ui/skeleton";
-import { ApiError, getConnectors } from "@/lib/api";
+import { ApiError, getConnectors, SessionExpiredError } from "@/lib/api";
 import { useAuth } from "@/lib/auth-context";
 import { describeConnectorError } from "@/lib/connector-error";
 
@@ -23,19 +23,20 @@ import { describeConnectorError } from "@/lib/connector-error";
 const REFETCH_INTERVAL_MS = 10_000;
 
 export function DashboardPage() {
-  const { token, signOut } = useAuth();
+  const { isAuthenticated, signOut } = useAuth();
 
   const connectors = useQuery({
     queryKey: ["connectors"],
-    // The guard guarantees a token before this route renders; the assertion
-    // keeps that guarantee visible rather than silently sending `null`.
-    queryFn: ({ signal }) => getConnectors(token!, signal),
-    enabled: token !== null,
+    queryFn: ({ signal }) => getConnectors(signal),
+    enabled: isAuthenticated,
     refetchInterval: REFETCH_INTERVAL_MS,
-    // A rejected token will not start working on retry, so fail fast on 401
-    // and let the effect below return the user to the login screen.
+    // The client already refreshes once on a 401, so a 401 reaching here means
+    // the session is genuinely over and retrying cannot help. Same for an
+    // expired refresh token.
     retry: (failureCount, error) =>
-      !(error instanceof ApiError && error.isUnauthorized) && failureCount < 2,
+      !(error instanceof ApiError && error.isUnauthorized) &&
+      !(error instanceof SessionExpiredError) &&
+      failureCount < 2,
   });
 
   // A 401 means the session ended underneath us — the token expired, or the
@@ -44,9 +45,10 @@ export function DashboardPage() {
   // updates state in a parent provider, and doing that mid-render is exactly
   // the pattern React warns about.
   const isUnauthorized =
-    connectors.error instanceof ApiError && connectors.error.isUnauthorized;
+    connectors.error instanceof SessionExpiredError ||
+    (connectors.error instanceof ApiError && connectors.error.isUnauthorized);
   React.useEffect(() => {
-    if (isUnauthorized) signOut();
+    if (isUnauthorized) void signOut();
   }, [isUnauthorized, signOut]);
 
   return (
@@ -87,7 +89,6 @@ export function DashboardPage() {
               <ConnectorCard
                 key={connector.metadata.id}
                 connector={connector}
-                token={token!}
                 onActionComplete={() => void connectors.refetch()}
               />
             ))}

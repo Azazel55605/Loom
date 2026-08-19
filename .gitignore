@@ -38,3 +38,13 @@ apps/*/dist/
 # Tauri build output
 apps/*/src-tauri/target/
 apps/*/src-tauri/gen/
+
+# Local development data directory: the SQLite database with user accounts,
+# argon2 password hashes, live sessions, and the generated JWT signing secret.
+# Created automatically by `cargo run --package loom-web-backend` when
+# LOOM_DATA_DIR is unset. Never commit it — this repository is public, and the
+# real deployment keeps this on a Docker volume, not in the tree.
+/data/
+*.db
+*.db-wal
+*.db-shm

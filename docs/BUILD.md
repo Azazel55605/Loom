@@ -65,50 +65,59 @@ rather than failing the run, so this stays correct as `apps/` grows.
 
 ## Running the web frame locally
 
-The login flow and the connector dashboard talk to endpoints that **only exist
-in a backend built with the `dev-stub-auth` feature**. Against a default build
-they answer 404, which shows up as a failed sign-in rather than anything that
-names the cause — so if the frontend loads but nothing works, check this first.
-
 Two processes, in two terminals:
 
 ```sh
-# 1. Backend, with the stub auth and mock connector compiled in.
-cargo run --package loom-web-backend --features dev-stub-auth
+# 1. Backend. Creates ./data/loom.db and migrates it on first run.
+cargo run --package loom-web-backend
 
 # 2. Frontend.
 pnpm --filter web-frontend dev
 ```
 
+No flags, no environment, no database to provision — per
+[ADR 0004](./adr/0004-zero-config-startup.md). The backend logs the database
+path it resolved at startup; if that line is not what you expect, check
+`LOOM_DATA_DIR`.
+
 Then open **`http://localhost:3000`**.
 
-**On a freshly started backend you land on `/setup`, not `/login`.** That is
-expected, not a bug: the backend reports `setupComplete: false`, and setup
-outranks authentication because an instance with no administrator has nothing to
-log in against. Fill in the wizard — the stub discards every value — and you are
-sent on to the login screen. Because the stub holds setup state **in memory
-only**, it resets on every backend restart, so the wizard reappears each time
-you restart the backend. The real implementation persists it to the data volume
-in [ADR 0004](./adr/0004-zero-config-startup.md); that difference is called out
-in the startup `WARN` line.
+**On a fresh database you land on `/setup`, not `/login`.** That is expected:
+the backend reports `setupComplete: false`, and setup outranks authentication
+because an instance with no administrator has nothing to log in against. Create
+the administrator — the password must be at least 8 characters — and you are
+sent on to the login screen. Sign in with those credentials and you land on a
+dashboard showing one connector, the `MockConnector`, with `Restart` and `Ping`
+buttons.
 
-Then sign in with **any username and password**. The stub accepts everything — see
-[`API_CONTRACT.md`](./API_CONTRACT.md). That is the intended behaviour, not a
-bug and not a bypass you have stumbled onto: there is no credential storage
-behind it yet, deliberately. You should land on a dashboard showing one
-connector, the `MockConnector`, with `Restart` and `Ping` buttons.
+Unlike the removed stub, **setup now persists**: it runs once per database, not
+once per backend start. Restarting the backend keeps you set up and keeps you
+signed in.
 
-The backend logs a `WARN` line at startup whenever the feature is compiled in,
-so a build that should not have it is visible in the log rather than only in the
-Cargo invocation that produced it.
+### Starting over
 
-> **`--features dev-stub-auth` is a local development invocation and nothing
-> else.** It must never be enabled by default, in any Docker image, or in any
-> release CI workflow — the stub accepts any credentials and leaves the
-> connector routes unauthenticated, so a build carrying it is a build anyone who
-> can reach the port can drive. See the rule in
-> [`AGENT_INSTRUCTIONS.md`](./AGENT_INSTRUCTIONS.md) and the feature comment in
-> [`../crates/web-backend/Cargo.toml`](../crates/web-backend/Cargo.toml).
+Setup cannot be re-run against a database that already has a user — that is the
+point of the 409. To get a clean first-run experience, delete the database:
+
+```sh
+rm -rf ./data          # or "$LOOM_DATA_DIR"
+```
+
+The next start recreates and re-migrates it. This is also the fastest way to
+recover from a forgotten administrator password, since there is no password
+reset yet.
+
+The frontend holds an access token (15 minutes) and a refresh token (7 days)
+and renews the pair silently, so a signed-in session survives a reload and does
+not interrupt you every quarter of an hour. Signing out revokes the refresh
+token on the backend rather than only forgetting it locally.
+
+> **This build authenticates but does not yet authorize.** Logins are real and
+> passwords are hashed with argon2id, but no middleware checks permissions, so
+> the connector routes are reachable by anyone who can reach the port. Do not
+> put an instance somewhere untrusted on the assumption that logging in is
+> required to use it. See
+> [`API_CONTRACT.md`](./API_CONTRACT.md#known-temporary-behavior).
 
 ### How the frontend reaches the backend
 

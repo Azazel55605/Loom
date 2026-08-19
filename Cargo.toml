@@ -25,12 +25,40 @@ serde_json = "1"
 # pure boilerplate on every variant.
 thiserror = "2"
 tokio = { version = "1", features = ["full"] }
+# Argon2id password hashing. The RustCrypto implementation, with the
+# `password-hash` PHC string format so parameters travel with the hash.
+argon2 = "0.5"
+# HS256 JWT encode/decode. Hand-rolling JWT parsing is a well-known source of
+# signature-confusion bugs; this validates alg, signature and expiry together.
+jsonwebtoken = "9"
+# SHA-256 for refresh-token storage. The tokens are already high-entropy random
+# values, so a fast hash is the right primitive — see auth/tokens.rs.
+sha2 = "0.10"
+# CSPRNG for refresh tokens and the JWT signing secret. `getrandom` under the
+# hood, i.e. the OS entropy source rather than a seeded PRNG.
+rand = "0.8"
+# SQLite access plus the migration runner. `runtime-tokio` matches the server's
+# executor; no TLS feature, because SQLite is a local file.
+sqlx = { version = "0.8", default-features = false, features = [
+    "sqlite",
+    "runtime-tokio",
+    "migrate",
+    "macros",
+    "chrono",
+    "uuid",
+] }
+# v4 identifiers for rows. Random rather than sequential so an id leaks neither
+# creation order nor row count.
+uuid = { version = "1", features = ["v4", "serde"] }
 # CORS headers for the browser clients; hand-rolling correct preflight
 # handling is not worth it, and tower-http is already axum's ecosystem.
 tower-http = { version = "0.6", features = ["cors"] }
 # Test-only: `ServiceExt::oneshot` drives the axum router directly, so route
 # tests need no listener, no port, and no async runtime plumbing.
 tower = { version = "0.5", features = ["util"] }
+# Test-only: each integration test needs its own SQLite file, removed when the
+# test ends, so tests cannot see one another's data.
+tempfile = "3"
 # Test-only: axum response bodies are streams; `BodyExt::collect` is the
 # supported way to read one into bytes for assertions.
 http-body-util = "0.1"

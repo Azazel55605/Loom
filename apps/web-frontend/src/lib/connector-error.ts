@@ -1,6 +1,7 @@
 import {
   ApiError,
-  MISSING_STUB_BACKEND_MESSAGE,
+  MISSING_ROUTE_MESSAGE,
+  SessionExpiredError,
   type ConnectorError,
 } from "@/lib/api";
 
@@ -14,14 +15,18 @@ import {
  * is the structured value, and so the variant names never reach a user.
  */
 export function describeConnectorError(error: unknown): string {
+  // A session that ended is not a connector problem, and the app is already
+  // redirecting to the login screen when this is raised.
+  if (error instanceof SessionExpiredError) return error.message;
+
   if (error instanceof ApiError) {
     // A 404 with no error body behind it is not a missing record — the route
-    // does not exist at all, which means a backend built without the
-    // `dev-stub-auth` feature. Say that, rather than passing on "404 Not
-    // Found" and sending people hunting for a typo in a URL that is correct.
-    // A 404 that *does* carry a body (an unknown connector or action id) is a
-    // real answer and keeps its own message.
-    if (error.isMissingRoute) return MISSING_STUB_BACKEND_MESSAGE;
+    // does not exist at all, so whatever is answering is not a backend that
+    // serves this API. Say that, rather than passing on "404 Not Found" and
+    // sending people hunting for a typo in a URL that is correct. A 404 that
+    // *does* carry a body (an unknown connector or action id) is a real answer
+    // and keeps its own message.
+    if (error.isMissingRoute) return MISSING_ROUTE_MESSAGE;
 
     // The backend's rendered message is the better text; the structured value
     // is the fallback for the rare body that carries only the latter.

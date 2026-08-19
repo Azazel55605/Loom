@@ -58,10 +58,10 @@ function RequireSetup({ children }: { children: React.ReactNode }) {
   // moment on a local request.
   if (setup.isPending) return null;
 
-  // If the question could not be answered — most often a backend built without
-  // `dev-stub-auth`, where the route does not exist — carry on to the normal
-  // flow rather than trapping the user in a wizard that cannot submit either.
-  // The login screen then reports the real problem in terms they can act on.
+  // If the question could not be answered — a backend that does not serve this
+  // route, or one that is down — carry on to the normal flow rather than
+  // trapping the user in a wizard that cannot submit either. The login screen
+  // then reports the real problem in terms they can act on.
   if (setup.isError) return <>{children}</>;
 
   if (setup.data.setupComplete === false && location.pathname !== "/setup") {
@@ -72,7 +72,7 @@ function RequireSetup({ children }: { children: React.ReactNode }) {
 }
 
 function RequireAuth({ children }: { children: React.ReactNode }) {
-  const { token, isRestoring } = useAuth();
+  const { isAuthenticated, isRestoring } = useAuth();
   const location = useLocation();
 
   // Render nothing while a stored token is being validated. Redirecting on a
@@ -80,7 +80,7 @@ function RequireAuth({ children }: { children: React.ReactNode }) {
   // every reload, which reads as being randomly signed out.
   if (isRestoring) return null;
 
-  if (token === null) {
+  if (!isAuthenticated) {
     // Remember where they were headed so signing in returns them there.
     return <Navigate to="/login" replace state={{ from: location.pathname }} />;
   }

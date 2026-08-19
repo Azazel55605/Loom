@@ -11,43 +11,24 @@ rust-version.workspace = true
 name = "loom-web-backend"
 path = "src/main.rs"
 
-# `dev-stub-auth` is DEVELOPMENT-ONLY and is deliberately absent from `default`.
-#
-# Enabling it compiles in `src/dev_stub_auth.rs`, which serves:
-#   - `POST /api/auth/login`, accepting ANY username and password and returning a
-#     fixed, publicly known token;
-#   - connector routes, including action execution, with NO authentication.
-#
-# In other words, anyone who can reach the port can log in as the stub user and
-# execute actions against every registered connector. It exists only so the web,
-# desktop, and mobile clients can be built against the API's shape before the
-# real auth layer of `docs/adr/0003-auth-model-vpn-vs-external.md` exists.
-#
-# It must therefore never be enabled by default, never be enabled in any Docker
-# image, and never be enabled in any release CI workflow. See
-# `docs/API_CONTRACT.md` for the contract it implements and
-# `docs/AGENT_INSTRUCTIONS.md` for the project rule.
-#
-# Every dependency used only by the stub is optional and pulled in here, so a
-# default build does not even compile them.
-[features]
-dev-stub-auth = ["dep:chrono", "dep:serde_json"]
-
 [dependencies]
 loom-core.workspace = true
+argon2.workspace = true
 axum.workspace = true
+chrono.workspace = true
+jsonwebtoken.workspace = true
+rand.workspace = true
 serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+sqlx.workspace = true
 tokio.workspace = true
 tower-http.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
-
-# Stub-only: RFC 3339 `expiresAt` timestamps on the stub login response.
-chrono = { workspace = true, optional = true }
-# Stub-only: connector action parameters and payloads are schema-less JSON.
-serde_json = { workspace = true, optional = true }
+uuid.workspace = true
 
 [dev-dependencies]
 http-body-util.workspace = true
-serde_json.workspace = true
+tempfile.workspace = true
 tower.workspace = true

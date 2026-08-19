@@ -42,7 +42,7 @@ const loginSchema = z.object({
 type LoginValues = z.infer<typeof loginSchema>;
 
 export function LoginPage() {
-  const { token, isRestoring, signIn } = useAuth();
+  const { isAuthenticated, isRestoring, signIn } = useAuth();
   const navigate = useNavigate();
   const location = useLocation();
   const [submitError, setSubmitError] = React.useState<string | null>(null);
@@ -58,7 +58,7 @@ export function LoginPage() {
     (location.state as { from?: string } | null)?.from ?? "/";
 
   if (isRestoring) return null;
-  if (token !== null) return <Navigate to={from} replace />;
+  if (isAuthenticated) return <Navigate to={from} replace />;
 
   async function onSubmit(values: LoginValues) {
     setSubmitError(null);
@@ -76,8 +76,7 @@ export function LoginPage() {
         <CardHeader>
           <CardTitle>Sign in to Loom</CardTitle>
           <CardDescription>
-            This build uses stub authentication — any username and password are
-            accepted.
+            Sign in with the administrator account created during setup.
           </CardDescription>
         </CardHeader>
 

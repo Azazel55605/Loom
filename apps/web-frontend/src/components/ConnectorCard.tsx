@@ -59,11 +59,9 @@ function formatChecked(iso: string): string {
 
 export function ConnectorCard({
   connector,
-  token,
   onActionComplete,
 }: {
   connector: ConnectorSummary;
-  token: string;
   /** Called after any action resolves, so the list can refetch its status. */
   onActionComplete?: () => void;
 }) {
@@ -74,8 +72,7 @@ export function ConnectorCard({
   const [pendingActionId, setPendingActionId] = React.useState<string | null>(null);
 
   const mutation = useMutation({
-    mutationFn: (action: ConnectorAction) =>
-      executeAction(token, metadata.id, action.id),
+    mutationFn: (action: ConnectorAction) => executeAction(metadata.id, action.id),
     onMutate: (action: ConnectorAction) => {
       setPendingActionId(action.id);
     },

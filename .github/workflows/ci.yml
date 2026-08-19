@@ -27,13 +27,10 @@ jobs:
       - name: cargo fmt --check
         run: cargo fmt --all -- --check
 
-      # Both of the following run with default features only, and that is the
-      # point: `loom-web-backend`'s `dev-stub-auth` feature must never be
-      # enabled here. It compiles in a fake login that accepts any credentials,
-      # so it is opt-in at build time and stays out of every CI job that
-      # produces or validates a shippable artifact. Do not add `--all-features`
-      # or `--features dev-stub-auth` to these steps — see
-      # docs/API_CONTRACT.md and crates/web-backend/Cargo.toml.
+      # `loom-web-backend` has no Cargo features: the auth it serves is the
+      # real one, so there is nothing to opt into or out of here. The tests
+      # migrate a throwaway SQLite file per test, so this needs no database
+      # service and no DATABASE_URL.
       - name: cargo clippy
         run: cargo clippy --workspace --all-targets -- -D warnings
 

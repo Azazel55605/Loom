@@ -4,22 +4,33 @@
 //! (web frontend, desktop, mobile) talks to it over HTTP; it in turn depends on
 //! `loom-core` for connector and business logic.
 //!
-//! Right now it serves exactly one route, `/health`, which is enough to prove
-//! the `core -> web-backend` wiring works at runtime rather than only at
-//! compile time.
+//! It owns the things `loom-core` deliberately must not: the database, the
+//! session credentials, and every trust decision. See `docs/ARCHITECTURE.md`
+//! for why that boundary is drawn where it is, and
+//! `docs/adr/0008-auth-model.md` for the auth design.
 //!
-//! Under the non-default `dev-stub-auth` feature it additionally serves the stub
-//! auth and connector routes from [`dev_stub_auth`] — see that module and
-//! `crates/web-backend/Cargo.toml` for why that must never be a shipped build.
+//! Startup is ordered: resolve the data directory, open and migrate the
+//! database, load or generate the JWT signing secret, then serve. Each step
+//! depends on the last, and a failure in any of them is fatal rather than
+//! degraded — a server that cannot reach its database cannot authenticate
+//! anyone, and pretending otherwise would mean serving requests it has no way
+//! to authorize.
 
 use axum::{http::HeaderValue, routing::get, Json, Router};
 use serde::Serialize;
+use sqlx::sqlite::SqlitePoolOptions;
+use sqlx::SqlitePool;
 use tower_http::cors::{Any, CorsLayer};
 use tracing::info;
 use tracing_subscriber::EnvFilter;
 
-#[cfg(feature = "dev-stub-auth")]
-mod dev_stub_auth;
+mod auth;
+mod config;
+mod error;
+mod routes;
+mod state;
+
+use state::AppState;
 
 /// Default address to bind when `LOOM_BIND_ADDR` is not set.
 const DEFAULT_BIND_ADDR: &str = "127.0.0.1:8080";
@@ -86,18 +97,50 @@ async fn health() -> Json<Health> {
     })
 }
 
+/// Opens the database, enabling the pragmas SQLite leaves off by default, and
+/// runs every pending migration.
+///
+/// `foreign_keys` is off by default in SQLite and silently so — declared
+/// foreign keys are simply not enforced until it is switched on, per
+/// connection. Turning it on here is what makes the `REFERENCES` clauses in the
+/// migrations mean anything.
+///
+/// `journal_mode = WAL` lets reads proceed during a write, which matters as
+/// soon as a status poll overlaps a login.
+async fn open_database(url: &str) -> Result<SqlitePool, Box<dyn std::error::Error>> {
+    let pool = SqlitePoolOptions::new()
+        .max_connections(5)
+        .after_connect(|conn, _meta| {
+            Box::pin(async move {
+                sqlx::query("PRAGMA foreign_keys = ON")
+                    .execute(&mut *conn)
+                    .await?;
+                sqlx::query("PRAGMA journal_mode = WAL")
+                    .execute(&mut *conn)
+                    .await?;
+                Ok(())
+            })
+        })
+        .connect(url)
+        .await?;
+
+    // Embedded at compile time from `migrations/`, so a released binary carries
+    // its own schema history and needs no files alongside it.
+    sqlx::migrate!("./migrations").run(&pool).await?;
+
+    Ok(pool)
+}
+
 /// Builds the application router.
 ///
 /// Split out of [`main`] so tests can drive the real routing table through
-/// `tower::ServiceExt::oneshot` instead of binding a port — including the tests
-/// that assert the `dev-stub-auth` routes are *absent* from a default build.
-fn app() -> Router {
-    let router = Router::new().route("/health", get(health));
-
-    #[cfg(feature = "dev-stub-auth")]
-    let router = router.merge(dev_stub_auth::routes());
-
-    router.layer(cors_layer())
+/// `tower::ServiceExt::oneshot` instead of binding a port.
+fn app(state: AppState) -> Router {
+    Router::new()
+        .route("/health", get(health))
+        .merge(routes::routes())
+        .with_state(state)
+        .layer(cors_layer())
 }
 
 #[tokio::main]
@@ -111,16 +154,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let bind_addr =
         std::env::var("LOOM_BIND_ADDR").unwrap_or_else(|_| DEFAULT_BIND_ADDR.to_owned());
 
-    #[cfg(feature = "dev-stub-auth")]
-    tracing::warn!(
-        "dev-stub-auth is COMPILED IN: /auth/login accepts ANY username and \
-         password, and the connector routes require no authentication at all. \
-         First-run setup state is held IN MEMORY and resets to incomplete on \
-         every restart, so the setup wizard reappears after each start — the \
-         real implementation persists it to the data volume. This build is for \
-         local development only and must not be exposed to any network you do \
-         not fully control. See docs/API_CONTRACT.md."
-    );
+    let data_dir = config::data_dir()?;
+    let database_path = config::database_path(&data_dir);
+    info!(path = %database_path.display(), "opening database");
+
+    let pool = open_database(&config::database_url(&database_path)).await?;
+    let jwt_secret = auth::secret::load_or_create_jwt_secret(&pool).await?;
 
     let listener = tokio::net::TcpListener::bind(&bind_addr).await?;
     info!(
@@ -129,7 +168,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         "loom web-backend listening"
     );
 
-    axum::serve(listener, app()).await?;
+    axum::serve(listener, app(AppState::new(pool, jwt_secret))).await?;
     Ok(())
 }
 
@@ -143,20 +182,33 @@ mod tests {
     use http_body_util::BodyExt;
     use tower::ServiceExt;
 
-    /// Sends one request through a fresh router and returns status plus body.
+    /// A router backed by its own throwaway database.
     ///
-    /// Each call builds its own `app()`, so tests cannot leak state into one
-    /// another. Use [`send`] where a test needs several requests to reach the
-    /// *same* instance.
-    async fn call(request: Request<Body>) -> (StatusCode, serde_json::Value) {
-        send(&app(), request).await
+    /// A temp *file* rather than `:memory:`: an in-memory SQLite database lives
+    /// per connection, so a pool of them would migrate one connection and hand
+    /// later queries an empty database. The directory is deleted when the guard
+    /// drops, so tests cannot see one another's data.
+    struct TestApp {
+        router: Router,
+        _dir: tempfile::TempDir,
     }
 
-    /// Sends one request through a given router, leaving it usable afterwards.
-    ///
-    /// Needed because some state is per-router — first-run setup in particular
-    /// — so a test that completes setup and then reads it back must talk to one
-    /// instance rather than two.
+    async fn test_app() -> TestApp {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let path = config::database_path(dir.path());
+        let pool = open_database(&config::database_url(&path))
+            .await
+            .expect("migrations must run against a fresh database");
+        let secret = auth::secret::load_or_create_jwt_secret(&pool)
+            .await
+            .expect("secret must be generated");
+
+        TestApp {
+            router: app(AppState::new(pool, secret)),
+            _dir: dir,
+        }
+    }
+
     async fn send(app: &Router, request: Request<Body>) -> (StatusCode, serde_json::Value) {
         let response = app
             .clone()
@@ -187,6 +239,14 @@ mod tests {
             .expect("valid request")
     }
 
+    fn get_with_auth(uri: &str, authorization: &str) -> Request<Body> {
+        Request::builder()
+            .uri(uri)
+            .header("authorization", authorization)
+            .body(Body::empty())
+            .expect("valid request")
+    }
+
     fn post_json(uri: &str, body: serde_json::Value) -> Request<Body> {
         Request::builder()
             .method("POST")
@@ -196,367 +256,367 @@ mod tests {
             .expect("valid request")
     }
 
+    fn setup_body() -> serde_json::Value {
+        serde_json::json!({
+            "instanceName": "Example Homelab",
+            "adminUsername": "admin",
+            "adminPassword": "a-good-password",
+        })
+    }
+
+    /// Runs setup and returns the admin's first token pair.
+    async fn setup_and_login(app: &Router) -> (String, String) {
+        let (status, _) = send(app, post_json("/setup", setup_body())).await;
+        assert_eq!(status, StatusCode::OK);
+
+        let (status, body) = send(
+            app,
+            post_json(
+                "/auth/login",
+                serde_json::json!({ "username": "admin", "password": "a-good-password" }),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "login failed: {body:#}");
+
+        (
+            body["accessToken"]
+                .as_str()
+                .expect("accessToken")
+                .to_owned(),
+            body["refreshToken"]
+                .as_str()
+                .expect("refreshToken")
+                .to_owned(),
+        )
+    }
+
     #[tokio::test]
     async fn health_reports_ok_and_the_core_version() {
-        let (status, body) = call(get("/health")).await;
+        let app = test_app().await;
+        let (status, body) = send(&app.router, get("/health")).await;
 
         assert_eq!(status, StatusCode::OK);
         assert_eq!(body["status"], "ok");
         assert_eq!(body["core_version"], loom_core::version());
     }
 
-    /// The load-bearing test for the feature gate: a default build must not
-    /// answer the stub routes at all, not even with a 401.
-    #[cfg(not(feature = "dev-stub-auth"))]
-    mod stub_absent {
-        use super::*;
+    #[tokio::test]
+    async fn migrations_run_against_a_fresh_database() {
+        // `test_app` panics if migrations fail, so reaching a served response
+        // proves the schema was created from nothing.
+        let app = test_app().await;
+        let (status, body) = send(&app.router, get("/setup/status")).await;
 
-        #[tokio::test]
-        async fn login_route_does_not_exist() {
-            let (status, _) = call(post_json(
-                "/auth/login",
-                serde_json::json!({ "username": "anyone", "password": "anything" }),
-            ))
-            .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["setupComplete"], false);
+    }
 
-            assert_eq!(status, StatusCode::NOT_FOUND);
-        }
+    #[tokio::test]
+    async fn setup_creates_an_admin_in_the_seeded_group_with_every_permission() {
+        let app = test_app().await;
+        let (access, _) = setup_and_login(&app.router).await;
 
-        #[tokio::test]
-        async fn session_route_does_not_exist() {
-            let (status, _) = call(get("/auth/session")).await;
+        let (status, body) = send(
+            &app.router,
+            get_with_auth("/auth/session", &format!("Bearer {access}")),
+        )
+        .await;
 
-            assert_eq!(status, StatusCode::NOT_FOUND);
-        }
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["authenticated"], true);
+        assert_eq!(body["username"], "admin");
+        assert!(body["userId"].as_str().is_some_and(|id| !id.is_empty()));
 
-        #[tokio::test]
-        async fn connector_routes_do_not_exist() {
-            let (list, _) = call(get("/connectors")).await;
-            assert_eq!(list, StatusCode::NOT_FOUND);
+        // The seeded Administrators group grants every registered permission
+        // globally, so the first admin's claims must contain all five with no
+        // resource scoping.
+        let permissions = body["permissions"].as_array().expect("permissions array");
+        let mut keys: Vec<&str> = permissions
+            .iter()
+            .map(|grant| grant["key"].as_str().expect("key"))
+            .collect();
+        keys.sort_unstable();
 
-            let (action, _) = call(post_json(
-                "/connectors/mock/actions/restart",
-                serde_json::json!({}),
-            ))
-            .await;
-            assert_eq!(action, StatusCode::NOT_FOUND);
-        }
+        assert_eq!(
+            keys,
+            vec![
+                "connectors.control",
+                "connectors.view",
+                "groups.manage",
+                "system.settings",
+                "users.manage",
+            ]
+        );
+        assert!(
+            permissions
+                .iter()
+                .all(|grant| grant["resourceType"].is_null() && grant["resourceId"].is_null()),
+            "administrator grants must be global, got {permissions:#?}"
+        );
+    }
 
-        #[tokio::test]
-        async fn setup_routes_do_not_exist() {
-            let (status, _) = call(get("/setup/status")).await;
-            assert_eq!(status, StatusCode::NOT_FOUND);
+    #[tokio::test]
+    async fn setup_status_flips_after_setup() {
+        let app = test_app().await;
 
-            let (complete, _) = call(post_json(
+        let (_, before) = send(&app.router, get("/setup/status")).await;
+        assert_eq!(before["setupComplete"], false);
+
+        let (status, body) = send(&app.router, post_json("/setup", setup_body())).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["setupComplete"], true);
+
+        let (_, after) = send(&app.router, get("/setup/status")).await;
+        assert_eq!(after["setupComplete"], true);
+    }
+
+    #[tokio::test]
+    async fn setup_twice_conflicts() {
+        let app = test_app().await;
+
+        let (first, _) = send(&app.router, post_json("/setup", setup_body())).await;
+        assert_eq!(first, StatusCode::OK);
+
+        let (second, body) = send(&app.router, post_json("/setup", setup_body())).await;
+        assert_eq!(second, StatusCode::CONFLICT);
+        assert!(body["error"].as_str().is_some_and(|e| !e.is_empty()));
+    }
+
+    #[tokio::test]
+    async fn setup_rejects_a_short_password_and_empty_fields() {
+        let app = test_app().await;
+
+        let (status, body) = send(
+            &app.router,
+            post_json(
                 "/setup",
                 serde_json::json!({
-                    "instanceName": "Home",
+                    "instanceName": "Example",
                     "adminUsername": "admin",
-                    "adminPassword": "hunter2",
+                    "adminPassword": "short",
                 }),
-            ))
-            .await;
-            assert_eq!(complete, StatusCode::NOT_FOUND);
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert!(body["error"].as_str().expect("error").contains("8"));
+
+        let (status, _) = send(
+            &app.router,
+            post_json(
+                "/setup",
+                serde_json::json!({
+                    "instanceName": "  ",
+                    "adminUsername": "admin",
+                    "adminPassword": "a-good-password",
+                }),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+
+        // A rejected setup must leave the instance unconfigured.
+        let (_, body) = send(&app.router, get("/setup/status")).await;
+        assert_eq!(body["setupComplete"], false);
+    }
+
+    #[tokio::test]
+    async fn login_rejects_a_wrong_password_and_an_unknown_user_identically() {
+        let app = test_app().await;
+        let (status, _) = send(&app.router, post_json("/setup", setup_body())).await;
+        assert_eq!(status, StatusCode::OK);
+
+        let (wrong_password, wrong_body) = send(
+            &app.router,
+            post_json(
+                "/auth/login",
+                serde_json::json!({ "username": "admin", "password": "not-the-password" }),
+            ),
+        )
+        .await;
+
+        let (unknown_user, unknown_body) = send(
+            &app.router,
+            post_json(
+                "/auth/login",
+                serde_json::json!({ "username": "nobody", "password": "a-good-password" }),
+            ),
+        )
+        .await;
+
+        assert_eq!(wrong_password, StatusCode::UNAUTHORIZED);
+        assert_eq!(unknown_user, StatusCode::UNAUTHORIZED);
+        // Identical responses: the endpoint must not reveal which usernames
+        // exist.
+        assert_eq!(wrong_body, unknown_body);
+    }
+
+    #[tokio::test]
+    async fn session_rejects_a_missing_or_bad_token() {
+        let app = test_app().await;
+        setup_and_login(&app.router).await;
+
+        for request in [
+            get("/auth/session"),
+            get_with_auth("/auth/session", "Bearer not-a-token"),
+            get_with_auth("/auth/session", "Basic abc"),
+        ] {
+            let (status, _) = send(&app.router, request).await;
+            assert_eq!(status, StatusCode::UNAUTHORIZED);
         }
     }
 
-    #[cfg(feature = "dev-stub-auth")]
-    mod stub_present {
-        use super::*;
-        use crate::dev_stub_auth::{DEV_STUB_TOKEN, DEV_STUB_USER};
+    #[tokio::test]
+    async fn a_token_from_another_instance_is_rejected() {
+        // Each instance generates its own signing secret, so a token minted by
+        // one must not authenticate against another.
+        let first = test_app().await;
+        let second = test_app().await;
 
-        fn get_with_auth(uri: &str, header: &str) -> Request<Body> {
-            Request::builder()
-                .uri(uri)
-                .header("authorization", header)
-                .body(Body::empty())
-                .expect("valid request")
-        }
+        let (access, _) = setup_and_login(&first.router).await;
+        setup_and_login(&second.router).await;
 
-        #[tokio::test]
-        async fn login_accepts_arbitrary_credentials() {
-            let before = chrono::Utc::now();
-            let (status, body) = call(post_json(
-                "/auth/login",
-                serde_json::json!({ "username": "", "password": "hunter2" }),
-            ))
-            .await;
+        let (status, _) = send(
+            &second.router,
+            get_with_auth("/auth/session", &format!("Bearer {access}")),
+        )
+        .await;
 
-            assert_eq!(status, StatusCode::OK);
-            assert_eq!(body["token"], DEV_STUB_TOKEN);
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+    }
 
-            let expires_at: chrono::DateTime<chrono::Utc> = body["expiresAt"]
-                .as_str()
-                .expect("expiresAt must be a string")
-                .parse()
-                .expect("expiresAt must be RFC 3339");
-            assert!(
-                expires_at > before,
-                "expiresAt {expires_at} must be in the future"
-            );
+    /// The full session lifecycle, which is the flow every client walks.
+    #[tokio::test]
+    async fn setup_login_refresh_logout_and_replay() {
+        let app = test_app().await;
+        let (access, refresh) = setup_and_login(&app.router).await;
 
-            println!("POST /auth/login -> {status}\n{body:#}");
-        }
+        // The access token authenticates.
+        let (status, _) = send(
+            &app.router,
+            get_with_auth("/auth/session", &format!("Bearer {access}")),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
 
-        #[tokio::test]
-        async fn login_rejects_a_body_that_is_not_credentials() {
-            let (status, _) = call(post_json("/auth/login", serde_json::json!({ "x": 1 }))).await;
+        // Refreshing yields a new pair.
+        let (status, body) = send(
+            &app.router,
+            post_json(
+                "/auth/refresh",
+                serde_json::json!({ "refreshToken": refresh }),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "refresh failed: {body:#}");
+        let rotated = body["refreshToken"]
+            .as_str()
+            .expect("refreshToken")
+            .to_owned();
+        let new_access = body["accessToken"]
+            .as_str()
+            .expect("accessToken")
+            .to_owned();
+        assert_ne!(rotated, refresh, "the refresh token must rotate");
 
-            assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
-        }
+        // The new access token works, and carries the same permissions.
+        let (status, session) = send(
+            &app.router,
+            get_with_auth("/auth/session", &format!("Bearer {new_access}")),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(session["permissions"].as_array().expect("array").len(), 5);
 
-        #[tokio::test]
-        async fn session_accepts_the_stub_token() {
-            let (status, body) = call(get_with_auth(
-                "/auth/session",
-                &format!("Bearer {DEV_STUB_TOKEN}"),
-            ))
-            .await;
+        // The old refresh token was revoked by rotation and cannot be replayed.
+        let (status, _) = send(
+            &app.router,
+            post_json(
+                "/auth/refresh",
+                serde_json::json!({ "refreshToken": refresh }),
+            ),
+        )
+        .await;
+        assert_eq!(
+            status,
+            StatusCode::UNAUTHORIZED,
+            "a spent token must not work"
+        );
 
-            assert_eq!(status, StatusCode::OK);
-            assert_eq!(body["authenticated"], true);
-            assert_eq!(body["user"], DEV_STUB_USER);
+        // Logout revokes the rotated token.
+        let (status, _) = send(
+            &app.router,
+            post_json(
+                "/auth/logout",
+                serde_json::json!({ "refreshToken": rotated }),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::NO_CONTENT);
 
-            println!("GET /auth/session (valid) -> {status}\n{body:#}");
-        }
+        let (status, _) = send(
+            &app.router,
+            post_json(
+                "/auth/refresh",
+                serde_json::json!({ "refreshToken": rotated }),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+    }
 
-        #[tokio::test]
-        async fn session_rejects_a_wrong_token() {
-            let (status, body) = call(get_with_auth("/auth/session", "Bearer not-the-token")).await;
+    #[tokio::test]
+    async fn logout_with_an_unknown_token_still_succeeds() {
+        // Reporting "no such token" would let an unauthenticated caller probe
+        // token validity.
+        let app = test_app().await;
+        setup_and_login(&app.router).await;
 
-            assert_eq!(status, StatusCode::UNAUTHORIZED);
-            assert!(body["error"].is_string());
+        let (status, _) = send(
+            &app.router,
+            post_json(
+                "/auth/logout",
+                serde_json::json!({ "refreshToken": "nonsense" }),
+            ),
+        )
+        .await;
 
-            println!("GET /auth/session (wrong token) -> {status}\n{body:#}");
-        }
+        assert_eq!(status, StatusCode::NO_CONTENT);
+    }
 
-        #[tokio::test]
-        async fn session_rejects_a_missing_header() {
-            let (status, body) = call(get("/auth/session")).await;
+    #[tokio::test]
+    async fn connector_routes_still_work_after_the_stub_was_removed() {
+        let app = test_app().await;
 
-            assert_eq!(status, StatusCode::UNAUTHORIZED);
-            assert!(body["error"].is_string());
-        }
+        let (status, body) = send(&app.router, get("/connectors")).await;
+        assert_eq!(status, StatusCode::OK);
+        let entries = body.as_array().expect("array");
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0]["metadata"]["id"], "mock");
+        assert_eq!(entries[0]["status"]["health"], "healthy");
 
-        #[tokio::test]
-        async fn session_rejects_a_non_bearer_scheme() {
-            let (status, _) = call(get_with_auth(
-                "/auth/session",
-                &format!("Basic {DEV_STUB_TOKEN}"),
-            ))
-            .await;
+        let ids: Vec<&str> = entries[0]["actions"]
+            .as_array()
+            .expect("actions")
+            .iter()
+            .map(|action| action["id"].as_str().expect("id"))
+            .collect();
+        assert!(ids.contains(&"restart") && ids.contains(&"ping"), "{ids:?}");
 
-            assert_eq!(status, StatusCode::UNAUTHORIZED);
-        }
+        let (status, body) = send(
+            &app.router,
+            post_json("/connectors/mock/actions/restart", serde_json::json!({})),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["success"], true);
 
-        /// Setup starts incomplete on a fresh backend, which is what sends a
-        /// first-run client to the wizard.
-        #[tokio::test]
-        async fn setup_starts_incomplete() {
-            let (status, body) = call(get("/setup/status")).await;
-
-            assert_eq!(status, StatusCode::OK);
-            assert_eq!(body["setupComplete"], false);
-
-            println!("GET /setup/status (fresh) -> {status}\n{body:#}");
-        }
-
-        #[tokio::test]
-        async fn completing_setup_flips_the_flag() {
-            // One router for the whole test: the state is per-router, so a
-            // second `app()` would start over with setup incomplete.
-            let app = app();
-
-            let (status, body) = send(
-                &app,
-                post_json(
-                    "/setup",
-                    serde_json::json!({
-                        "instanceName": "Example Homelab",
-                        "adminUsername": "admin",
-                        "adminPassword": "hunter2",
-                    }),
-                ),
-            )
-            .await;
-            assert_eq!(status, StatusCode::OK);
-            assert_eq!(body["setupComplete"], true);
-            println!("POST /setup -> {status}\n{body:#}");
-
-            let (status, body) = send(&app, get("/setup/status")).await;
-            assert_eq!(status, StatusCode::OK);
-            assert_eq!(body["setupComplete"], true);
-        }
-
-        /// A second setup must not silently seize an instance that is already
-        /// configured — the property that actually matters once these values
-        /// are real.
-        #[tokio::test]
-        async fn setup_twice_conflicts() {
-            let app = app();
-            let request = || {
-                post_json(
-                    "/setup",
-                    serde_json::json!({
-                        "instanceName": "Example Homelab",
-                        "adminUsername": "admin",
-                        "adminPassword": "hunter2",
-                    }),
-                )
-            };
-
-            let (first, _) = send(&app, request()).await;
-            assert_eq!(first, StatusCode::OK);
-
-            let (second, body) = send(&app, request()).await;
-            assert_eq!(second, StatusCode::CONFLICT);
-            assert!(
-                body["error"].as_str().is_some_and(|e| !e.is_empty()),
-                "a 409 must carry the shared error body, got {body:#}"
-            );
-
-            println!("POST /setup (already complete) -> {second}\n{body:#}");
-        }
-
-        /// Setup state is per-instance and starts fresh: a new router has not
-        /// been set up, even though another test just completed setup on its
-        /// own. This is the in-memory behaviour the real implementation
-        /// replaces with persistence.
-        #[tokio::test]
-        async fn setup_state_does_not_leak_between_instances() {
-            let configured = app();
-            let (status, _) = send(
-                &configured,
-                post_json(
-                    "/setup",
-                    serde_json::json!({
-                        "instanceName": "Example Homelab",
-                        "adminUsername": "admin",
-                        "adminPassword": "hunter2",
-                    }),
-                ),
-            )
-            .await;
-            assert_eq!(status, StatusCode::OK);
-
-            let (status, body) = send(&app(), get("/setup/status")).await;
-            assert_eq!(status, StatusCode::OK);
-            assert_eq!(body["setupComplete"], false);
-        }
-
-        #[tokio::test]
-        async fn connector_list_is_an_array_with_the_mock() {
-            let (status, body) = call(get("/connectors")).await;
-
-            assert_eq!(status, StatusCode::OK);
-            let entries = body.as_array().expect("the list must be a JSON array");
-            assert_eq!(entries.len(), 1);
-            assert_eq!(entries[0]["metadata"]["id"], "mock");
-            assert_eq!(entries[0]["status"]["health"], "healthy");
-            assert!(
-                entries[0].get("statusError").is_none(),
-                "a healthy connector must not carry statusError"
-            );
-
-            // The dashboard renders one button per action, so the list has to
-            // carry them; without this a client would have to hardcode ids.
-            let actions = entries[0]["actions"]
-                .as_array()
-                .expect("every entry must carry an actions array");
-            let ids: Vec<&str> = actions
-                .iter()
-                .map(|action| action["id"].as_str().expect("action ids are strings"))
-                .collect();
-            assert!(ids.contains(&"restart"), "actions were {ids:?}");
-            assert!(ids.contains(&"ping"), "actions were {ids:?}");
-            assert!(actions[0].get("label").is_some());
-            assert!(actions[0].get("paramsSchema").is_some());
-
-            println!("GET /connectors -> {status}\n{body:#}");
-        }
-
-        #[tokio::test]
-        async fn restart_action_succeeds_and_echoes_its_params() {
-            let (status, body) = call(post_json(
-                "/connectors/mock/actions/restart",
-                serde_json::json!({ "force": true }),
-            ))
-            .await;
-
-            assert_eq!(status, StatusCode::OK);
-            assert_eq!(body["success"], true);
-            assert_eq!(
-                body["payload"]["params"],
-                serde_json::json!({"force": true})
-            );
-
-            println!("POST /connectors/mock/actions/restart -> {status}\n{body:#}");
-        }
-
-        #[tokio::test]
-        async fn ping_action_succeeds_without_a_body() {
-            let request = Request::builder()
-                .method("POST")
-                .uri("/connectors/mock/actions/ping")
-                .body(Body::empty())
-                .expect("valid request");
-            let (status, body) = call(request).await;
-
-            assert_eq!(status, StatusCode::OK);
-            assert_eq!(body["success"], true);
-
-            println!("POST /connectors/mock/actions/ping (no body) -> {status}\n{body:#}");
-        }
-
-        #[tokio::test]
-        async fn unknown_connector_id_is_not_found() {
-            let (status, body) = call(post_json(
-                "/connectors/nope/actions/ping",
-                serde_json::json!({}),
-            ))
-            .await;
-
-            assert_eq!(status, StatusCode::NOT_FOUND);
-            assert!(body["error"].is_string());
-            assert!(
-                body.get("connectorError").is_none(),
-                "an unknown connector never produced a ConnectorError"
-            );
-
-            println!("POST /connectors/nope/actions/ping -> {status}\n{body:#}");
-        }
-
-        #[tokio::test]
-        async fn unknown_action_id_is_not_found() {
-            let (status, body) = call(post_json(
-                "/connectors/mock/actions/self-destruct",
-                serde_json::json!({}),
-            ))
-            .await;
-
-            assert_eq!(status, StatusCode::NOT_FOUND);
-            assert_eq!(
-                body["connectorError"],
-                serde_json::json!({ "invalidAction": { "actionId": "self-destruct" } })
-            );
-
-            println!("POST /connectors/mock/actions/self-destruct -> {status}\n{body:#}");
-        }
-
-        #[tokio::test]
-        async fn a_malformed_body_is_a_bad_request() {
-            let request = Request::builder()
-                .method("POST")
-                .uri("/connectors/mock/actions/ping")
-                .header("content-type", "application/json")
-                .body(Body::from("{not json"))
-                .expect("valid request");
-            let (status, body) = call(request).await;
-
-            assert_eq!(status, StatusCode::BAD_REQUEST);
-            assert!(body["error"].is_string());
-
-            println!("POST .../ping (malformed body) -> {status}\n{body:#}");
-        }
+        let (status, _) = send(
+            &app.router,
+            post_json("/connectors/nope/actions/ping", serde_json::json!({})),
+        )
+        .await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
     }
 }

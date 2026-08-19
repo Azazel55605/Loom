@@ -8,8 +8,8 @@
     "dev": "vite",
     "lint": "eslint .",
     "preview": "vite preview",
-    "test": "tsc --noEmit && eslint .",
-    "typecheck": "tsc --noEmit"
+    "test": "tsc -b && eslint .",
+    "typecheck": "tsc -b"
   },
   "dependencies": {
     "@hookform/resolvers": "^5.9.1",

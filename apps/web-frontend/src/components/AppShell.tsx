@@ -45,10 +45,10 @@ export function AppShell({ children }: { children: React.ReactNode }) {
           <div className="ml-auto flex items-center gap-3">
             {user !== null && (
               <span className="hidden text-sm text-muted-foreground sm:inline">
-                {user}
+                {user.username}
               </span>
             )}
-            <Button variant="ghost" size="sm" onClick={signOut}>
+            <Button variant="ghost" size="sm" onClick={() => void signOut()}>
               <LogOut aria-hidden="true" />
               Sign out
             </Button>
