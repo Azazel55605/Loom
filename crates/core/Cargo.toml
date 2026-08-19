@@ -8,3 +8,11 @@ repository.workspace = true
 rust-version.workspace = true
 
 [dependencies]
+async-trait.workspace = true
+chrono.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+# Only for `tokio::time::sleep`, which `MockConnector` needs to simulate
+# latency; core spawns nothing and owns no runtime.
+tokio.workspace = true
