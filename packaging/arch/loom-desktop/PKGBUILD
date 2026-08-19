@@ -27,7 +27,7 @@ options=('!strip' '!debug')
 source=("${pkgname}-${pkgver}.deb::${url}/releases/download/v${pkgver}-desktop/Loom_${pkgver}_amd64.deb")
 # Replace with the real digest at release time (`updpkgsums`). SKIP is only
 # acceptable while the release artifacts do not exist yet.
-sha256sums=('SKIP')
+sha256sums=('updkgsums')
 
 package() {
   # A .deb is an ar archive; the payload we want is its data.tar.* member.

@@ -3,8 +3,6 @@
 # VCS package: builds the desktop client from the current git HEAD. Unlike
 # ../loom-desktop/PKGBUILD this needs no published release to exist, which is
 # why CI validates this variant.
-#
-# Replace <owner> below with the GitHub owner before publishing to the AUR.
 
 pkgname=loom-desktop-git
 pkgver=0.0.0.r0.g0000000
@@ -18,8 +16,8 @@ makedepends=('git' 'rust' 'cargo' 'nodejs' 'pnpm' 'pkgconf' 'libsoup3' 'openssl'
 provides=('loom-desktop')
 conflicts=('loom-desktop')
 options=('!strip' '!debug' '!lto')
-source=("${pkgname}::git+https://github.com/<owner>/loom.git")
-sha256sums=('SKIP')
+source=("${pkgname}::git+https://github.com/Azazel55605/loom.git")
+sha256sums=('updkgsums')
 
 pkgver() {
   cd "${srcdir}/${pkgname}"
