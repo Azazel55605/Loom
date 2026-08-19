@@ -63,6 +63,58 @@ rather than failing the run, so this stays correct as `apps/` grows.
 > `--if-present` still skips it silently — a passing exit code is not by itself
 > proof that a given component built.
 
+## Running the web frame locally
+
+The login flow and the connector dashboard talk to endpoints that **only exist
+in a backend built with the `dev-stub-auth` feature**. Against a default build
+they answer 404, which shows up as a failed sign-in rather than anything that
+names the cause — so if the frontend loads but nothing works, check this first.
+
+Two processes, in two terminals:
+
+```sh
+# 1. Backend, with the stub auth and mock connector compiled in.
+cargo run --package loom-web-backend --features dev-stub-auth
+
+# 2. Frontend.
+pnpm --filter web-frontend dev
+```
+
+Then open the URL Vite prints (`http://localhost:5173` by default) and sign in
+with **any username and password**. The stub accepts everything — see
+[`API_CONTRACT.md`](./API_CONTRACT.md). That is the intended behaviour, not a
+bug and not a bypass you have stumbled onto: there is no credential storage
+behind it yet, deliberately. You should land on a dashboard showing one
+connector, the `MockConnector`, with `Restart` and `Ping` buttons.
+
+The backend logs a `WARN` line at startup whenever the feature is compiled in,
+so a build that should not have it is visible in the log rather than only in the
+Cargo invocation that produced it.
+
+> **`--features dev-stub-auth` is a local development invocation and nothing
+> else.** It must never be enabled by default, in any Docker image, or in any
+> release CI workflow — the stub accepts any credentials and leaves the
+> connector routes unauthenticated, so a build carrying it is a build anyone who
+> can reach the port can drive. See the rule in
+> [`AGENT_INSTRUCTIONS.md`](./AGENT_INSTRUCTIONS.md) and the feature comment in
+> [`../crates/web-backend/Cargo.toml`](../crates/web-backend/Cargo.toml).
+
+### How the frontend reaches the backend
+
+The browser requests `/api/*` on the frontend's own origin; the Vite dev server
+proxies that to the backend and strips the `/api` prefix, exactly as the
+production nginx does. So `/api/auth/login` in the browser arrives at the
+backend as `/auth/login`, and the backend's own paths carry no `/api` prefix.
+See [ADR 0006](./adr/0006-frontend-api-same-origin.md) and the path table in
+[`API_CONTRACT.md`](./API_CONTRACT.md).
+
+Nothing needs configuring for the default case. Two escape hatches exist:
+
+| Variable | Where it is read | Effect |
+| --- | --- | --- |
+| `LOOM_BACKEND_ORIGIN` | Vite dev server, nginx | Proxy target. Defaults to `http://localhost:8080` in dev. Set it when the backend is not on the default port. |
+| `VITE_API_URL` | Frontend bundle, at build time | Absolute API base, bypassing the proxy entirely. Makes requests cross-origin and therefore subject to the CORS policy in [ADR 0005](./adr/0005-cors-policy.md). For deployments without the proxy; not needed for local development. |
+
 ## Desktop specifics
 
 `pnpm build:desktop` runs `tauri build`, which compiles the Rust shell and emits

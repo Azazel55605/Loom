@@ -13,6 +13,15 @@ const badgeVariants = cva(
         destructive:
           "border-transparent bg-destructive text-destructive-foreground shadow",
         outline: "text-foreground",
+        // Connector health. Added as CVA variants rather than a new component
+        // or ad-hoc classes at the call site, per step (b) of the sourcing rule
+        // in docs/UI_GUIDELINES.md. The colours resolve from the --status-*
+        // tokens in index.css; nothing here is a literal.
+        healthy: "border-transparent bg-status-healthy text-status-foreground shadow",
+        degraded:
+          "border-transparent bg-status-degraded text-status-foreground shadow",
+        down: "border-transparent bg-status-down text-status-foreground shadow",
+        unknown: "border-transparent bg-status-unknown text-status-foreground",
       },
     },
     defaultVariants: {

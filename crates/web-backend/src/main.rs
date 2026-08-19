@@ -113,7 +113,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     #[cfg(feature = "dev-stub-auth")]
     tracing::warn!(
-        "dev-stub-auth is COMPILED IN: /api/auth/login accepts ANY username and \
+        "dev-stub-auth is COMPILED IN: /auth/login accepts ANY username and \
          password, and the connector routes require no authentication at all. \
          This build is for local development only and must not be exposed to any \
          network you do not fully control. See docs/API_CONTRACT.md."
@@ -197,7 +197,7 @@ mod tests {
         #[tokio::test]
         async fn login_route_does_not_exist() {
             let (status, _) = call(post_json(
-                "/api/auth/login",
+                "/auth/login",
                 serde_json::json!({ "username": "anyone", "password": "anything" }),
             ))
             .await;
@@ -207,18 +207,18 @@ mod tests {
 
         #[tokio::test]
         async fn session_route_does_not_exist() {
-            let (status, _) = call(get("/api/auth/session")).await;
+            let (status, _) = call(get("/auth/session")).await;
 
             assert_eq!(status, StatusCode::NOT_FOUND);
         }
 
         #[tokio::test]
         async fn connector_routes_do_not_exist() {
-            let (list, _) = call(get("/api/connectors")).await;
+            let (list, _) = call(get("/connectors")).await;
             assert_eq!(list, StatusCode::NOT_FOUND);
 
             let (action, _) = call(post_json(
-                "/api/connectors/mock/actions/restart",
+                "/connectors/mock/actions/restart",
                 serde_json::json!({}),
             ))
             .await;
@@ -243,7 +243,7 @@ mod tests {
         async fn login_accepts_arbitrary_credentials() {
             let before = chrono::Utc::now();
             let (status, body) = call(post_json(
-                "/api/auth/login",
+                "/auth/login",
                 serde_json::json!({ "username": "", "password": "hunter2" }),
             ))
             .await;
@@ -261,13 +261,12 @@ mod tests {
                 "expiresAt {expires_at} must be in the future"
             );
 
-            println!("POST /api/auth/login -> {status}\n{body:#}");
+            println!("POST /auth/login -> {status}\n{body:#}");
         }
 
         #[tokio::test]
         async fn login_rejects_a_body_that_is_not_credentials() {
-            let (status, _) =
-                call(post_json("/api/auth/login", serde_json::json!({ "x": 1 }))).await;
+            let (status, _) = call(post_json("/auth/login", serde_json::json!({ "x": 1 }))).await;
 
             assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
         }
@@ -275,7 +274,7 @@ mod tests {
         #[tokio::test]
         async fn session_accepts_the_stub_token() {
             let (status, body) = call(get_with_auth(
-                "/api/auth/session",
+                "/auth/session",
                 &format!("Bearer {DEV_STUB_TOKEN}"),
             ))
             .await;
@@ -284,23 +283,22 @@ mod tests {
             assert_eq!(body["authenticated"], true);
             assert_eq!(body["user"], DEV_STUB_USER);
 
-            println!("GET /api/auth/session (valid) -> {status}\n{body:#}");
+            println!("GET /auth/session (valid) -> {status}\n{body:#}");
         }
 
         #[tokio::test]
         async fn session_rejects_a_wrong_token() {
-            let (status, body) =
-                call(get_with_auth("/api/auth/session", "Bearer not-the-token")).await;
+            let (status, body) = call(get_with_auth("/auth/session", "Bearer not-the-token")).await;
 
             assert_eq!(status, StatusCode::UNAUTHORIZED);
             assert!(body["error"].is_string());
 
-            println!("GET /api/auth/session (wrong token) -> {status}\n{body:#}");
+            println!("GET /auth/session (wrong token) -> {status}\n{body:#}");
         }
 
         #[tokio::test]
         async fn session_rejects_a_missing_header() {
-            let (status, body) = call(get("/api/auth/session")).await;
+            let (status, body) = call(get("/auth/session")).await;
 
             assert_eq!(status, StatusCode::UNAUTHORIZED);
             assert!(body["error"].is_string());
@@ -309,7 +307,7 @@ mod tests {
         #[tokio::test]
         async fn session_rejects_a_non_bearer_scheme() {
             let (status, _) = call(get_with_auth(
-                "/api/auth/session",
+                "/auth/session",
                 &format!("Basic {DEV_STUB_TOKEN}"),
             ))
             .await;
@@ -319,7 +317,7 @@ mod tests {
 
         #[tokio::test]
         async fn connector_list_is_an_array_with_the_mock() {
-            let (status, body) = call(get("/api/connectors")).await;
+            let (status, body) = call(get("/connectors")).await;
 
             assert_eq!(status, StatusCode::OK);
             let entries = body.as_array().expect("the list must be a JSON array");
@@ -331,13 +329,27 @@ mod tests {
                 "a healthy connector must not carry statusError"
             );
 
-            println!("GET /api/connectors -> {status}\n{body:#}");
+            // The dashboard renders one button per action, so the list has to
+            // carry them; without this a client would have to hardcode ids.
+            let actions = entries[0]["actions"]
+                .as_array()
+                .expect("every entry must carry an actions array");
+            let ids: Vec<&str> = actions
+                .iter()
+                .map(|action| action["id"].as_str().expect("action ids are strings"))
+                .collect();
+            assert!(ids.contains(&"restart"), "actions were {ids:?}");
+            assert!(ids.contains(&"ping"), "actions were {ids:?}");
+            assert!(actions[0].get("label").is_some());
+            assert!(actions[0].get("paramsSchema").is_some());
+
+            println!("GET /connectors -> {status}\n{body:#}");
         }
 
         #[tokio::test]
         async fn restart_action_succeeds_and_echoes_its_params() {
             let (status, body) = call(post_json(
-                "/api/connectors/mock/actions/restart",
+                "/connectors/mock/actions/restart",
                 serde_json::json!({ "force": true }),
             ))
             .await;
@@ -349,14 +361,14 @@ mod tests {
                 serde_json::json!({"force": true})
             );
 
-            println!("POST /api/connectors/mock/actions/restart -> {status}\n{body:#}");
+            println!("POST /connectors/mock/actions/restart -> {status}\n{body:#}");
         }
 
         #[tokio::test]
         async fn ping_action_succeeds_without_a_body() {
             let request = Request::builder()
                 .method("POST")
-                .uri("/api/connectors/mock/actions/ping")
+                .uri("/connectors/mock/actions/ping")
                 .body(Body::empty())
                 .expect("valid request");
             let (status, body) = call(request).await;
@@ -364,13 +376,13 @@ mod tests {
             assert_eq!(status, StatusCode::OK);
             assert_eq!(body["success"], true);
 
-            println!("POST /api/connectors/mock/actions/ping (no body) -> {status}\n{body:#}");
+            println!("POST /connectors/mock/actions/ping (no body) -> {status}\n{body:#}");
         }
 
         #[tokio::test]
         async fn unknown_connector_id_is_not_found() {
             let (status, body) = call(post_json(
-                "/api/connectors/nope/actions/ping",
+                "/connectors/nope/actions/ping",
                 serde_json::json!({}),
             ))
             .await;
@@ -382,13 +394,13 @@ mod tests {
                 "an unknown connector never produced a ConnectorError"
             );
 
-            println!("POST /api/connectors/nope/actions/ping -> {status}\n{body:#}");
+            println!("POST /connectors/nope/actions/ping -> {status}\n{body:#}");
         }
 
         #[tokio::test]
         async fn unknown_action_id_is_not_found() {
             let (status, body) = call(post_json(
-                "/api/connectors/mock/actions/self-destruct",
+                "/connectors/mock/actions/self-destruct",
                 serde_json::json!({}),
             ))
             .await;
@@ -399,14 +411,14 @@ mod tests {
                 serde_json::json!({ "invalidAction": { "actionId": "self-destruct" } })
             );
 
-            println!("POST /api/connectors/mock/actions/self-destruct -> {status}\n{body:#}");
+            println!("POST /connectors/mock/actions/self-destruct -> {status}\n{body:#}");
         }
 
         #[tokio::test]
         async fn a_malformed_body_is_a_bad_request() {
             let request = Request::builder()
                 .method("POST")
-                .uri("/api/connectors/mock/actions/ping")
+                .uri("/connectors/mock/actions/ping")
                 .header("content-type", "application/json")
                 .body(Body::from("{not json"))
                 .expect("valid request");

@@ -32,6 +32,15 @@ export default {
           DEFAULT: "hsl(var(--card))",
           foreground: "hsl(var(--card-foreground))",
         },
+        // Connector health states. Semantic status colours with fixed hues,
+        // deliberately not accent-derived — see the note in src/index.css.
+        status: {
+          healthy: "hsl(var(--status-healthy))",
+          degraded: "hsl(var(--status-degraded))",
+          down: "hsl(var(--status-down))",
+          unknown: "hsl(var(--status-unknown))",
+          foreground: "hsl(var(--status-foreground))",
+        },
       },
       borderRadius: {
         lg: "var(--radius)",

@@ -5,9 +5,9 @@
 //! `docs/adr/0003-auth-model-vpn-vs-external.md` (VPN-trusted owner, Authentik
 //! for everyone else) and it implements none of it:
 //!
-//! - `POST /api/auth/login` accepts **any** username and password and hands
+//! - `POST /auth/login` accepts **any** username and password and hands
 //!   back a fixed, guessable token.
-//! - `GET /api/auth/session` compares against that one hard-coded token.
+//! - `GET /auth/session` compares against that one hard-coded token.
 //! - The connector routes are **unauthenticated** — anyone who can reach the
 //!   port can execute connector actions.
 //!
@@ -41,7 +41,8 @@ use axum::{
 };
 use chrono::{DateTime, Duration, Utc};
 use loom_core::connector::{
-    mock::MockConnector, Connector, ConnectorError, ConnectorMetadata, ConnectorStatus,
+    mock::MockConnector, Connector, ConnectorAction, ConnectorError, ConnectorMetadata,
+    ConnectorStatus,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -86,15 +87,21 @@ impl StubState {
 }
 
 /// The stub's routes, ready to be merged into the main router.
+///
+/// Note the absence of an `/api` prefix. The backend's URL space is flat, the
+/// same way `/health` already is: the prefix belongs to whatever routes traffic
+/// *to* the backend, not to the backend itself. The web frontend is served by
+/// nginx (or the Vite dev server) which proxies `/api/*` here and strips the
+/// prefix, so the browser stays same-origin; the desktop and mobile clients
+/// have no proxy in the path and call these paths directly. Adding `/api` here
+/// would make the browser ask for `/api/api/auth/login`. See
+/// `docs/adr/0006-frontend-api-same-origin.md`.
 pub fn routes() -> Router {
     Router::new()
-        .route("/api/auth/login", post(login))
-        .route("/api/auth/session", get(session))
-        .route("/api/connectors", get(list_connectors))
-        .route(
-            "/api/connectors/{id}/actions/{action_id}",
-            post(execute_action),
-        )
+        .route("/auth/login", post(login))
+        .route("/auth/session", get(session))
+        .route("/connectors", get(list_connectors))
+        .route("/connectors/{id}/actions/{action_id}", post(execute_action))
         .with_state(StubState::with_mock_connector())
 }
 
@@ -134,7 +141,7 @@ impl ErrorBody {
     }
 }
 
-/// `POST /api/auth/login` request body. Both fields are read and discarded.
+/// `POST /auth/login` request body. Both fields are read and discarded.
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct LoginRequest {
@@ -144,7 +151,7 @@ struct LoginRequest {
     password: String,
 }
 
-/// `POST /api/auth/login` response body.
+/// `POST /auth/login` response body.
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct LoginResponse {
@@ -152,7 +159,7 @@ struct LoginResponse {
     expires_at: DateTime<Utc>,
 }
 
-/// `GET /api/auth/session` response body for an accepted token.
+/// `GET /auth/session` response body for an accepted token.
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct SessionResponse {
@@ -160,7 +167,7 @@ struct SessionResponse {
     user: &'static str,
 }
 
-/// One entry in `GET /api/connectors`.
+/// One entry in `GET /connectors`.
 ///
 /// Nested rather than flattened: `metadata` and `status` are Core wire types
 /// that clients already deserialize elsewhere, so keeping them intact means the
@@ -175,6 +182,15 @@ struct ConnectorListEntry {
     /// blank out the whole list, so the failure is reported per entry.
     #[serde(skip_serializing_if = "Option::is_none")]
     status_error: Option<ConnectorError>,
+    /// What this connector can be asked to do, right now.
+    ///
+    /// Included in the list rather than behind a second request because the
+    /// dashboard needs it for every connector it renders: fetching it per
+    /// connector would be an N+1 round trip to build one screen. It is also the
+    /// whole point of the contract — a client that had to hardcode action ids
+    /// would make `Connector::actions` decorative. May be empty; a read-only
+    /// connector that only reports health is valid.
+    actions: Vec<ConnectorAction>,
 }
 
 /// Accepts anything and issues the fixed token.
@@ -224,6 +240,7 @@ async fn list_connectors(State(state): State<StubState>) -> Json<Vec<ConnectorLi
             metadata: connector.metadata(),
             status,
             status_error,
+            actions: connector.actions().await,
         });
     }
 
@@ -271,7 +288,7 @@ async fn execute_action(
 /// caller's mistake, everything else is the upstream service failing Loom.
 ///
 /// - `InvalidAction` → **404**, consistent with an unknown connector id: the
-///   `/api/connectors/{id}/actions/{action_id}` path names a thing that is not
+///   `/connectors/{id}/actions/{action_id}` path names a thing that is not
 ///   there.
 /// - `InvalidParams` → **400**, the request reached a real action and was
 ///   malformed.

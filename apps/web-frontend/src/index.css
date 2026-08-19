@@ -28,6 +28,18 @@
 
     --radius: 0.75rem;
 
+    /* Service health states. Deliberately NOT derived from --accent: a badge
+       that says "healthy" has to keep meaning healthy when the user picks a red
+       accent, so these are semantic status colours with fixed hues. They are
+       still tokens rather than per-component classes, so there is exactly one
+       place to change them. --status-down reuses the destructive hue so a
+       failing service and a destructive action read as the same kind of red. */
+    --status-healthy: 142 71% 38%;
+    --status-degraded: 38 92% 42%;
+    --status-down: var(--destructive);
+    --status-unknown: 215 16% 47%;
+    --status-foreground: 210 40% 98%;
+
     /* Blur intensity for elevated/glass surfaces. Adjustable; set to 0 by the
        reduced-transparency fallback below. */
     --blur-surface: 12px;
@@ -46,6 +58,12 @@
 
     --border: 217 33% 20%;
     --input: 217 33% 20%;
+
+    /* Lifted for contrast against the dark background; the hues are unchanged
+       so a state reads as the same colour in both themes. */
+    --status-healthy: 142 60% 45%;
+    --status-degraded: 38 92% 50%;
+    --status-unknown: 215 20% 55%;
   }
 
   /* Reduced transparency: solid surfaces instead of translucent ones.

@@ -15,13 +15,36 @@ to three clients, and make it deliberately.
 
 ## The auth and connector routes only exist in a dev build
 
-Everything under `/api/` is compiled in by the **non-default `dev-stub-auth`**
-Cargo feature of `loom-web-backend`. In a default build those routes do not
+The auth and connector routes are compiled in by the **non-default
+`dev-stub-auth`** Cargo feature of `loom-web-backend`. In a default build those routes do not
 exist: they are absent from the routing table and answer **404**, not 401. This
 is asserted by tests rather than documented and hoped for — see the
 `stub_absent` module in `crates/web-backend/src/main.rs`.
 
 `GET /health` is the only route in a default build.
+
+## Paths carry no `/api` prefix
+
+Backend paths are written exactly as the backend serves them: `/health`,
+`/auth/login`, `/connectors`. There is no `/api` prefix in the backend's own URL
+space, and that is deliberate — the prefix belongs to whoever is *routing* to
+the backend, not to the backend itself.
+
+What each client does with that differs, and both are correct:
+
+| Client | Requests | Reaches the backend as |
+| --- | --- | --- |
+| web-frontend | `/api/auth/login`, on its own origin | `/auth/login` |
+| desktop, mobile | `<server-url>/auth/login`, directly | `/auth/login` |
+
+The web frontend's server — nginx in production, the Vite dev server locally —
+proxies `/api/*` to the backend and strips the prefix, which is what keeps the
+browser same-origin and keeps any backend host out of the published bundle. See
+[ADR 0006](./adr/0006-frontend-api-same-origin.md); the prefix-stripping rewrite
+lives in `apps/web-frontend/nginx.conf` and `apps/web-frontend/vite.config.ts`.
+
+The desktop and mobile clients talk to a user-supplied server URL directly, with
+no proxy in the path, so they use the unprefixed paths as written here.
 
 ## Conventions
 
@@ -43,7 +66,7 @@ Other conventions:
 | Key order | Not significant. Serialization order follows the Rust struct, but clients must not depend on it. |
 | Timestamps | RFC 3339, UTC, `Z`-suffixed (`"2026-08-19T12:00:00Z"`). |
 | Absent values | An optional field is either serialized as `null` or omitted entirely. Which one it is is part of the contract and is stated per field below. |
-| Path parameters | Connector and action ids are path segments: `/api/connectors/{id}/actions/{actionId}`. |
+| Path parameters | Connector and action ids are path segments: `/connectors/{id}/actions/{actionId}`. |
 
 CORS is permissive by default and configurable via
 `LOOM_CORS_ALLOWED_ORIGINS`; the reasoning and the conditions under which it
@@ -78,7 +101,7 @@ prose:
 
 Two rejections happen in Axum's extractors, *before* any Loom handler runs, and
 therefore do **not** use this shape — they answer `text/plain`. Both apply only
-to `POST /api/auth/login`, the one endpoint that uses the `Json` extractor:
+to `POST /auth/login`, the one endpoint that uses the `Json` extractor:
 
 - **415 Unsupported Media Type** — request had no `Content-Type:
   application/json`.
@@ -116,7 +139,7 @@ deliberate change, not a drive-by fix.
 
 Only 200 is returned; the handler is infallible.
 
-### `POST /api/auth/login`
+### `POST /auth/login`
 
 Requires `dev-stub-auth`. **Accepts any credentials.**
 
@@ -150,7 +173,7 @@ discarded. There is no user store to check them against.
 | 422 | Body was JSON but lacked `username` or `password`. Plain-text body. |
 | 404 | The feature is not compiled in. |
 
-### `GET /api/auth/session`
+### `GET /auth/session`
 
 Requires `dev-stub-auth`. Reports whether the presented bearer token is the
 stub token.
@@ -181,7 +204,7 @@ token:
 | 401 | No `Authorization` header, a non-`Bearer` scheme, or a token that is not the stub token. |
 | 404 | The feature is not compiled in. |
 
-### `GET /api/connectors`
+### `GET /connectors`
 
 Requires `dev-stub-auth`. **No authentication is checked** — see
 [Known temporary behavior](#known-temporary-behavior).
@@ -203,7 +226,21 @@ Requires `dev-stub-auth`. **No authentication is checked** — see
       "health": "healthy",
       "details": {},
       "lastChecked": "2026-08-19T08:45:27.380462351Z"
-    }
+    },
+    "actions": [
+      {
+        "id": "restart",
+        "label": "Restart",
+        "description": "Pretends to restart the simulated service.",
+        "paramsSchema": {}
+      },
+      {
+        "id": "ping",
+        "label": "Ping",
+        "description": "Pretends to check that the simulated service answers.",
+        "paramsSchema": {}
+      }
+    ]
   }
 ]
 ```
@@ -214,15 +251,23 @@ and not a reshape of the response — the client's list rendering, its TypeScrip
 types, and its loading states are all written once and stay correct. The
 backend's registry is `Vec<Arc<dyn Connector>>` for the same reason.
 
-`metadata` and `status` are nested rather than flattened into the element,
-because both are Core wire types the clients deserialize elsewhere too. Nesting
-lets the TypeScript types compose instead of being re-declared per response.
+`metadata`, `status`, and `actions` are nested rather than flattened into the
+element, because all three are Core wire types the clients deserialize elsewhere
+too. Nesting lets the TypeScript types compose instead of being re-declared per
+response.
+
+`actions` is included here rather than behind a separate request because the
+dashboard needs it for every connector it draws: fetching it per connector would
+be an N+1 round trip to build one screen. It is also what makes the contract
+mean anything — a client that had to hardcode action ids would reduce
+`Connector::actions` to decoration.
 
 | Field | JSON type | Meaning | Nullability |
 | --- | --- | --- | --- |
 | `metadata` | object | `ConnectorMetadata`. Always available; it is synchronous and never fails. | Always present. |
 | `status` | object | `ConnectorStatus` from a successful `status()` call. | **`null`** when the check itself failed. |
 | `statusError` | object | The `ConnectorError` that made `status` null. | **Omitted** (not null) on the healthy path. |
+| `actions` | array | `ConnectorAction[]` — what this connector can be asked to do right now. | Always present; **may be empty** for a read-only connector. |
 
 **One failing connector does not fail the list.** A connector whose `status()`
 returns `Err` contributes an element with `status: null` and a `statusError`,
@@ -238,7 +283,8 @@ and every other connector still reports normally:
       "version": "0.1.0"
     },
     "status": null,
-    "statusError": { "unreachable": { "reason": "connection refused" } }
+    "statusError": { "unreachable": { "reason": "connection refused" } },
+    "actions": []
   }
 ]
 ```
@@ -255,7 +301,7 @@ in `statusError`. `statusError` means Loom could not get a reading at all.
 | 200 | The list was produced. This is the only outcome, including when every connector failed. |
 | 404 | The feature is not compiled in. |
 
-### `POST /api/connectors/{id}/actions/{actionId}`
+### `POST /connectors/{id}/actions/{actionId}`
 
 Requires `dev-stub-auth`. **No authentication is checked.** Executes one action
 on one connector.
@@ -306,7 +352,7 @@ everything else is Loom failing, or being failed by the upstream service.
 
 | Variant | Status | Reasoning |
 | --- | --- | --- |
-| `InvalidAction` | 404 Not Found | Consistent with an unknown connector id — the path `/api/connectors/{id}/actions/{actionId}` names something that is not there. |
+| `InvalidAction` | 404 Not Found | Consistent with an unknown connector id — the path `/connectors/{id}/actions/{actionId}` names something that is not there. |
 | `InvalidParams` | 400 Bad Request | The request reached a real action and was malformed. |
 | `AuthFailed` | **502 Bad Gateway** | Deliberately *not* 401. It means the *upstream service* rejected *Loom's* stored credentials. The caller is not the party that failed to authenticate and holds no credentials that would fix it; a 401 would tell a client to re-prompt its user, which cannot repair a bad token in Loom's connector configuration. It is a gateway failure, like `Unreachable`. |
 | `Unreachable` | 502 Bad Gateway | Loom could not reach the upstream at all. |
@@ -376,12 +422,11 @@ automations or URLs. `paramsSchema` is `{}` rather than `null` for parameterless
 actions so a consumer can always treat it as a schema and never has to
 special-case the absence of one.
 
-**Not currently reachable over HTTP.** No endpoint returns
-`ConnectorAction`s yet: `GET /api/connectors` reports metadata and status only.
-Clients wanting to invoke the mock's actions must know `restart` and `ping` by
-name for now. Exposing the action list is expected, and the type is documented
-here so that when the endpoint appears the shape is already the one clients
-were written against.
+Delivered in the `actions` array of every `GET /connectors` element, so a
+client never has to know an action id in advance. The list is not fixed for a
+connector type: it may vary with the connector's configuration or the remote
+service's state, so treat it as data to render, not as a schema to compile
+against.
 
 ### `ActionResult`
 
@@ -489,7 +534,7 @@ A connector needing no configuration returns an empty schema object rather than
 
 None of the following is a security measure. Do not read the stub as one.
 
-- **Login validates nothing.** `POST /api/auth/login` accepts any username and
+- **Login validates nothing.** `POST /auth/login` accepts any username and
   any password, including empty ones, and returns a token.
 - **The token is a fixed, hard-coded, publicly known string**
   (`"dev-stub-token"`). It is not a credential: no signature, no expiry
@@ -501,7 +546,7 @@ None of the following is a security measure. Do not read the stub as one.
   nothing can enforce when it stops being valid.
 - **The connector routes require no authentication at all.** Anyone who can
   reach the port can list connectors and execute actions. The `Authorization`
-  header is read by `GET /api/auth/session` and by nothing else.
+  header is read by `GET /auth/session` and by nothing else.
 - **One connector is registered, and it is `MockConnector`.** It contacts
   nothing; `restart` and `ping` simulate their effects and echo their
   parameters. It is a permanent test fixture, not scaffolding — see the module
@@ -511,8 +556,8 @@ None of the following is a security measure. Do not read the stub as one.
   This is deferred deliberately — designing persistence and secret generation
   against a stub would mean designing it twice. See
   [ADR 0004](./adr/0004-zero-config-startup.md).
-- **The whole `/api/` surface is behind a non-default feature** and is absent
-  from any normal build.
+- **The whole auth and connector surface is behind a non-default feature** and
+  is absent from any normal build.
 
 ## The `dev-stub-auth` feature gate
 
@@ -534,7 +579,7 @@ pulled in by the feature, so a default build does not even compile them.
 A build with the feature on logs a `WARN` at startup, before it binds:
 
 ```text
-WARN loom_web_backend: dev-stub-auth is COMPILED IN: /api/auth/login accepts
+WARN loom_web_backend: dev-stub-auth is COMPILED IN: /auth/login accepts
 ANY username and password, and the connector routes require no authentication
 at all. This build is for local development only and must not be exposed to any
 network you do not fully control. See docs/API_CONTRACT.md.
