@@ -94,6 +94,31 @@ Unlike the removed stub, **setup now persists**: it runs once per database, not
 once per backend start. Restarting the backend keeps you set up and keeps you
 signed in.
 
+### Data directory permissions in containers
+
+The backend runs unprivileged in its image (uid 10001), and its database lives
+on the `loom-data` volume at `/data`. The image creates `/data` **owned by that
+user**, which is what makes the volume writable: Docker seeds a new named volume
+from the image directory, ownership included, but when the mount path does not
+exist in the image it creates the mountpoint as `root:root` instead — and the
+server then cannot create `loom.db`.
+
+If you see this at startup:
+
+```
+Error: the data directory /data is not writable by this process ...
+```
+
+the volume predates that fix and kept its old ownership — Docker only seeds a
+volume that is empty. Recreate it:
+
+```sh
+docker compose -f docker-compose.local.yml down -v
+```
+
+`-v` deletes the volume, and with it every account and session. That is the
+intent here; on a real deployment it is not something to run casually.
+
 ### Starting over
 
 Setup cannot be re-run against a database that already has a user — that is the

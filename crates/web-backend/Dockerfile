@@ -51,7 +51,32 @@ RUN apt-get update \
 
 # Don't run the server as root.
 RUN useradd --system --create-home --uid 10001 loom
+
+# Create the data directory *in the image*, owned by the user that runs the
+# server. This is load-bearing, not tidiness.
+#
+# When a named volume is mounted at a path that does not exist in the image,
+# Docker creates that mountpoint as root:root — and the server, running as
+# uid 10001, then cannot create `loom.db` inside it. The failure surfaces as a
+# bare `SqliteError { code: 14, "unable to open database file" }`, which says
+# nothing about permissions and sends you looking at the database layer instead
+# of the volume.
+#
+# Docker seeds a *new, empty* named volume from the image directory, ownership
+# included, so declaring it here with the right owner is what makes the volume
+# writable. Note the consequence: a volume created before this line existed
+# keeps its old root ownership and must be recreated (`docker compose down -v`)
+# or chowned — Docker only seeds a volume that is empty.
+#
+# SQLite needs the *directory* writable, not just the file: WAL mode creates
+# `loom.db-wal` and `loom.db-shm` alongside it.
+RUN mkdir -p /data && chown loom:loom /data
+
 USER loom
+
+# Matches the Compose files. Declared here too so `docker run` with no
+# environment behaves the same way, per docs/adr/0004-zero-config-startup.md.
+ENV LOOM_DATA_DIR=/data
 
 COPY --from=builder /build/target/release/loom-web-backend /usr/local/bin/loom-web-backend
 
