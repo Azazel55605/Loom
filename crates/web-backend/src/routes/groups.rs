@@ -185,7 +185,7 @@ pub async fn create_group(
     }
 
     if let Err(response) = set_grants(&mut tx, &group_id, &request.permissions).await {
-        return response;
+        return *response;
     }
 
     if let Err(error) = tx.commit().await {
@@ -266,7 +266,7 @@ pub async fn update_group(
 
     if let Some(permissions) = &request.permissions {
         if let Err(response) = set_grants(&mut tx, &id, permissions).await {
-            return response;
+            return *response;
         }
     }
 
@@ -387,13 +387,13 @@ async fn set_grants(
     tx: &mut Transaction<'_, Sqlite>,
     group_id: &str,
     grants: &[PermissionGrant],
-) -> Result<(), Response> {
+) -> Result<(), Box<Response>> {
     if let Err(error) = sqlx::query("DELETE FROM group_permissions WHERE group_id = ?")
         .bind(group_id)
         .execute(&mut **tx)
         .await
     {
-        return Err(internal_error("clearing group grants", error));
+        return Err(Box::new(internal_error("clearing group grants", error)));
     }
 
     for grant in grants {
@@ -412,10 +412,10 @@ async fn set_grants(
         .execute(&mut **tx)
         .await
         {
-            return Err(ErrorBody::message(
+            return Err(Box::new(ErrorBody::message(
                 StatusCode::BAD_REQUEST,
                 format!("invalid permission grant {}: {error}", grant.key),
-            ));
+            )));
         }
     }
 

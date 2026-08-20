@@ -200,7 +200,7 @@ pub async fn create_user(
     }
 
     if let Err(response) = set_group_memberships(&mut tx, &user_id, &request.group_ids).await {
-        return response;
+        return *response;
     }
 
     if let Err(error) = tx.commit().await {
@@ -271,7 +271,7 @@ pub async fn update_user(
 
     if let Some(group_ids) = &request.group_ids {
         if let Err(response) = set_group_memberships(&mut tx, &id, group_ids).await {
-            return response;
+            return *response;
         }
     }
 
@@ -375,13 +375,16 @@ async fn set_group_memberships(
     tx: &mut Transaction<'_, Sqlite>,
     user_id: &str,
     group_ids: &[String],
-) -> Result<(), Response> {
+) -> Result<(), Box<Response>> {
     if let Err(error) = sqlx::query("DELETE FROM user_groups WHERE user_id = ?")
         .bind(user_id)
         .execute(&mut **tx)
         .await
     {
-        return Err(internal_error("clearing group memberships", error));
+        return Err(Box::new(internal_error(
+            "clearing group memberships",
+            error,
+        )));
     }
 
     for group_id in group_ids {
@@ -393,10 +396,10 @@ async fn set_group_memberships(
             .execute(&mut **tx)
             .await
         {
-            return Err(ErrorBody::message(
+            return Err(Box::new(ErrorBody::message(
                 StatusCode::BAD_REQUEST,
                 format!("no such group: {group_id} ({error})"),
-            ));
+            )));
         }
     }
 

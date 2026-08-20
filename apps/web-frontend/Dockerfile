@@ -39,10 +39,14 @@ WORKDIR /build
 COPY pnpm-lock.yaml package.json pnpm-workspace.yaml ./
 RUN pnpm fetch
 
-# Source layer. Changes here re-run the (fast, network-free) link step but never
-# the fetch above.
-COPY apps ./apps
-RUN pnpm install --offline --frozen-lockfile
+# Source layer. Copy only this app and its workspace dependency: copying all of
+# `apps/` would send unrelated Tauri build output into the Docker context, and
+# omitting `packages/ui-kit` makes the workspace link impossible in a clean
+# builder. Changes here re-run the network-free link step, not the fetch above.
+COPY tsconfig.base.json ./
+COPY apps/web-frontend ./apps/web-frontend
+COPY packages/ui-kit ./packages/ui-kit
+RUN pnpm install --offline --frozen-lockfile --filter web-frontend...
 
 # Escape hatch only — normally unset, so the bundle uses its relative /api base.
 # Passing an empty value is treated as unset by the app (see resolveApiUrl).

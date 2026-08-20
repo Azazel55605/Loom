@@ -1,6 +1,6 @@
 # 0005 — CORS policy: permissive by default, tightened with auth
 
-- Status: accepted
+- Status: superseded by [0010](./0010-desktop-secure-storage-and-network-config.md)
 - Date: 2026-08-18
 
 ## Context

@@ -1,6 +1,7 @@
 # Build artifacts — copying these into the context is slow and they are never
 # used by a Docker build.
 target/
+**/target/
 node_modules/
 **/node_modules/
 **/dist/

@@ -92,10 +92,12 @@ Other conventions:
 | Absent values | An optional field is either serialized as `null` or omitted entirely. Which one it is is part of the contract and is stated per field below. |
 | Path parameters | Connector and action ids are path segments: `/connectors/{id}/actions/{actionId}`. |
 
-CORS is permissive by default and configurable via
-`LOOM_CORS_ALLOWED_ORIGINS`; the reasoning and the conditions under which it
-must be tightened are in [ADR 0005](./adr/0005-cors-policy.md) and are not
-repeated here.
+CORS permits local web development plus Tauri's known webview origins
+(`tauri://localhost`, `https://tauri.localhost`, and
+`http://tauri.localhost`); additional browser origins may be appended through
+`LOOM_CORS_ALLOWED_ORIGINS`. The explicit list is sufficient because auth uses
+Bearer headers rather than ambient cookies. See
+[ADR 0010](./adr/0010-desktop-secure-storage-and-network-config.md).
 
 ## Error body
 

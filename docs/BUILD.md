@@ -164,7 +164,7 @@ the dev server fail loudly rather than drift to 3001 if something already holds
 | Variable | Where it is read | Effect |
 | --- | --- | --- |
 | `LOOM_BACKEND_ORIGIN` | Vite dev server, nginx | Proxy target. Defaults to `http://localhost:8080` in dev. Set it when the backend is not on the default port. |
-| `VITE_API_URL` | Frontend bundle, at build time | Absolute API base, bypassing the proxy entirely. Makes requests cross-origin and therefore subject to the CORS policy in [ADR 0005](./adr/0005-cors-policy.md). For deployments without the proxy; not needed for local development. |
+| `VITE_API_URL` | Frontend bundle, at build time | Absolute API base, bypassing the proxy entirely. Makes requests cross-origin and therefore subject to the CORS policy in [ADR 0010](./adr/0010-desktop-secure-storage-and-network-config.md). For deployments without the proxy; not needed for local development. |
 
 ## Desktop specifics
 
@@ -181,6 +181,15 @@ cover Linux.
 `apps/desktop/src-tauri` is deliberately **its own Cargo workspace**, detached
 from the root one, so `cargo build --workspace` and CI's Rust job do not require
 those libraries.
+
+Desktop persists authentication tokens in the operating system credential
+store through `tauri-plugin-keyring-store`: macOS Keychain, Windows Credential
+Manager, or Linux Secret Service. The plugin's Linux backend is Rust-native and
+adds no OpenSSL/libsecret build dependency, but a Secret Service provider such
+as GNOME Keyring or KWallet must be running for login persistence to work.
+Headless Linux sessions commonly have no unlocked service; builds and frontend
+checks still work there, while live secure-storage verification requires a
+normal logged-in desktop session.
 
 ### Icons
 

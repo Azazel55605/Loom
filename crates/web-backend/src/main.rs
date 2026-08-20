@@ -47,43 +47,47 @@ const DEFAULT_BIND_ADDR: &str = "127.0.0.1:8080";
 /// any of them read a response, which surfaces as an opaque "NetworkError"
 /// rather than anything resembling the real cause.
 ///
-/// The default allows any origin. That is deliberate and currently safe: the
-/// API is unauthenticated, exposes no cookies or credentials, and a homelab
-/// deployment cannot know in advance which host its frontend will be served
-/// from — demanding configuration here would break zero-config startup
-/// (`docs/adr/0004-zero-config-startup.md`).
+/// The browser frontend is same-origin in the normal proxy deployment. The
+/// explicit localhost origin supports direct development, and operators may
+/// append other browser origins through `LOOM_CORS_ALLOWED_ORIGINS`.
 ///
-/// **This must be revisited when auth lands.** Once the API accepts
-/// credentials, `Allow-Origin: *` combined with cookie auth is unsafe, and the
-/// browser will reject the combination outright. See
-/// `docs/adr/0005-cors-policy.md`.
+/// Tauri's known webview origins are always present. Loom authenticates with a
+/// Bearer token in `Authorization`, not a cookie, so a different web page has
+/// no ambient credential for its browser to attach. This avoids the classic
+/// cookie-CSRF risk while keeping arbitrary browser origins out of the policy.
 fn cors_layer() -> CorsLayer {
-    let layer = CorsLayer::new().allow_methods(Any).allow_headers(Any);
+    cors_layer_from(std::env::var("LOOM_CORS_ALLOWED_ORIGINS").ok().as_deref())
+}
 
-    // Optional override for operators who want to pin the allowed origins.
-    // Comma-separated, e.g. `https://loom.example.com,https://loom.example.org`.
-    match std::env::var("LOOM_CORS_ALLOWED_ORIGINS") {
-        Ok(raw) if !raw.trim().is_empty() => {
-            let origins: Vec<HeaderValue> = raw
-                .split(',')
-                .filter_map(|origin| origin.trim().parse().ok())
-                .collect();
+fn cors_layer_from(configured: Option<&str>) -> CorsLayer {
+    const BUILT_IN_ORIGINS: [&str; 4] = [
+        "http://localhost:3000",
+        "tauri://localhost",
+        "https://tauri.localhost",
+        "http://tauri.localhost",
+    ];
 
-            if origins.is_empty() {
-                // Misconfigured rather than unset: fail loud in the log instead
-                // of silently serving a policy nobody asked for.
-                info!("LOOM_CORS_ALLOWED_ORIGINS set but no origin parsed; allowing any origin");
-                layer.allow_origin(Any)
-            } else {
-                info!(
-                    count = origins.len(),
-                    "restricting CORS to configured origins"
-                );
-                layer.allow_origin(origins)
-            }
-        }
-        _ => layer.allow_origin(Any),
+    let mut origins: Vec<HeaderValue> = BUILT_IN_ORIGINS
+        .into_iter()
+        .map(HeaderValue::from_static)
+        .collect();
+
+    if let Some(raw) = configured.filter(|value| !value.trim().is_empty()) {
+        let configured_origins: Vec<HeaderValue> = raw
+            .split(',')
+            .filter_map(|origin| origin.trim().parse().ok())
+            .collect();
+        info!(
+            count = configured_origins.len(),
+            "appending configured CORS origins"
+        );
+        origins.extend(configured_origins);
     }
+
+    CorsLayer::new()
+        .allow_methods(Any)
+        .allow_headers(Any)
+        .allow_origin(origins)
 }
 
 /// Body of the `/health` response.
@@ -296,6 +300,55 @@ mod tests {
             .uri(uri)
             .body(Body::empty())
             .expect("valid request")
+    }
+
+    #[tokio::test]
+    async fn cors_allows_known_tauri_origins_and_configured_browser_origins() {
+        let allowed = [
+            "tauri://localhost",
+            "https://tauri.localhost",
+            "http://tauri.localhost",
+            "https://loom.example.com",
+        ];
+
+        for origin in allowed {
+            let response = Router::new()
+                .route("/health", axum::routing::get(health))
+                .layer(cors_layer_from(Some("https://loom.example.com")))
+                .oneshot(
+                    Request::builder()
+                        .uri("/health")
+                        .header("origin", origin)
+                        .body(Body::empty())
+                        .expect("valid request"),
+                )
+                .await
+                .expect("the router is infallible");
+
+            assert_eq!(
+                response.headers().get("access-control-allow-origin"),
+                Some(&HeaderValue::from_str(origin).expect("valid test origin")),
+                "origin {origin} should be allowed"
+            );
+        }
+
+        let response = Router::new()
+            .route("/health", axum::routing::get(health))
+            .layer(cors_layer_from(None))
+            .oneshot(
+                Request::builder()
+                    .uri("/health")
+                    .header("origin", "https://unlisted.example")
+                    .body(Body::empty())
+                    .expect("valid request"),
+            )
+            .await
+            .expect("the router is infallible");
+
+        assert!(response
+            .headers()
+            .get("access-control-allow-origin")
+            .is_none());
     }
 
     fn get_with_auth(uri: &str, authorization: &str) -> Request<Body> {

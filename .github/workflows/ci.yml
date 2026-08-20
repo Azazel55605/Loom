@@ -37,14 +37,23 @@ jobs:
       - name: cargo test
         run: cargo test --workspace
 
+      - name: Install pnpm
+        uses: pnpm/action-setup@v4
+
       - name: Install Node
         uses: actions/setup-node@v4
         with:
           node-version: '22'
+          cache: pnpm
 
-      # sync-versions.mjs has no third-party dependencies, so there is nothing
-      # to install and no lockfile to require. Swap this for
-      # `pnpm install --frozen-lockfile` + `pnpm versions:sync:check` once the
-      # JS clients under apps/ bring in real dependencies.
+      - name: Install frontend dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Test frontend workspace
+        run: pnpm test
+
+      - name: Build frontend workspace
+        run: pnpm build
+
       - name: Check versions.json is in sync
-        run: node scripts/sync-versions.mjs --check
+        run: pnpm versions:sync:check
