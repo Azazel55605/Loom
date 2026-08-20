@@ -24,6 +24,7 @@ tauri-build = { version = "2", features = [] }
 
 [dependencies]
 tauri = { version = "2", features = [] }
+tauri-plugin-http = { version = "2", features = ["dangerous-settings"] }
 tauri-plugin-keyring-store = { version = "0.2.0", default-features = false }
 tauri-plugin-store = "2"
 serde = { version = "1", features = ["derive"] }

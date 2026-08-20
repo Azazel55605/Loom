@@ -2,6 +2,7 @@ import { Outlet, useLocation, useNavigate } from "react-router-dom";
 
 import { ConnectToServer } from "@/components/ConnectToServer";
 import { DesktopAppShell } from "@/components/DesktopAppShell";
+import type { DesktopServerConnection } from "@/adapters/desktopBaseUrlProvider";
 import { SettingsLayout } from "@loom/ui-kit/components/SettingsLayout";
 import {
   Card,
@@ -13,11 +14,11 @@ import {
 import { GeneralPanel } from "@loom/ui-kit/pages/settings/GeneralPanel";
 
 export function DesktopSettingsRoute({
-  baseUrl,
+  connection,
   onServerChanged,
 }: {
-  baseUrl: string;
-  onServerChanged: (baseUrl: string) => Promise<void>;
+  connection: DesktopServerConnection;
+  onServerChanged: (connection: DesktopServerConnection) => Promise<void>;
 }) {
   const navigate = useNavigate();
   const location = useLocation();
@@ -43,7 +44,10 @@ export function DesktopSettingsRoute({
             <CardContent>
               <ConnectToServer
                 embedded
-                initialUrl={baseUrl}
+                initialUrl={connection.baseUrl}
+                initialAllowInvalidCertificates={
+                  connection.allowInvalidCertificates
+                }
                 onConnected={onServerChanged}
               />
             </CardContent>

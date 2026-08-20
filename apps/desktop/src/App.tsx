@@ -9,7 +9,11 @@ import {
   useLocation,
 } from "react-router-dom";
 
-import { desktopBaseUrlProvider } from "@/adapters/desktopBaseUrlProvider";
+import {
+  desktopBaseUrlProvider,
+  type DesktopServerConnection,
+} from "@/adapters/desktopBaseUrlProvider";
+import { createDesktopHttpTransport } from "@/adapters/desktopHttpTransport";
 import { desktopTokenStorage } from "@/adapters/desktopTokenStorage";
 import { ConnectToServer } from "@/components/ConnectToServer";
 import {
@@ -42,7 +46,7 @@ const GroupsPanel = React.lazy(async () => ({
 type ServerState =
   | { kind: "loading" }
   | { kind: "error"; message: string }
-  | { kind: "ready"; baseUrl: string };
+  | { kind: "ready"; connection: DesktopServerConnection };
 
 export default function App({ queryClient }: { queryClient: QueryClient }) {
   const [server, setServer] = React.useState<ServerState>({ kind: "loading" });
@@ -50,8 +54,8 @@ export default function App({ queryClient }: { queryClient: QueryClient }) {
   const loadServer = React.useCallback(() => {
     setServer({ kind: "loading" });
     void desktopBaseUrlProvider
-      .getBaseUrl()
-      .then((baseUrl) => setServer({ kind: "ready", baseUrl }))
+      .getConnection()
+      .then((connection) => setServer({ kind: "ready", connection }))
       .catch((error: unknown) =>
         setServer({
           kind: "error",
@@ -82,30 +86,46 @@ export default function App({ queryClient }: { queryClient: QueryClient }) {
     );
   }
 
-  if (server.baseUrl === "") {
+  if (server.connection.baseUrl === "") {
     return (
       <ConnectToServer
-        onConnected={(baseUrl) => setServer({ kind: "ready", baseUrl })}
+        onConnected={(connection) => setServer({ kind: "ready", connection })}
       />
     );
   }
 
-  const changeServer = async (baseUrl: string) => {
-    if (baseUrl === server.baseUrl) return;
-    await desktopTokenStorage.clearTokens();
+  const changeServer = async (connection: DesktopServerConnection) => {
+    if (
+      connection.baseUrl === server.connection.baseUrl &&
+      connection.allowInvalidCertificates ===
+        server.connection.allowInvalidCertificates
+    ) {
+      return;
+    }
+    if (connection.baseUrl !== server.connection.baseUrl) {
+      await desktopTokenStorage.clearTokens();
+    }
     queryClient.clear();
-    setServer({ kind: "ready", baseUrl });
+    setServer({ kind: "ready", connection });
   };
+
+  const connectionKey = `${server.connection.baseUrl}|${server.connection.allowInvalidCertificates}`;
 
   return (
     <HashRouter>
       <AuthProvider
-        key={server.baseUrl}
+        key={connectionKey}
         baseUrlProvider={desktopBaseUrlProvider}
+        httpTransport={createDesktopHttpTransport(
+          server.connection.allowInvalidCertificates,
+        )}
         tokenStorage={desktopTokenStorage}
       >
         <React.Suspense fallback={null}>
-          <DesktopRoutes baseUrl={server.baseUrl} onServerChanged={changeServer} />
+          <DesktopRoutes
+            connection={server.connection}
+            onServerChanged={changeServer}
+          />
         </React.Suspense>
         <Toaster />
       </AuthProvider>
@@ -114,11 +134,11 @@ export default function App({ queryClient }: { queryClient: QueryClient }) {
 }
 
 function DesktopRoutes({
-  baseUrl,
+  connection,
   onServerChanged,
 }: {
-  baseUrl: string;
-  onServerChanged: (baseUrl: string) => Promise<void>;
+  connection: DesktopServerConnection;
+  onServerChanged: (connection: DesktopServerConnection) => Promise<void>;
 }) {
   return (
     <RequireSetup>
@@ -138,7 +158,7 @@ function DesktopRoutes({
           element={
             <RequireAuth>
               <DesktopSettingsRoute
-                baseUrl={baseUrl}
+                connection={connection}
                 onServerChanged={onServerChanged}
               />
             </RequireAuth>

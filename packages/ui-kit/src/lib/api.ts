@@ -30,8 +30,15 @@ export interface BaseUrlProvider {
   getBaseUrl(): Promise<string>;
 }
 
+/** Platform-owned HTTP transport. Browsers use `fetch`; Tauri can use its
+ * native HTTP client when the webview cannot express a required TLS policy. */
+export interface HttpTransport {
+  fetch(input: RequestInfo | URL, init?: RequestInit): Promise<Response>;
+}
+
 type ApiRuntime = {
   readonly baseUrlProvider: BaseUrlProvider;
+  readonly httpTransport: HttpTransport;
   readonly tokenStore: TokenStore;
   baseUrl: string | null;
   initialization: Promise<void> | null;
@@ -365,7 +372,7 @@ async function request<T>(
   if (body !== undefined && !isFormData) headers["Content-Type"] = "application/json";
   if (token) headers["Authorization"] = `Bearer ${token}`;
 
-  const response = await fetch(`${runtime.baseUrl ?? ""}${path}`, {
+  const response = await runtime.httpTransport.fetch(`${runtime.baseUrl ?? ""}${path}`, {
     method,
     headers,
     body: body === undefined ? undefined : isFormData ? body : JSON.stringify(body),
@@ -1001,15 +1008,18 @@ export type ApiClient = ReturnType<typeof createApiClient>;
 /**
  * Constructs an isolated API client from platform adapters.
  *
- * No browser globals are read here. Web, desktop, and mobile decide how tokens
- * are persisted and how the backend base URL is resolved.
+ * Web, desktop, and mobile decide how tokens are persisted and how the backend
+ * base URL is resolved. Browser `fetch` is the default transport; native clients
+ * inject another one when their platform policy differs.
  */
 export function createApiClient(options: {
   baseUrlProvider: BaseUrlProvider;
   tokenStorage: TokenStorageAdapter;
+  httpTransport?: HttpTransport;
 }) {
   const runtime: ApiRuntime = {
     baseUrlProvider: options.baseUrlProvider,
+    httpTransport: options.httpTransport ?? { fetch: globalThis.fetch.bind(globalThis) },
     tokenStore: new TokenStore(options.tokenStorage),
     baseUrl: null,
     initialization: null,

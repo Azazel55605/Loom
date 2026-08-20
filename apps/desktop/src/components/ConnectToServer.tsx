@@ -1,7 +1,11 @@
 import * as React from "react";
-import { AlertCircle } from "lucide-react";
+import { AlertCircle, TriangleAlert } from "lucide-react";
 
-import { desktopBaseUrlProvider } from "@/adapters/desktopBaseUrlProvider";
+import {
+  desktopBaseUrlProvider,
+  type DesktopServerConnection,
+} from "@/adapters/desktopBaseUrlProvider";
+import { createDesktopHttpTransport } from "@/adapters/desktopHttpTransport";
 import { normalizeServerUrl } from "@/lib/server-url";
 import { Alert, AlertDescription, AlertTitle } from "@loom/ui-kit/components/ui/alert";
 import { Button } from "@loom/ui-kit/components/ui/button";
@@ -14,23 +18,60 @@ import {
 } from "@loom/ui-kit/components/ui/card";
 import { Input } from "@loom/ui-kit/components/ui/input";
 import { Label } from "@loom/ui-kit/components/ui/label";
+import { Switch } from "@loom/ui-kit/components/ui/switch";
 
 type Health = { status: string; core_version: string };
 
+function connectionErrorMessage(
+  error: unknown,
+  baseUrl: string,
+  allowInvalidCertificates: boolean,
+): string {
+  if (error instanceof DOMException && error.name === "AbortError") {
+    return "The server did not respond in time.";
+  }
+
+  const message =
+    error instanceof Error
+      ? error.message
+      : typeof error === "string"
+        ? error
+        : "The server could not be reached.";
+  if (
+    baseUrl.startsWith("https://") &&
+    !allowInvalidCertificates &&
+    /load failed|certificate|tls|ssl/i.test(message)
+  ) {
+    return "The TLS connection failed. If this server uses a self-signed certificate, enable the certificate exception below and try again.";
+  }
+  return message;
+}
+
 export function ConnectToServer({
   initialUrl = "",
+  initialAllowInvalidCertificates = false,
   embedded = false,
   onConnected,
 }: {
   initialUrl?: string;
+  initialAllowInvalidCertificates?: boolean;
   embedded?: boolean;
-  onConnected: (baseUrl: string) => void | Promise<void>;
+  onConnected: (connection: DesktopServerConnection) => void | Promise<void>;
 }) {
   const [draft, setDraft] = React.useState(initialUrl);
+  const [allowInvalidCertificates, setAllowInvalidCertificates] = React.useState(
+    initialAllowInvalidCertificates,
+  );
   const [error, setError] = React.useState<string | null>(null);
   const [isConnecting, setIsConnecting] = React.useState(false);
 
   React.useEffect(() => setDraft(initialUrl), [initialUrl]);
+  React.useEffect(
+    () => setAllowInvalidCertificates(initialAllowInvalidCertificates),
+    [initialAllowInvalidCertificates],
+  );
+
+  const isHttpsDraft = draft.trim().toLowerCase().startsWith("https://");
 
   const form = (
     <form
@@ -51,11 +92,20 @@ export function ConnectToServer({
           return;
         }
 
+        const connection = {
+          baseUrl,
+          allowInvalidCertificates:
+            baseUrl.startsWith("https://") && allowInvalidCertificates,
+        };
+
         setIsConnecting(true);
         const controller = new AbortController();
         const timeout = window.setTimeout(() => controller.abort(), 8_000);
         try {
-          const response = await fetch(`${baseUrl}/health`, {
+          const transport = createDesktopHttpTransport(
+            connection.allowInvalidCertificates,
+          );
+          const response = await transport.fetch(`${baseUrl}/health`, {
             signal: controller.signal,
           });
           if (!response.ok) {
@@ -65,15 +115,15 @@ export function ConnectToServer({
           if (health.status !== "ok" || typeof health.core_version !== "string") {
             throw new Error("The address did not return a Loom health response.");
           }
-          await desktopBaseUrlProvider.setBaseUrl(baseUrl);
-          await onConnected(baseUrl);
+          await desktopBaseUrlProvider.setConnection(connection);
+          await onConnected(connection);
         } catch (connectionError) {
           setError(
-            connectionError instanceof DOMException && connectionError.name === "AbortError"
-              ? "The server did not respond in time."
-              : connectionError instanceof Error
-                ? connectionError.message
-                : "The server could not be reached.",
+            connectionErrorMessage(
+              connectionError,
+              baseUrl,
+              connection.allowInvalidCertificates,
+            ),
           );
         } finally {
           window.clearTimeout(timeout);
@@ -94,9 +144,51 @@ export function ConnectToServer({
           placeholder="https://your-server:8080"
           value={draft}
           aria-invalid={error !== null}
-          onChange={(event) => setDraft(event.target.value)}
+          onChange={(event) => {
+            const value = event.target.value;
+            setDraft(value);
+            if (!value.trim().toLowerCase().startsWith("https://")) {
+              setAllowInvalidCertificates(false);
+            }
+          }}
         />
       </div>
+
+      <div className="flex items-start justify-between gap-4 rounded-md border p-3">
+        <div className="flex flex-col gap-1">
+          <Label htmlFor={embedded ? "settings-invalid-certs" : "invalid-certs"}>
+            Allow invalid TLS certificates
+          </Label>
+          <p
+            id={embedded ? "settings-invalid-certs-description" : "invalid-certs-description"}
+            className="text-sm text-muted-foreground"
+          >
+            For HTTPS homelab servers using a self-signed certificate. Disabled by
+            default.
+          </p>
+        </div>
+        <Switch
+          id={embedded ? "settings-invalid-certs" : "invalid-certs"}
+          checked={isHttpsDraft && allowInvalidCertificates}
+          disabled={!isHttpsDraft || isConnecting}
+          aria-describedby={
+            embedded ? "settings-invalid-certs-description" : "invalid-certs-description"
+          }
+          onCheckedChange={setAllowInvalidCertificates}
+        />
+      </div>
+
+      {isHttpsDraft && allowInvalidCertificates ? (
+        <Alert>
+          <TriangleAlert aria-hidden="true" />
+          <AlertTitle>Certificate verification reduced</AlertTitle>
+          <AlertDescription>
+            Loom will not verify this server&apos;s certificate chain or expiry.
+            Hostname verification remains enabled. Use this only for a server you
+            trust.
+          </AlertDescription>
+        </Alert>
+      ) : null}
 
       {error !== null ? (
         <Alert variant="destructive">

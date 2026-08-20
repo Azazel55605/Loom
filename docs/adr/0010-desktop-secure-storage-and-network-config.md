@@ -28,8 +28,20 @@ unreachable.
 Desktop stores the server base URL in `tauri-plugin-store`. First launch shows
 `ConnectToServer`, validates an HTTP(S) URL, and requires a successful `/health`
 response before persisting it. The same component is embedded in General
-settings. Changing server clears the old server's token pair before remounting
-the shared auth/API providers.
+settings. The stored connection also carries an off-by-default option to accept
+an invalid TLS certificate chain for homelab servers using self-signed
+certificates. Enabling it does not disable hostname verification. Changing
+server clears the old server's token pair before remounting the shared auth/API
+providers; changing only this TLS option remounts the API transport without
+signing the user out.
+
+Desktop sends Loom API traffic through the official Tauri HTTP plugin rather
+than the webview's `fetch`. This gives the platform adapter a native TLS policy,
+avoids relying on browser-specific CORS behavior, and lets the shared API client
+keep using an injected `HttpTransport`. The plugin's `dangerous-settings`
+feature is enabled solely to express the explicit per-server certificate
+option. HTTP and HTTPS are both permitted because the server destination is
+selected at runtime; no other schemes are in scope.
 
 Desktop stores the serialized access/refresh token pair through
 `tauri-plugin-keyring-store` with its optional wallet/cryptography feature
@@ -57,6 +69,15 @@ explicit list still limits which browser contexts may read API responses.
 ## Consequences
 
 - Tokens are stored by the OS credential service, not in Desktop's JSON store.
+- Certificate verification remains enabled unless the user opts out for the
+  selected HTTPS server. The exception accepts more than self-signed roots (for
+  example, an expired certificate), so the UI warns that it is appropriate only
+  for a server the user trusts; hostname mismatch remains an error.
+- The native HTTP capability allows arbitrary HTTP(S) hosts because the chosen
+  server is not known at build time. A compromised trusted webview could use
+  that capability, just as it could use the previously broad runtime
+  `connect-src`; CSP and Tauri capabilities remain defense-in-depth rather than
+  protection from trusted UI code.
 - Linux users need an available Secret Service implementation such as GNOME
   Keyring or KWallet. Headless sessions without one cannot persist login state.
 - A compromised Desktop webview can still use the native APIs granted to that

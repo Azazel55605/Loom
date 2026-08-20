@@ -71,9 +71,11 @@ storage, and backend URL discovery are injected by each app. See ADR 0009.
 
 A **Tauri** client. It consumes `@loom/ui-kit` so it looks and behaves like the
 web frontend, and connects to Web/backend over the network. Native integration
-must not become a way to bypass the API. Its user-selected server URL is stored
-as non-sensitive Tauri configuration, while auth tokens live in the operating
-system credential store. See ADR 0010.
+must not become a way to bypass the API. Its user-selected server URL and
+off-by-default invalid-certificate policy are stored as non-sensitive Tauri
+configuration, while auth tokens live in the operating system credential store.
+API traffic uses Tauri's native HTTP transport so that policy can be applied
+without weakening the webview globally. See ADR 0010.
 
 ## Mobile
 

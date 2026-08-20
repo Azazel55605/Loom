@@ -5,6 +5,7 @@ import {
   createApiClient,
   SessionExpiredError,
   type BaseUrlProvider,
+  type HttpTransport,
   type PermissionGrant,
 } from "@loom/ui-kit/lib/api";
 import { ApiClientProvider } from "@loom/ui-kit/lib/api-context";
@@ -35,15 +36,17 @@ const AuthContext = React.createContext<AuthContextValue | null>(null);
  */
 export function AuthProvider({
   baseUrlProvider,
+  httpTransport,
   tokenStorage,
   children,
 }: {
   baseUrlProvider: BaseUrlProvider;
+  httpTransport?: HttpTransport;
   tokenStorage: TokenStorageAdapter;
   children: React.ReactNode;
 }) {
   const [client] = React.useState(() =>
-    createApiClient({ baseUrlProvider, tokenStorage }),
+    createApiClient({ baseUrlProvider, httpTransport, tokenStorage }),
   );
   const [runtimeReady, setRuntimeReady] = React.useState(false);
   const session = React.useSyncExternalStore<StoredTokens | null>(
