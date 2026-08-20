@@ -17,6 +17,14 @@ const DEFAULT_DATA_DIR: &str = "./data";
 /// Database filename inside the data directory.
 const DATABASE_FILENAME: &str = "loom.db";
 
+/// Subdirectory holding uploaded avatars, relative to the data directory.
+///
+/// The same string is the leading segment of every stored `users.avatar_path`
+/// and of the URL those are served at, which is what keeps the three in step:
+/// a row says `avatars/x.png`, the file is at `<data dir>/avatars/x.png`, and
+/// the client fetches `/avatars/x.png`.
+pub const AVATARS_DIRNAME: &str = "avatars";
+
 /// Resolves the data directory, creates it if missing, and checks it is
 /// writable.
 ///
@@ -82,6 +90,29 @@ fn ensure_writable(dir: &Path) -> std::io::Result<()> {
             ),
         )),
     }
+}
+
+/// Resolves the avatar directory inside `dir`, creating it if missing.
+///
+/// Created at startup rather than lazily on first upload so the failure shows
+/// up while the server is starting — where an operator is looking — instead of
+/// as a 500 on the first user who tries to set a picture. The parent directory
+/// has already been probed for writability by [`data_dir`], so this failing
+/// means something more specific than a bad mount.
+pub fn avatars_dir(dir: &Path) -> std::io::Result<PathBuf> {
+    let avatars = dir.join(AVATARS_DIRNAME);
+
+    std::fs::create_dir_all(&avatars).map_err(|error| {
+        std::io::Error::new(
+            error.kind(),
+            format!(
+                "could not create the avatar directory {}: {error}",
+                avatars.display()
+            ),
+        )
+    })?;
+
+    Ok(avatars)
 }
 
 /// Full path to the SQLite database file inside `dir`.

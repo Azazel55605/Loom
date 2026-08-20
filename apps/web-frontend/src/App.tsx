@@ -1,42 +1,130 @@
+import * as React from "react";
 import { Navigate, Route, Routes, useLocation } from "react-router-dom";
 
 import { DashboardPage } from "@/pages/DashboardPage";
 import { LoginPage } from "@/pages/LoginPage";
-import { SetupPage } from "@/pages/SetupPage";
 import { useAuth } from "@/lib/auth-context";
 import { useSetupStatus } from "@/lib/use-setup-status";
 
 /**
+ * Routes that are not on the way in, loaded on demand.
+ *
+ * The dashboard and the login screen stay in the main bundle — one of them is
+ * the first thing every visit renders, so deferring them would only add a round
+ * trip to the critical path. The rest are genuinely occasional:
+ *
+ * - **Setup** runs exactly once in an instance's life.
+ * - **Settings** is administrative, and it is where the heavy dependencies are.
+ *   The tables, dialogs, selects, checkboxes and switches under `/settings` pull
+ *   in most of the Radix surface the app uses, and a user who never opens
+ *   settings never needs any of it.
+ *
+ * Split at the route rather than per component: a route is a boundary the user
+ * already understands as a navigation, so the load has somewhere natural to
+ * happen. The four settings modules are separate `lazy` calls, but Rollup emits
+ * them against shared chunks, so opening one tab does not re-download what the
+ * next one needs.
+ */
+const SetupPage = React.lazy(async () => ({
+  default: (await import("@/pages/SetupPage")).SetupPage,
+}));
+const SettingsLayout = React.lazy(async () => ({
+  default: (await import("@/components/SettingsLayout")).SettingsLayout,
+}));
+const PermissionsLayout = React.lazy(async () => ({
+  default: (await import("@/components/PermissionsLayout")).PermissionsLayout,
+}));
+const PermissionsIndexRedirect = React.lazy(async () => ({
+  default: (await import("@/components/PermissionsLayout")).PermissionsIndexRedirect,
+}));
+const AccountPanel = React.lazy(async () => ({
+  default: (await import("@/pages/settings/AccountPanel")).AccountPanel,
+}));
+const AppearancePanel = React.lazy(async () => ({
+  default: (await import("@/pages/settings/AppearancePanel")).AppearancePanel,
+}));
+const GeneralPanel = React.lazy(async () => ({
+  default: (await import("@/pages/settings/GeneralPanel")).GeneralPanel,
+}));
+const UsersPanel = React.lazy(async () => ({
+  default: (await import("@/pages/settings/UsersPanel")).UsersPanel,
+}));
+const GroupsPanel = React.lazy(async () => ({
+  default: (await import("@/pages/settings/GroupsPanel")).GroupsPanel,
+}));
+
+/**
  * The route table.
  *
- * Three routes: first-run setup and login are public, everything else is behind
- * `RequireAuth`. The guard is a route wrapper rather than a check inside each
- * page so that adding a page cannot accidentally add an unauthenticated one.
+ * First-run setup and login are public; everything else is behind `RequireAuth`.
+ * The guard is a route wrapper rather than a check inside each page so that
+ * adding a page cannot accidentally add an unauthenticated one.
  *
  * Note that these are *client-side* guards, and client-side guards are UX, not
  * security. Nothing here keeps anyone away from data — the API is the only
- * enforcement point, per docs/adr/0003-auth-model-vpn-vs-external.md. Today the
- * stub backend enforces nothing at all.
+ * enforcement point, per docs/adr/0003-auth-model-vpn-vs-external.md, and it
+ * now checks a permission on every route (see docs/API_CONTRACT.md). The
+ * settings sections are gated the same way: the tab is hidden, the data is
+ * protected by the backend.
  */
 export default function App() {
   return (
     <RequireSetup>
-      <Routes>
-        <Route path="/setup" element={<SetupPage />} />
-        <Route path="/login" element={<LoginPage />} />
-        <Route
-          path="/"
-          element={
-            <RequireAuth>
-              <DashboardPage />
-            </RequireAuth>
-          }
-        />
-        {/* Unknown paths go to the dashboard, which bounces to login when
-            signed out. A dedicated 404 is worth having once there is more than
-            one real page to be lost between. */}
-        <Route path="*" element={<Navigate to="/" replace />} />
-      </Routes>
+      {/* `null` while a route chunk is in flight, matching what `RequireSetup`
+          and `RequireAuth` already do for an unresolved answer: render nothing
+          rather than flash something that is about to be replaced. These chunks
+          are served from the same origin as the page, so the gap is a fetch
+          from cache in the ordinary case.
+
+          One boundary around the whole table rather than one per route — a
+          nested boundary would only matter if some routes wanted a different
+          fallback, and they do not. */}
+      <React.Suspense fallback={null}>
+        <Routes>
+          <Route path="/setup" element={<SetupPage />} />
+          <Route path="/login" element={<LoginPage />} />
+          <Route
+            path="/"
+            element={
+              <RequireAuth>
+                <DashboardPage />
+              </RequireAuth>
+            }
+          />
+          <Route
+            path="/settings"
+            element={
+              <RequireAuth>
+                <SettingsLayout />
+              </RequireAuth>
+            }
+          >
+            {/* `/settings` alone is not a page — it is the shell around one.
+                General is visible to every authenticated user, so it is always
+                a valid landing point and needs no permission check. */}
+            <Route index element={<Navigate to="/settings/general" replace />} />
+            <Route path="general" element={<GeneralPanel />} />
+            <Route path="account" element={<AccountPanel />} />
+            <Route path="appearance" element={<AppearancePanel />} />
+            <Route path="permissions" element={<PermissionsLayout />}>
+              {/* Which half to land on depends on which grant the user holds,
+                  so the decision is a component rather than a fixed target. */}
+              <Route index element={<PermissionsIndexRedirect />} />
+              <Route path="users" element={<UsersPanel />} />
+              <Route path="groups" element={<GroupsPanel />} />
+              <Route path="*" element={<Navigate to="users" replace />} />
+            </Route>
+            {/* Kept inside the branch so an unknown settings path lands back in
+                settings rather than on the dashboard. */}
+            <Route path="*" element={<Navigate to="/settings/general" replace />} />
+          </Route>
+
+          {/* Unknown paths go to the dashboard, which bounces to login when
+              signed out. A dedicated 404 is worth having once there is more than
+              one real page to be lost between. */}
+          <Route path="*" element={<Navigate to="/" replace />} />
+        </Routes>
+      </React.Suspense>
     </RequireSetup>
   );
 }

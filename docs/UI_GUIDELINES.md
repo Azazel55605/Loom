@@ -42,6 +42,34 @@ as inputs to the design, not decisions inside it. Any new component must respond
 to all three without extra wiring — if a component only looks right at one
 accent color or one blur level, it is not finished.
 
+> **Status: implemented in web-frontend.** All three now have real controls,
+> under Settings → Appearance, driven by `AccentThemeProvider`, alongside a
+> light/dark/system palette choice. What follows
+> describes working behavior, not intent. Desktop and mobile still carry the
+> older accent-only provider and gain the rest when they gain a settings screen.
+
+### Persistence is per device
+
+Preferences live in `localStorage` under `loom-accent-color`, `loom-blur-level`,
+`loom-reduce-motion`, and `loom-theme`. They therefore **do not follow a
+user to another browser or machine**, and the Appearance panel says so on screen
+rather than letting someone assume otherwise.
+
+That is the current model, not a settled one. Syncing preferences through the
+backend — columns on `users`, or a preferences table, plus a contract for
+reading and writing them — is a plausible enhancement and explicitly **not yet
+decided**. It is worth noting what the local model buys in the meantime: the
+settings apply before the first paint, with no request and no authenticated
+round trip, so there is no flash of the wrong accent on load and they work on a
+screen reached before any session exists. A synced model would need to keep that
+property rather than trade it away, most likely by treating the local value as a
+cache and the server as the source of truth.
+
+The choice also has to survive `localStorage` being unavailable — private
+browsing and strict cookie settings make it throw on access. Reads and writes
+are best-effort: losing persistence costs the preference across reloads, never
+the ability to use the app.
+
 ### Accent color
 
 A single **HSL-based CSS custom property** is the source of truth, and every
@@ -77,7 +105,46 @@ token rather than per-component Tailwind classes, so the whole interface moves
 together.
 
 There must be a **"reduced transparency" fallback** that replaces translucent
-surfaces with solid ones. This serves two distinct needs and both matter:
+surfaces with solid ones.
+
+In practice the setting is a **level**, not a switch, and each level is one
+root class of which exactly one is applied:
+
+| Level | Class | Effect |
+| --- | --- | --- |
+| `off` | `.reduce-transparency` | Solid surfaces, no blur. Cheapest to render. |
+| `standard` | `.force-transparency` | Elevated surfaces frosted — dialogs, popovers, the header. |
+| `extra` | `.blur-extra` | Heavier blur, secondary surfaces joined in, over an accent-derived wash. |
+
+Three classes rather than a boolean because `prefers-reduced-transparency` is
+only a *default* here: an explicit choice overrides it in either direction,
+which is what "let the user override it explicitly" requires.
+
+Two tokens carry it, not one. `--surface-alpha` is for elevated surfaces and
+`--panel-alpha` for secondary inset ones (tab bars, segmented controls), so
+turning the effect up does not make a small inset panel as translucent as a
+dialog. Secondary surfaces use the `.surface-panel` class, which is solid at
+every level except `extra` — no runtime class toggling needed, because the
+token does the work.
+
+### Blur needs something behind it
+
+The mistake worth recording, because it is invisible until you look for it:
+`backdrop-filter` samples what is *behind* an element, so **over a flat
+background it produces no visible change at all**. Frosted glass with nothing
+behind it looks exactly like plain colour. This is why the `extra` level also
+paints a soft, slowly varying wash — three low-alpha radial gradients derived
+from `--accent`, so the effect follows the user's colour rather than
+introducing a second one.
+
+Two corollaries, both of which cost a round of debugging here:
+
+- The wash must be **positioned inside the viewport**. Centring the gradients
+  on the corners put them off-screen and behind the sticky header, which is a
+  wash nobody can see doing none of the work it exists for.
+- Any opaque full-height element above it hides it completely. The page ground
+  carries an `.app-canvas` class and goes transparent at the `extra` level for
+  exactly this reason. This serves two distinct needs and both matter:
 
 - *Accessibility* — text over a blurred background is harder to read, and some
   users need opaque surfaces to use the interface at all.
@@ -110,6 +177,40 @@ merely faster: replace movement and scaling with an opacity change or an instant
 state swap. Nothing that conveys state may become invisible when motion is off —
 if the only indication a dialog opened is that it slid in, the dialog is broken
 for those users.
+
+The in-app "reduce motion" switch layers on top of that signal via a
+`.reduce-motion` class; it never competes with it. **The OS setting is a floor,
+not a default.** A user may force motion off when the OS has not asked for it,
+but nothing in the app may force motion back *on* against an OS request —
+reduced motion is an accessibility need for some people, and an app-level
+preference is not entitled to override it. The switch reflects this by showing
+as on-and-disabled when the OS is asking, rather than appearing to be off or
+silently doing nothing when clicked.
+
+### Light and dark
+
+A fourth user-facing choice, alongside the three axes above: **Light**, **Dark**,
+or **System**. `System` follows `prefers-color-scheme` and is the default,
+because the OS already carries an answer and opening an app in blazing white at
+night is a bad first impression nobody asked for.
+
+Dark is a token swap, not a separate stylesheet — the `.dark` class redefines
+the same custom properties, so any component built from the tokens inverts
+without knowing dark mode exists. Two things do need explicit attention:
+
+- **`color-scheme` is set on the root** alongside the class. Without it the
+  browser keeps painting its own surfaces — scrollbars, the overscroll
+  canvas — from the light palette.
+- **Translucency is not portable between palettes.** The alpha that reads as
+  frosted over white reads as washed out over near-black, so the dark palette
+  carries its own `--surface-alpha`. Those overrides have to match *two*
+  classes (`.dark.force-transparency`) rather than one: `.dark` appears earlier
+  in the sheet than the level classes, so a single-class rule would win on
+  source order and flatten the dark value back to the light one.
+
+Status colours are deliberately **not** re-derived per palette beyond a
+lightness lift — the hues stay put, so "healthy" reads as the same colour in
+both.
 
 ## Component sourcing rule
 

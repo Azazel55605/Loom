@@ -17,6 +17,28 @@ export default defineConfig({
       "@": path.resolve(import.meta.dirname, "./src"),
     },
   },
+  build: {
+    rollupOptions: {
+      output: {
+        // React and the router in one chunk of their own.
+        //
+        // These change only when a dependency is upgraded, whereas the app
+        // chunk changes on every commit. Separating them means a deploy
+        // invalidates ~60 kB of app code rather than the ~200 kB it is welded
+        // to, so returning users re-download only what actually changed.
+        //
+        // Grouped rather than split per package on purpose: react, react-dom
+        // and scheduler initialise as a unit, and splitting a package apart
+        // from the one that imports it at module-init time is how manualChunks
+        // produces "cannot access before initialisation" at runtime. Anything
+        // not named here is left to Rollup, which places shared code correctly
+        // on its own.
+        manualChunks: {
+          "vendor-react": ["react", "react-dom", "react-router-dom"],
+        },
+      },
+    },
+  },
   server: {
     // Match the port Compose publishes the frontend on (`ports: ["3000:80"]`),
     // so the app lives at the same URL whether it is running from `pnpm dev` or

@@ -47,9 +47,10 @@ export type CurrentUser = {
   /**
    * The user's grants, for hiding controls they cannot operate.
    *
-   * A convenience, never a control: the server decides what is permitted.
-   * Note that the backend does not yet enforce these on connector routes at
-   * all — see docs/API_CONTRACT.md.
+   * A convenience, never a control: the server decides what is permitted, and
+   * it does enforce these — see the permission enforcement section of
+   * docs/API_CONTRACT.md. Use `hasPermission` in `lib/permissions` to read
+   * this, and expect a 403 anyway.
    */
   permissions: PermissionGrant[];
 };

@@ -427,14 +427,19 @@ table and extended only by migration.
 
 **Clients may use this to hide controls the user cannot operate. That is a
 convenience, never a control.** The server decides what is permitted; a client
-that ignores this array learns nothing it could not have learned by trying. Note
-that today the server does not yet check these on connector routes at all — see
-[Known temporary behavior](#known-temporary-behavior).
+that ignores this array learns nothing it could not have learned by trying. See
+[Permission enforcement](#permission-enforcement) for what is actually checked,
+and where.
 
 ### Permission enforcement
 
 Every route except `/health`, `/setup/status`, `/setup`, `/auth/login`,
-`/auth/refresh`, and `/auth/logout` requires a valid access token and a grant.
+`/auth/refresh`, `/auth/logout`, and the `/avatars/*` static files requires a
+valid access token.
+
+Most also require a **grant**. The exceptions are `/auth/session` and the
+[Account](#account) routes, which need a token and nothing more, because they
+act only on the caller's own row and take no id to point elsewhere.
 
 **401 and 403 mean different things and are not interchangeable.** 401 is "you
 are not authenticated" — no token, a bad signature, an expired token — and a
@@ -476,6 +481,7 @@ The asymmetry is deliberate and load-bearing:
 | `GET /users`, `POST /users`, `PATCH /users/{id}`, `DELETE /users/{id}` | `users.manage` | global |
 | `GET /groups`, `POST /groups`, `PATCH /groups/{id}`, `DELETE /groups/{id}` | `groups.manage` | global |
 | `GET /permissions` | `groups.manage` | global |
+| `GET /account`, `PATCH /account`, `POST /account/password`, `POST /account/avatar`, `DELETE /account/avatar` | none — token only | n/a, the subject is the token's `sub` |
 
 `GET /connectors` requires a **global** `connectors.view`, so a user holding
 only a connector-scoped view grant is refused rather than shown a filtered list.
@@ -675,6 +681,202 @@ A 200 with `success: false` is a normal answer, not an error; see
 | 502 | `ConnectorError::Unreachable` or `ConnectorError::AuthFailed`. |
 | 500 | `ConnectorError::Internal`. |
 | 404 | The feature is not compiled in. |
+
+## Account
+
+Self-service routes: a signed-in user managing their **own** account. Every one
+of them requires a valid access token and **no permission grant at all**.
+
+That is not an oversight. The structural reason is that none of these paths
+takes a user id — the subject is read from the token's `sub` claim, so there is
+no value a caller could supply to reach somebody else's account. Requiring
+`users.manage` here would produce an instance where an ordinary user cannot
+change their own password. Acting on *another* user stays where it belongs, in
+[Administration](#administration), which does take an id and does require a
+grant.
+
+All of them return **401** without a valid token; that case is not repeated in
+the tables below.
+
+### `GET /account`
+
+**Response 200:**
+
+```json
+{
+  "id": "9d1f8c2e-4b7a-4c3d-9e21-0a5b6c7d8e9f",
+  "username": "admin",
+  "displayName": "The Admin",
+  "avatarUrl": "/avatars/2f1c8b90-5d3e-4a71-9c02-6b8d4e1f7a35.png",
+  "createdAt": "2026-08-19T17:04:11.882401Z",
+  "groups": [
+    { "id": "00000000-0000-4000-8000-000000000001", "name": "Administrators" }
+  ]
+}
+```
+
+`displayName` and `avatarUrl` are `null` when unset. As everywhere else in this
+API, **there is no password field**.
+
+`groups` is included for context and is **read-only here**. Membership is an
+administrative decision made through [`PATCH /users/{id}`](#patch-usersid);
+offering it on a self-service route would be offering privilege escalation with
+a friendly label.
+
+#### `avatarUrl` is relative
+
+`avatarUrl` is a path, not an absolute URL — `/avatars/{uuid}.{ext}`. **Resolve
+it against the same base URL as the API itself.**
+
+It has to be relative, because the backend does not know the origin it is being
+reached through. The web frontend reaches it through an `/api` proxy on its own
+origin; desktop and mobile reach a user-supplied server URL directly; a reverse
+proxy may put it somewhere else again. Any absolute URL the backend invented
+would be wrong for at least one of them.
+
+Note the one asymmetry this creates for the web frontend: `/api` is stripped
+before the backend sees a request, but the avatar path is served by the backend
+at `/avatars/…`, so the frontend requests it at `/api/avatars/…` — the same
+transformation it applies to every other path in this document.
+
+Avatar files are served **unauthenticated**, by a read-only static file service
+that answers GET and HEAD only. Browsers do not attach an `Authorization` header
+to `<img>` loads, so authenticating them would require cookies or signed URLs.
+What is exposed is a profile picture, to someone who can already reach the
+server *and* guess a random UUIDv4 filename.
+
+| Status | Meaning |
+| --- | --- |
+| 200 | The profile. |
+| 404 | The account behind this token no longer exists — deleted mid-session. |
+
+### `PATCH /account`
+
+Both fields optional; an absent field is left alone.
+
+```json
+{ "username": "renamed", "displayName": "The Admin" }
+```
+
+`displayName` distinguishes **absent** from **present and null**: omitting it
+keeps the current value, sending `null` clears it. An all-whitespace string also
+clears it, since `"   "` is not a name and would render as a blank where a name
+belongs. Usernames are trimmed.
+
+Uniqueness is checked **excluding the caller's own row**, so submitting a form
+that echoes back the current username is not a conflict with itself.
+
+**Response 200** — the updated profile, in the `GET /account` shape.
+
+| Status | Meaning |
+| --- | --- |
+| 200 | Applied. |
+| 400 | Empty username. |
+| 409 | That username is taken by another account. |
+
+#### Renaming yourself and the token in your hand
+
+The access token embeds `username` at issuance, so a token minted before the
+rename keeps reporting the old name until it expires. Nothing invalidates it and
+nothing needs to: access tokens live 15 minutes, and the next refresh mints one
+carrying the new name. This is the same staleness window that already applies to
+[permission changes](#permission-enforcement).
+
+It is display-only staleness. Every handler identifies the caller by `sub`, the
+user id, which never changes — so a stale `username` claim can show an
+out-of-date name for a few minutes, but cannot address the wrong account.
+
+### `POST /account/password`
+
+```json
+{ "currentPassword": "…", "newPassword": "…" }
+```
+
+`currentPassword` is verified against the stored argon2 hash before anything is
+written. The password floor is **8 characters**, the same constant `POST /setup`
+and `POST /users` use.
+
+**Response 204**, no body.
+
+| Status | Meaning |
+| --- | --- |
+| 204 | Changed. |
+| 400 | New password under 8 characters. |
+| 401 | `currentPassword` is wrong. |
+| 404 | The account no longer exists. |
+
+The 401 here carries a **distinct message** — `current password is incorrect` —
+and is deliberately not the login route's uniform rejection. Login gives one
+identical answer for every failure because distinguishing them tells an
+anonymous caller which usernames exist. Here the caller is already authenticated
+as this exact account, so there is nothing left to disclose, and naming the
+wrong field is the only way a client can say *which* of the two inputs to fix.
+
+**Existing sessions survive a password change.** Nothing is revoked, so a
+session established beforehand keeps working — and the bound on that is the
+*refresh* token's seven days, not the access token's fifteen minutes. This is an
+accepted trade-off rather than a claim that the window is small: the common case
+is a user rotating their own password on their own machine, which gains nothing
+from being signed out, while the mechanism that would genuinely help is
+on-demand revocation of a user's refresh tokens — which is also what "sign out
+my other devices" and "this account is compromised" need. It belongs with that
+feature rather than bolted onto this route. **Revisit when session revocation
+lands.**
+
+### `POST /account/avatar`
+
+`multipart/form-data` with a single file field. Fields without a filename are
+skipped, so a client that also sends text parts is not rejected for it.
+
+**Response 200:**
+
+```json
+{ "avatarUrl": "/avatars/2f1c8b90-5d3e-4a71-9c02-6b8d4e1f7a35.png" }
+```
+
+Accepted formats are **PNG, JPEG, and WebP**, at most **2 MB**.
+
+| Status | Meaning |
+| --- | --- |
+| 200 | Stored. |
+| 400 | No file field, or the bytes are not a decodable image in an accepted format. |
+| 413 | The file is larger than 2 MB. |
+| 404 | The account no longer exists. |
+
+#### What is validated, and why the header is not
+
+The declared `Content-Type` is **never consulted**. It is a string the caller
+chose, so a shell script announced as `image/png` passes any header check. The
+format is taken from the content's own magic bytes, and the image is then
+**decoded in full** rather than having its header parsed — a truncated or
+corrupt file has a perfectly valid header and would otherwise be stored as a
+picture that no client can render.
+
+Decoding is bounded by an allocation ceiling separate from the 2 MB byte limit,
+because compressed size says nothing about decoded size: a small, valid PNG can
+declare enormous dimensions and expand into gigabytes. A file that trips the
+ceiling is a 400, like any other unusable upload.
+
+The stored filename is `{uuid_v4}.{ext}` and is **never derived from the
+uploaded filename**, which is caller-controlled. Uploading a replacement deletes
+the previous file, so avatars do not accumulate on disk; because each upload
+gets a fresh name, a cached URL never shows a stale picture.
+
+### `DELETE /account/avatar`
+
+Deletes the stored file, if any, and clears the field.
+
+**Response 200** — the updated profile, in the `GET /account` shape, with
+`avatarUrl` now `null`. The whole profile rather than an acknowledgement, so a
+client re-renders from one authoritative answer.
+
+Deleting when there is no avatar is **not** an error: the end state is the one
+the caller asked for.
+
+| Status | Meaning |
+| --- | --- |
+| 200 | Cleared. |
+| 404 | The account no longer exists. |
 
 ## Administration
 
@@ -1112,7 +1314,16 @@ removed.
 ## Storage
 
 SQLite, at `$LOOM_DATA_DIR/loom.db`, falling back to `./data/loom.db` when the
-variable is unset — the directory is created if missing. Consistent with
+variable is unset — the directory is created if missing. Uploaded avatars sit
+beside it in `$LOOM_DATA_DIR/avatars/`, created at startup for the same reason
+the data directory is: a first run should not fail on a directory it could have
+made itself.
+
+`users.avatar_path` stores a path **relative to the data directory**
+(`avatars/{uuid}.{ext}`), never an absolute one. An absolute path would bake the
+deployment's layout into the database, so relocating the data directory — or
+mounting the same volume at a different point in a container — would break every
+avatar reference at once. Consistent with
 [ADR 0004](./adr/0004-zero-config-startup.md): no required environment variable,
 and a first run works with no configuration at all.
 

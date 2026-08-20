@@ -1,5 +1,7 @@
 import { Toaster as Sonner, type ToasterProps } from "sonner";
 
+import { useAppearance } from "@/components/AccentThemeProvider";
+
 /**
  * Toast host, mounted once at the root.
  *
@@ -12,10 +14,19 @@ import { Toaster as Sonner, type ToasterProps } from "sonner";
  * reduced-transparency fallback reach it like anything else. Sonner respects
  * `prefers-reduced-motion` itself, and the global rule in index.css covers the
  * rest.
+ *
+ * The resolved palette is still handed to Sonner explicitly, matching what
+ * shadcn's own wrapper does with `next-themes`. Our classes set the toast's
+ * background, but Sonner also ships defaults keyed off its `theme` prop at the
+ * same specificity — leaving it on `light` risks a white toast carrying
+ * light-on-white text the moment the two rules are ordered differently.
  */
 export function Toaster(props: ToasterProps) {
+  const { resolvedTheme } = useAppearance();
+
   return (
     <Sonner
+      theme={resolvedTheme}
       className="toaster group"
       toastOptions={{
         classNames: {

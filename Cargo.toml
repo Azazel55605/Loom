@@ -13,7 +13,9 @@ loom-core = { path = "crates/core" }
 # `async fn` in traits is stable on our pinned 1.82 toolchain but not
 # dyn-compatible, and the connector contract must work as `Box<dyn Connector>`.
 async-trait = "0.1"
-axum = "0.8"
+# `multipart` is on for the avatar upload endpoint: parsing multipart bodies by
+# hand is a parser for an under-specified format, which is not a thing to write.
+axum = { version = "0.8", features = ["multipart"] }
 # Timestamps on the wire need a real date/time type; `default-features = false`
 # keeps the oldtime/js-sys baggage out and `serde` gives us RFC 3339 round-trips.
 chrono = { version = "0.4", default-features = false, features = ["clock", "serde", "std"] }
@@ -47,12 +49,18 @@ sqlx = { version = "0.8", default-features = false, features = [
     "chrono",
     "uuid",
 ] }
+# Decodes uploaded avatars to prove they are actually images. A declared
+# content-type is caller-supplied and proves nothing; decoding is the check.
+# `default-features = false` keeps the decoder set to the three formats we
+# accept, so we are not carrying — or exposing — parsers for formats no
+# endpoint will ever serve.
+image = { version = "0.25", default-features = false, features = ["jpeg", "png", "webp"] }
 # v4 identifiers for rows. Random rather than sequential so an id leaks neither
 # creation order nor row count.
 uuid = { version = "1", features = ["v4", "serde"] }
 # CORS headers for the browser clients; hand-rolling correct preflight
 # handling is not worth it, and tower-http is already axum's ecosystem.
-tower-http = { version = "0.6", features = ["cors"] }
+tower-http = { version = "0.6", features = ["cors", "fs"] }
 # Test-only: `ServiceExt::oneshot` drives the axum router directly, so route
 # tests need no listener, no port, and no async runtime plumbing.
 tower = { version = "0.5", features = ["util"] }

@@ -49,7 +49,12 @@ pub struct UpdateGroupRequest {
     /// Absent leaves it alone.
     name: Option<String>,
     /// Absent leaves it alone. Present-and-null clears it.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    ///
+    /// The custom deserializer is load-bearing, not decoration: without it an
+    /// explicit `null` arrives as the outer `None` and reads as "absent", so
+    /// clearing a description would silently do nothing. See
+    /// [`crate::routes::present_option`].
+    #[serde(default, deserialize_with = "crate::routes::present_option")]
     description: Option<Option<String>>,
     /// Absent leaves grants alone; present **replaces** them wholesale.
     permissions: Option<Vec<PermissionGrant>>,

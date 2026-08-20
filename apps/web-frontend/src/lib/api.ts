@@ -166,6 +166,10 @@ export type SetupRequest = {
  * Useful for hiding controls the user cannot operate. That is a convenience,
  * **never** a control — the server decides what is permitted, and a client that
  * ignores this array learns nothing it could not learn by trying.
+ *
+ * Note the deliberate asymmetry when reading it: the server treats a *scoped*
+ * grant as not satisfying a *global* check, so holding `connectors.control`
+ * over one connector is not authority over connectors in general.
  */
 export type PermissionGrant = {
   key: string;
@@ -257,6 +261,29 @@ export class ApiError extends Error {
   }
 
   /**
+   * True when the caller is authenticated and still not allowed.
+   *
+   * Distinct from `isUnauthorized` in the one way that matters to a client:
+   * refreshing the token cannot fix it. The transport must never retry a 403
+   * through a refresh, or a missing grant turns into a refresh loop.
+   */
+  get isForbidden(): boolean {
+    return this.status === 403;
+  }
+
+  /**
+   * True when the request was well-formed and refused because of the state it
+   * would produce — a taken username, or one of the administration safeguards.
+   *
+   * The message is written for a person and should be shown as-is rather than
+   * replaced with a generic failure: "that would leave no active administrator"
+   * tells the user what to do next, and "something went wrong" does not.
+   */
+  get isConflict(): boolean {
+    return this.status === 409;
+  }
+
+  /**
    * True when a setup attempt lost the race — the instance was already
    * configured.
    *
@@ -309,7 +336,15 @@ type RequestOptions = {
   method?: string;
   /** Bearer token, attached as `Authorization` when present. */
   token?: string | null;
-  /** Serialized as the JSON request body when present. */
+  /**
+   * The request body.
+   *
+   * A `FormData` is passed through untouched; anything else is serialized as
+   * JSON. The distinction matters because a multipart body's `Content-Type`
+   * carries a boundary that only the browser can generate — setting the header
+   * ourselves would produce one without a boundary, and the server would fail
+   * to parse a body that is perfectly well-formed.
+   */
   body?: unknown;
   signal?: AbortSignal;
 };
@@ -324,14 +359,17 @@ type RequestOptions = {
 async function request<T>(path: string, options: RequestOptions = {}): Promise<T> {
   const { method = "GET", token, body, signal } = options;
 
+  const isFormData = body instanceof FormData;
+
   const headers: Record<string, string> = {};
-  if (body !== undefined) headers["Content-Type"] = "application/json";
+  // Deliberately not set for FormData — see `RequestOptions.body`.
+  if (body !== undefined && !isFormData) headers["Content-Type"] = "application/json";
   if (token) headers["Authorization"] = `Bearer ${token}`;
 
   const response = await fetch(`${API_URL}${path}`, {
     method,
     headers,
-    body: body === undefined ? undefined : JSON.stringify(body),
+    body: body === undefined ? undefined : isFormData ? body : JSON.stringify(body),
     signal,
   });
 
@@ -436,8 +474,10 @@ export function refreshSession(): Promise<Session> {
  */
 async function authorizedRequest<T>(
   path: string,
-  options: Omit<RequestOptions, "token"> = {},
+  options: Omit<RequestOptions, "token"> & { retryOnUnauthorized?: boolean } = {},
 ): Promise<T> {
+  const { retryOnUnauthorized = true, ...requestOptions } = options;
+
   if (getStoredSession() === null) throw new SessionExpiredError();
 
   if (expiresWithin(REFRESH_BUFFER_MS)) {
@@ -449,14 +489,22 @@ async function authorizedRequest<T>(
   }
 
   try {
-    return await request<T>(path, { ...options, token: getAccessToken() });
+    return await request<T>(path, { ...requestOptions, token: getAccessToken() });
   } catch (error) {
     if (!(error instanceof ApiError) || !error.isUnauthorized) throw error;
+
+    // Not every 401 is about the token. `POST /account/password` returns one
+    // for a wrong *current password*, and treating that as an expired session
+    // would be actively harmful: the client would burn a refresh, retry, get
+    // the same 401, and surface it as "your session expired" — signing the user
+    // out because they mistyped a password. Callers whose 401 means something
+    // else opt out here.
+    if (!retryOnUnauthorized) throw error;
 
     // The token was rejected despite looking current — expired early, or signed
     // by a backend that has since been rebuilt with a new secret.
     const session = await refreshSession();
-    return await request<T>(path, { ...options, token: session.accessToken });
+    return await request<T>(path, { ...requestOptions, token: session.accessToken });
   }
 }
 
@@ -620,4 +668,324 @@ export function executeAction(
     `/connectors/${encodeURIComponent(connectorId)}/actions/${encodeURIComponent(actionId)}`,
     { method: "POST", body: params, signal },
   );
+}
+
+/* -------------------------------------------------------------------------- */
+/* Administration                                                              */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * A user account, as returned by every `/users` route.
+ *
+ * There is **no password field, and there must never be one** — see the note in
+ * docs/API_CONTRACT.md. If one ever appears in a response, that is a backend
+ * bug to fix rather than a field to mirror here.
+ */
+export type User = {
+  id: string;
+  username: string;
+  isActive: boolean;
+  /** RFC 3339. */
+  createdAt: string;
+  /** The groups this user belongs to. Membership is stated wholesale, never as
+   *  a delta. */
+  groupIds: string[];
+};
+
+/** `POST /users` body. `groupIds` may be omitted — an account with no groups
+ *  can sign in and do nothing, which is a valid state. */
+export type CreateUserRequest = {
+  username: string;
+  password: string;
+  groupIds?: string[];
+};
+
+/**
+ * `PATCH /users/{id}` body. Every field is optional; an absent field is left
+ * alone, and `groupIds` **replaces** membership rather than adding to it.
+ *
+ * Note the difference between absent and empty: omitting `groupIds` keeps the
+ * current groups, sending `[]` removes them all.
+ */
+export type UpdateUserRequest = {
+  isActive?: boolean;
+  groupIds?: string[];
+};
+
+/** A group with its grants, as returned by every `/groups` route. */
+export type Group = {
+  id: string;
+  name: string;
+  description: string | null;
+  /** RFC 3339. */
+  createdAt: string;
+  /** True for a group that cannot be deleted. Hide or disable the delete
+   *  control rather than letting the user discover it through a 409. */
+  isProtected: boolean;
+  memberCount: number;
+  permissions: PermissionGrant[];
+};
+
+/** `POST /groups` body. New groups are never protected. */
+export type CreateGroupRequest = {
+  name: string;
+  description: string | null;
+  permissions: PermissionGrant[];
+};
+
+/** `PATCH /groups/{id}` body. All fields optional; `permissions` replaces the
+ *  group's grants wholesale, on the same reasoning as user membership. */
+export type UpdateGroupRequest = {
+  name?: string;
+  description?: string | null;
+  permissions?: PermissionGrant[];
+};
+
+/**
+ * One entry of the permission catalog from `GET /permissions`.
+ *
+ * The catalog exists so a client can build a grant-assignment form without
+ * hardcoding a list that falls out of date the next time a migration registers
+ * a key. Treat it as the authoritative set, not `PERMISSION_KEYS`.
+ */
+export type PermissionCatalogEntry = {
+  key: string;
+  description: string;
+};
+
+/** `GET /users` — requires a global `users.manage` grant. */
+export function getUsers(signal?: AbortSignal): Promise<User[]> {
+  return authorizedRequest<User[]>("/users", { signal });
+}
+
+/**
+ * `POST /users` — creates an account.
+ *
+ * 400 for an empty username, a password under 8 characters, or an unknown group
+ * id; 409 when the username is taken.
+ */
+export function createUser(
+  data: CreateUserRequest,
+  signal?: AbortSignal,
+): Promise<User> {
+  return authorizedRequest<User>("/users", { method: "POST", body: data, signal });
+}
+
+/**
+ * `PATCH /users/{id}`.
+ *
+ * A 409 here is a safeguard (see docs/API_CONTRACT.md): the change
+ * would leave no active administrator, or the caller is trying to modify their
+ * own account. Show the backend's message — it says which.
+ */
+export function updateUser(
+  id: string,
+  data: UpdateUserRequest,
+  signal?: AbortSignal,
+): Promise<User> {
+  return authorizedRequest<User>(`/users/${encodeURIComponent(id)}`, {
+    method: "PATCH",
+    body: data,
+    signal,
+  });
+}
+
+/**
+ * `DELETE /users/{id}` — a hard delete, taking the user's group memberships and
+ * refresh tokens with it, which also ends their sessions.
+ *
+ * Subject to the same safeguards as `updateUser`, with the same 409.
+ */
+export function deleteUser(id: string, signal?: AbortSignal): Promise<void> {
+  return authorizedRequest<void>(`/users/${encodeURIComponent(id)}`, {
+    method: "DELETE",
+    signal,
+  });
+}
+
+/** `GET /groups` — requires a global `groups.manage` grant. */
+export function getGroups(signal?: AbortSignal): Promise<Group[]> {
+  return authorizedRequest<Group[]>("/groups", { signal });
+}
+
+/** `POST /groups`. 400 for an empty name or an unregistered permission key;
+ *  409 when the name is taken. */
+export function createGroup(
+  data: CreateGroupRequest,
+  signal?: AbortSignal,
+): Promise<Group> {
+  return authorizedRequest<Group>("/groups", { method: "POST", body: data, signal });
+}
+
+/** `PATCH /groups/{id}`. A protected group may be renamed and re-granted —
+ *  only deletion is refused. */
+export function updateGroup(
+  id: string,
+  data: UpdateGroupRequest,
+  signal?: AbortSignal,
+): Promise<Group> {
+  return authorizedRequest<Group>(`/groups/${encodeURIComponent(id)}`, {
+    method: "PATCH",
+    body: data,
+    signal,
+  });
+}
+
+/** `DELETE /groups/{id}`. 409 when the group is protected — which a client
+ *  should have prevented by reading `isProtected`. */
+export function deleteGroup(id: string, signal?: AbortSignal): Promise<void> {
+  return authorizedRequest<void>(`/groups/${encodeURIComponent(id)}`, {
+    method: "DELETE",
+    signal,
+  });
+}
+
+/** `GET /permissions` — the catalog of registered keys. Requires
+ *  `groups.manage`, since assigning grants is the only thing it is for. */
+export function getPermissions(
+  signal?: AbortSignal,
+): Promise<PermissionCatalogEntry[]> {
+  return authorizedRequest<PermissionCatalogEntry[]>("/permissions", { signal });
+}
+
+/* -------------------------------------------------------------------------- */
+/* Account (self-service)                                                      */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * A group the signed-in user belongs to, as reported by `GET /account`.
+ *
+ * Read-only context. Membership is changed through the admin `/users/{id}`
+ * route, never from here — see the Account section of docs/API_CONTRACT.md.
+ */
+export type AccountGroup = {
+  id: string;
+  name: string;
+};
+
+/** The signed-in user's own profile. As everywhere, no password field. */
+export type Account = {
+  id: string;
+  username: string;
+  displayName: string | null;
+  /**
+   * A **relative** path like `/avatars/{uuid}.png`, or null when unset.
+   *
+   * Resolve it against the same base as the API: the backend cannot know the
+   * origin it is reached through, so it never sends an absolute URL. Use
+   * [`avatarSrc`] rather than reading this straight into an `<img src>`, or the
+   * web frontend will request it on its own origin instead of through the proxy.
+   */
+  avatarUrl: string | null;
+  createdAt: string;
+  groups: AccountGroup[];
+};
+
+/**
+ * `PATCH /account` body. Both optional; an absent field is left alone.
+ *
+ * `displayName: null` clears it — note that this is distinct from omitting the
+ * field, which keeps the current value.
+ */
+export type UpdateAccountRequest = {
+  username?: string;
+  displayName?: string | null;
+};
+
+/** `POST /account/avatar` response. */
+export type AvatarUploadResponse = {
+  avatarUrl: string;
+};
+
+/**
+ * Turns an `avatarUrl` from the API into something an `<img>` can load.
+ *
+ * The backend serves avatars at `/avatars/…`, and every other path in this
+ * client is reached through [`API_URL`] — `/api` for the browser, an absolute
+ * server URL for the desktop and mobile clients. The avatar is no different, so
+ * it gets the same prefix. Reading `avatarUrl` directly would work only in the
+ * one deployment where the frontend and backend share an origin *and* no proxy
+ * prefix is in play.
+ */
+export function avatarSrc(avatarUrl: string): string {
+  return `${API_URL}${avatarUrl}`;
+}
+
+/** `GET /account` — the caller's own profile. Needs a token, no permission. */
+export function getAccount(signal?: AbortSignal): Promise<Account> {
+  return authorizedRequest<Account>("/account", { signal });
+}
+
+/**
+ * `PATCH /account` — change your own username and/or display name.
+ *
+ * Throws an `ApiError` with status 409 when the username is taken by another
+ * account; the check excludes your own row, so resubmitting your current
+ * username is not a conflict.
+ */
+export function updateAccount(
+  data: UpdateAccountRequest,
+  signal?: AbortSignal,
+): Promise<Account> {
+  return authorizedRequest<Account>("/account", {
+    method: "PATCH",
+    body: data,
+    signal,
+  });
+}
+
+/**
+ * `POST /account/password`.
+ *
+ * A 401 here means `currentPassword` was wrong — **not** that the session
+ * expired. That distinction matters to the transport as much as to the UI: see
+ * the note in `authorizedRequest` about why this call opts out of the automatic
+ * refresh-and-retry.
+ */
+export function changePassword(
+  currentPassword: string,
+  newPassword: string,
+  signal?: AbortSignal,
+): Promise<void> {
+  return authorizedRequest<void>("/account/password", {
+    method: "POST",
+    body: { currentPassword, newPassword },
+    signal,
+    retryOnUnauthorized: false,
+  });
+}
+
+/**
+ * `POST /account/avatar` — multipart upload of a single image.
+ *
+ * The backend decides what is acceptable by decoding the bytes, not by reading
+ * the declared type, so a rejection here carries a real explanation (too large,
+ * not a decodable image, wrong format). Show its message rather than a generic
+ * failure.
+ */
+export function uploadAvatar(
+  file: File,
+  signal?: AbortSignal,
+): Promise<AvatarUploadResponse> {
+  const body = new FormData();
+  body.append("file", file);
+
+  return authorizedRequest<AvatarUploadResponse>("/account/avatar", {
+    method: "POST",
+    body,
+    signal,
+  });
+}
+
+/**
+ * `DELETE /account/avatar` — removes the stored file and clears the field.
+ *
+ * Returns the updated profile rather than an acknowledgement, and deleting when
+ * there is no avatar is not an error.
+ */
+export function deleteAvatar(signal?: AbortSignal): Promise<Account> {
+  return authorizedRequest<Account>("/account/avatar", {
+    method: "DELETE",
+    signal,
+  });
 }

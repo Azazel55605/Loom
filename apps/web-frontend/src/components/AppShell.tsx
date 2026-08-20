@@ -1,9 +1,10 @@
 import * as React from "react";
 import { useQuery } from "@tanstack/react-query";
-import { LogOut } from "lucide-react";
+import { Link } from "react-router-dom";
+import { LogOut, Settings } from "lucide-react";
 
 import { Badge } from "@/components/ui/badge";
-import { Button } from "@/components/ui/button";
+import { Button, buttonVariants } from "@/components/ui/button";
 import { getHealth } from "@/lib/api";
 import { useAuth } from "@/lib/auth-context";
 
@@ -31,10 +32,15 @@ export function AppShell({ children }: { children: React.ReactNode }) {
   });
 
   return (
-    <div className="min-h-screen bg-background text-foreground">
+    <div className="app-canvas min-h-screen bg-background text-foreground">
       <header className="surface-elevated sticky top-0 z-10 border-b border-border">
         <div className="mx-auto flex h-14 w-full max-w-5xl items-center gap-3 px-4">
-          <span className="text-base font-semibold tracking-tight">Loom</span>
+          {/* The way back to the dashboard, now that the header leads somewhere
+              else. A wordmark that goes home is the convention people already
+              try before looking for a link. */}
+          <Link to="/" className="text-base font-semibold tracking-tight">
+            Loom
+          </Link>
 
           {health.isSuccess && (
             <Badge variant="outline" title="web-backend core version">
@@ -43,6 +49,18 @@ export function AppShell({ children }: { children: React.ReactNode }) {
           )}
 
           <div className="ml-auto flex items-center gap-3">
+            {/* Visible to anyone signed in. The sections inside handle their own
+                gating — an account with no administrative grants still has a
+                General tab, so there is always something behind this. */}
+            <Link
+              to="/settings"
+              title="Settings"
+              className={buttonVariants({ variant: "ghost", size: "icon" })}
+            >
+              <Settings aria-hidden="true" />
+              <span className="sr-only">Settings</span>
+            </Link>
+
             {user !== null && (
               <span className="hidden text-sm text-muted-foreground sm:inline">
                 {user.username}

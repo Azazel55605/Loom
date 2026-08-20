@@ -1,5 +1,6 @@
 //! Shared application state.
 
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use loom_core::connector::{mock::MockConnector, Connector};
@@ -15,6 +16,12 @@ pub struct AppState {
     pub pool: SqlitePool,
     /// HS256 signing secret, read once at startup so no request pays for it.
     pub jwt_secret: Arc<String>,
+    /// Directory holding uploaded avatar files.
+    ///
+    /// Carried on the state rather than re-resolved per request so a handler
+    /// cannot disagree with the static file service about where avatars live —
+    /// they are handed the same path at startup.
+    pub avatars_dir: Arc<PathBuf>,
     /// The connector registry.
     ///
     /// Heterogeneous and plural from the start — `Vec<Arc<dyn Connector>>`
@@ -31,10 +38,11 @@ impl AppState {
     /// loading depends on the contract question left open in
     /// `docs/adr/0002-connector-contract-tbd.md`, and the mock is a permanent
     /// fixture regardless — see `crates/core/src/connector/mock.rs`.
-    pub fn new(pool: SqlitePool, jwt_secret: String) -> Self {
+    pub fn new(pool: SqlitePool, jwt_secret: String, avatars_dir: PathBuf) -> Self {
         Self {
             pool,
             jwt_secret: Arc::new(jwt_secret),
+            avatars_dir: Arc::new(avatars_dir),
             connectors: Arc::new(vec![Arc::new(MockConnector::default())]),
         }
     }

@@ -44,6 +44,11 @@
        reduced-transparency fallback below. */
     --blur-surface: 12px;
     --surface-alpha: 0.72;
+    /* Secondary surfaces — tab bars, inset panels. Solid at every level except
+       "extra", where they join the glass. Separate from --surface-alpha so
+       turning up the effect does not make every small inset panel translucent
+       at the same rate as a dialog. */
+    --panel-alpha: 1;
   }
 
   .dark {
@@ -58,6 +63,11 @@
 
     --border: 217 33% 20%;
     --input: 217 33% 20%;
+
+    /* Translucency reads differently against a dark ground — the same alpha
+       that looks frosted over white looks merely washed out over near-black,
+       so dark surfaces sit slightly more opaque. */
+    --surface-alpha: 0.78;
 
     /* Lifted for contrast against the dark background; the hues are unchanged
        so a state reads as the same colour in both themes. */
@@ -82,6 +92,45 @@
     --surface-alpha: 1;
   }
 
+  /* The other direction: a user who has explicitly asked for blur gets it even
+     where the OS default would have removed it. Both classes are written by
+     AccentThemeProvider and exactly one is applied at a time, so they cannot
+     fight. They win over the media query above by being later in the sheet at
+     equal specificity, which is why the order of these three rules matters. */
+  .force-transparency {
+    --blur-surface: 12px;
+    --surface-alpha: 0.72;
+    --panel-alpha: 1;
+  }
+
+  /* "Extra": a heavier blur, more translucency, and the secondary surfaces
+     brought into the effect. Still bounded by legibility — the alphas stay high
+     enough that text contrast comes from the solid fallback colour rather than
+     from whatever happens to be behind the surface. */
+  .blur-extra {
+    --blur-surface: 24px;
+    --surface-alpha: 0.62;
+    --panel-alpha: 0.45;
+  }
+
+  /* Translucency reads differently against a dark ground: the alpha that looks
+     frosted over white looks washed out over near-black, so dark surfaces sit
+     slightly more opaque at the same nominal level.
+   *
+   * These two-class rules are required, not decorative. `.dark` sets its own
+   * `--surface-alpha` and appears *earlier* in this sheet, so a single-class
+   * level rule below it would win on source order and flatten the dark value
+   * back to the light one. Matching both classes raises the specificity so the
+   * dark-specific number survives. */
+  .dark.force-transparency {
+    --surface-alpha: 0.78;
+  }
+
+  .dark.blur-extra {
+    --surface-alpha: 0.68;
+    --panel-alpha: 0.4;
+  }
+
   /* Reduced motion means reduced, not merely faster: movement is removed
      rather than shortened. Nothing that conveys state may disappear. */
   @media (prefers-reduced-motion: reduce) {
@@ -93,6 +142,20 @@
       transition-duration: 0.01ms !important;
       scroll-behavior: auto !important;
     }
+  }
+
+  /* The in-app switch, layered on top of the OS signal rather than replacing
+     it. There is deliberately no class that turns motion back *on*: the OS
+     setting is a floor, and an app preference is not entitled to override an
+     accessibility request. See AccentThemeProvider. */
+  .reduce-motion,
+  .reduce-motion *,
+  .reduce-motion *::before,
+  .reduce-motion *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
   }
 
   * {
@@ -111,5 +174,90 @@
   .surface-elevated {
     background-color: hsl(var(--card) / var(--surface-alpha));
     backdrop-filter: blur(var(--blur-surface));
+  }
+
+  /* Secondary inset surface: tab bars and the like. Solid until the blur level
+     is "extra", at which point --panel-alpha drops and it joins the effect
+     without needing a second class toggled at runtime. */
+  .surface-panel {
+    background-color: hsl(var(--muted) / var(--panel-alpha));
+    backdrop-filter: blur(var(--blur-surface));
+  }
+
+  /*
+   * The page ground.
+   *
+   * Opaque at every level, which is what makes the wash below reachable only by
+   * standing down: an opaque full-height element covers the canvas, so painting
+   * a gradient behind it accomplishes nothing. At the "extra" level this goes
+   * transparent and the body's background plus the wash show through.
+   */
+  .blur-extra .app-canvas {
+    background-color: transparent;
+  }
+
+  /*
+   * Something for the blur to actually blur.
+   *
+   * This is the part that is easy to miss: `backdrop-filter` samples what is
+   * *behind* an element, so over a flat background it produces no visible
+   * change at all. Frosted glass with nothing behind it looks exactly like
+   * frosted glass with nothing behind it — which is to say, like plain colour.
+   * A soft, slowly varying wash gives the effect something to distort.
+   *
+   * Derived from --accent, so it follows the user's colour rather than
+   * introducing a second one, and kept at low alpha so it reads as a tint on
+   * the background rather than as content.
+   */
+  .blur-extra body::before {
+    content: "";
+    position: fixed;
+    inset: 0;
+    /* Behind the page's content but still above body's own background: a
+       negative z-index child paints over its parent's background and under its
+       in-flow content. */
+    z-index: -1;
+    pointer-events: none;
+    /* Centres sit inside the viewport on purpose. An earlier version placed
+       them at the corners and above the fold, where the sticky header covered
+       one and the other two fell off-screen — a wash nobody could see, doing
+       none of the work it exists to do. */
+    background:
+      radial-gradient(
+        45rem 45rem at 12% 22%,
+        hsl(var(--accent) / 0.26),
+        transparent 62%
+      ),
+      radial-gradient(
+        40rem 40rem at 88% 30%,
+        hsl(var(--accent) / 0.16),
+        transparent 58%
+      ),
+      radial-gradient(
+        38rem 38rem at 55% 92%,
+        hsl(var(--accent) / 0.18),
+        transparent 60%
+      );
+  }
+
+  .dark.blur-extra body::before {
+    /* Dialled back on dark: the same alphas over a near-black ground read as
+       muddy rather than luminous. */
+    background:
+      radial-gradient(
+        45rem 45rem at 12% 22%,
+        hsl(var(--accent) / 0.22),
+        transparent 62%
+      ),
+      radial-gradient(
+        40rem 40rem at 88% 30%,
+        hsl(var(--accent) / 0.14),
+        transparent 58%
+      ),
+      radial-gradient(
+        38rem 38rem at 55% 92%,
+        hsl(var(--accent) / 0.12),
+        transparent 60%
+      );
   }
 }

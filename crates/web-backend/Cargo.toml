@@ -16,6 +16,7 @@ loom-core.workspace = true
 argon2.workspace = true
 axum.workspace = true
 chrono.workspace = true
+image.workspace = true
 jsonwebtoken.workspace = true
 rand.workspace = true
 serde.workspace = true

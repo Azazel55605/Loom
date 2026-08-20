@@ -16,11 +16,14 @@
 //! anyone, and pretending otherwise would mean serving requests it has no way
 //! to authorize.
 
+use std::path::Path;
+
 use axum::{http::HeaderValue, routing::get, Json, Router};
 use serde::Serialize;
 use sqlx::sqlite::SqlitePoolOptions;
 use sqlx::SqlitePool;
 use tower_http::cors::{Any, CorsLayer};
+use tower_http::services::ServeDir;
 use tracing::info;
 use tracing_subscriber::EnvFilter;
 
@@ -136,11 +139,40 @@ async fn open_database(url: &str) -> Result<SqlitePool, Box<dyn std::error::Erro
 /// Split out of [`main`] so tests can drive the real routing table through
 /// `tower::ServiceExt::oneshot` instead of binding a port.
 fn app(state: AppState) -> Router {
+    // Cloned before `with_state` consumes the state: the file service and the
+    // upload handler must point at the same directory, and taking it from one
+    // place is what guarantees they do.
+    let avatars_dir = state.avatars_dir.as_ref().clone();
+
     Router::new()
         .route("/health", get(health))
         .merge(routes::routes())
         .with_state(state)
+        .nest_service("/avatars", avatar_service(&avatars_dir))
         .layer(cors_layer())
+}
+
+/// Read-only static serving for uploaded avatars.
+///
+/// `ServeDir` answers GET and HEAD and nothing else, so there is no write path
+/// here regardless of what a client sends. It resolves requests inside the
+/// given directory and rejects anything escaping it, which is what stops a
+/// `..` in a URL reading the database file sitting one level up.
+///
+/// Directory listing is off — `ServeDir` has no listing behaviour to begin
+/// with, and `append_index_html_on_directories(false)` also stops a request for
+/// a directory being answered with an `index.html` that happened to be uploaded
+/// into it.
+///
+/// The files are served unauthenticated. That is a deliberate, narrow
+/// trade-off: an avatar URL is embedded in `<img>` tags all over the interface,
+/// and browsers do not attach an `Authorization` header to image loads, so
+/// authenticating them would mean either cookies or signed URLs. What leaks is
+/// a profile picture to whoever can already reach the server *and* guess a
+/// random UUIDv4 filename. **Revisit if avatars ever stop being the only thing
+/// in this directory.**
+fn avatar_service(dir: &Path) -> ServeDir {
+    ServeDir::new(dir).append_index_html_on_directories(false)
 }
 
 #[tokio::main]
@@ -160,6 +192,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let pool = open_database(&config::database_url(&database_path)).await?;
     let jwt_secret = auth::secret::load_or_create_jwt_secret(&pool).await?;
+    let avatars_dir = config::avatars_dir(&data_dir)?;
 
     let listener = tokio::net::TcpListener::bind(&bind_addr).await?;
     info!(
@@ -168,7 +201,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         "loom web-backend listening"
     );
 
-    axum::serve(listener, app(AppState::new(pool, jwt_secret))).await?;
+    axum::serve(listener, app(AppState::new(pool, jwt_secret, avatars_dir))).await?;
     Ok(())
 }
 
@@ -190,7 +223,32 @@ mod tests {
     /// drops, so tests cannot see one another's data.
     struct TestApp {
         router: Router,
-        _dir: tempfile::TempDir,
+        /// Kept so tests can look at the avatar directory on disk — the point
+        /// of several of them is that a file is really there, or really gone.
+        dir: tempfile::TempDir,
+    }
+
+    impl TestApp {
+        /// Path the avatar files are written to.
+        fn avatars_dir(&self) -> std::path::PathBuf {
+            self.dir.path().join(config::AVATARS_DIRNAME)
+        }
+
+        /// The files currently in the avatar directory.
+        fn avatar_files(&self) -> Vec<String> {
+            let mut names: Vec<String> = std::fs::read_dir(self.avatars_dir())
+                .expect("avatar directory must exist")
+                .map(|entry| {
+                    entry
+                        .expect("readable entry")
+                        .file_name()
+                        .to_string_lossy()
+                        .into_owned()
+                })
+                .collect();
+            names.sort();
+            names
+        }
     }
 
     async fn test_app() -> TestApp {
@@ -202,10 +260,11 @@ mod tests {
         let secret = auth::secret::load_or_create_jwt_secret(&pool)
             .await
             .expect("secret must be generated");
+        let avatars = config::avatars_dir(dir.path()).expect("avatar directory must be created");
 
         TestApp {
-            router: app(AppState::new(pool, secret)),
-            _dir: dir,
+            router: app(AppState::new(pool, secret, avatars)),
+            dir,
         }
     }
 
@@ -1467,5 +1526,750 @@ mod tests {
         .await;
 
         assert_eq!(status, StatusCode::BAD_REQUEST);
+    }
+
+    /* ---------------------------------------------------------------- */
+    /* Self-service account                                              */
+    /* ---------------------------------------------------------------- */
+
+    /// Boundary used by the multipart helpers. Fixed rather than generated:
+    /// these bodies are built and parsed in the same process, so there is
+    /// nothing to collide with.
+    const BOUNDARY: &str = "loomtestboundary";
+
+    /// A multipart request carrying one file field named `file`.
+    ///
+    /// `content_type` is deliberately a parameter: several tests assert that it
+    /// is *not* what the server decides by.
+    fn upload_request(
+        uri: &str,
+        token: &str,
+        filename: &str,
+        content_type: &str,
+        data: &[u8],
+    ) -> Request<Body> {
+        let mut body = Vec::new();
+        body.extend_from_slice(
+            format!(
+                "--{BOUNDARY}\r\n\
+                 Content-Disposition: form-data; name=\"file\"; filename=\"{filename}\"\r\n\
+                 Content-Type: {content_type}\r\n\r\n"
+            )
+            .as_bytes(),
+        );
+        body.extend_from_slice(data);
+        body.extend_from_slice(format!("\r\n--{BOUNDARY}--\r\n").as_bytes());
+
+        Request::builder()
+            .method("POST")
+            .uri(uri)
+            .header(
+                "content-type",
+                format!("multipart/form-data; boundary={BOUNDARY}"),
+            )
+            .header("authorization", format!("Bearer {token}"))
+            .body(Body::from(body))
+            .expect("valid request")
+    }
+
+    /// A real, valid, tiny PNG — encoded rather than pasted in as a blob, so it
+    /// is obvious what it is and it cannot rot into something unreadable.
+    fn tiny_png() -> Vec<u8> {
+        let mut bytes = std::io::Cursor::new(Vec::new());
+        image::DynamicImage::ImageRgba8(image::RgbaImage::new(4, 4))
+            .write_to(&mut bytes, image::ImageFormat::Png)
+            .expect("encoding a 4x4 PNG must succeed");
+        bytes.into_inner()
+    }
+
+    #[tokio::test]
+    async fn account_returns_the_callers_own_profile_with_groups() {
+        let app = test_app().await;
+        let (access, _) = setup_and_login(&app.router).await;
+
+        let (status, body) = send(&app.router, get_with_auth("/account", &bearer(&access))).await;
+
+        assert_eq!(status, StatusCode::OK, "{body:#}");
+        assert_eq!(body["username"], "admin");
+        assert_eq!(body["displayName"], serde_json::Value::Null);
+        assert_eq!(body["avatarUrl"], serde_json::Value::Null);
+        assert!(body["createdAt"].is_string());
+
+        // The seeded Administrators group, named rather than just identified.
+        let groups = body["groups"].as_array().expect("groups array");
+        assert_eq!(groups.len(), 1, "{body:#}");
+        assert_eq!(groups[0]["name"], "Administrators");
+        assert!(groups[0]["id"].is_string());
+
+        // The hash must not be anywhere in this response, under any key.
+        assert!(
+            !body.to_string().contains("$argon2"),
+            "a password hash reached the account response: {body:#}"
+        );
+    }
+
+    #[tokio::test]
+    async fn account_routes_reject_an_anonymous_caller() {
+        let app = test_app().await;
+        setup_and_login(&app.router).await;
+
+        for request in [
+            get("/account"),
+            Request::builder()
+                .method("PATCH")
+                .uri("/account")
+                .header("content-type", "application/json")
+                .body(Body::from("{}"))
+                .expect("valid request"),
+            post_json("/account/password", serde_json::json!({})),
+            Request::builder()
+                .method("DELETE")
+                .uri("/account/avatar")
+                .body(Body::empty())
+                .expect("valid request"),
+        ] {
+            let uri = request.uri().to_string();
+            let (status, _) = send(&app.router, request).await;
+            assert_eq!(status, StatusCode::UNAUTHORIZED, "{uri} allowed no token");
+        }
+    }
+
+    #[tokio::test]
+    async fn a_user_can_rename_themselves_and_set_a_display_name() {
+        let app = test_app().await;
+        let (access, refresh) = setup_and_login(&app.router).await;
+
+        let (status, body) = send(
+            &app.router,
+            patch_json_auth(
+                "/account",
+                &access,
+                serde_json::json!({ "username": "  renamed  ", "displayName": "The Admin" }),
+            ),
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::OK, "{body:#}");
+        // Trimmed on the way in, like every other username in the API.
+        assert_eq!(body["username"], "renamed");
+        assert_eq!(body["displayName"], "The Admin");
+
+        // The old name is genuinely free now, and the new one genuinely works.
+        let (status, _) = send(
+            &app.router,
+            post_json(
+                "/auth/login",
+                serde_json::json!({ "username": "renamed", "password": "a-good-password" }),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "the new username must authenticate");
+
+        // The already-issued token keeps its stale `username` claim and still
+        // works, because handlers key off `sub`. This is the documented
+        // trade-off in `update_account`, asserted so a change to it is visible.
+        let (status, body) = send(&app.router, get_with_auth("/account", &bearer(&access))).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["username"], "renamed", "the row is what is read");
+
+        // And a refresh picks the new name up.
+        let (status, tokens) = send(
+            &app.router,
+            post_json(
+                "/auth/refresh",
+                serde_json::json!({ "refreshToken": refresh }),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{tokens:#}");
+        let (status, session) = send(
+            &app.router,
+            get_with_auth(
+                "/auth/session",
+                &bearer(tokens["accessToken"].as_str().expect("accessToken")),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(session["username"], "renamed");
+    }
+
+    #[tokio::test]
+    async fn renaming_yourself_to_a_taken_username_conflicts() {
+        let app = test_app().await;
+        let (admin, _) = setup_and_login(&app.router).await;
+
+        let other = user_with_grants(&app.router, &admin, "housemate", serde_json::json!([])).await;
+
+        let (status, body) = send(
+            &app.router,
+            patch_json_auth(
+                "/account",
+                &other,
+                serde_json::json!({ "username": "admin" }),
+            ),
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::CONFLICT, "{body:#}");
+        assert!(
+            body["error"].as_str().expect("error").contains("admin"),
+            "the message should name the taken username: {body:#}"
+        );
+
+        // Refused means unchanged, not partially applied.
+        let (_, account) = send(&app.router, get_with_auth("/account", &bearer(&other))).await;
+        assert_eq!(account["username"], "housemate");
+    }
+
+    #[tokio::test]
+    async fn keeping_your_own_username_is_not_a_conflict() {
+        let app = test_app().await;
+        let (access, _) = setup_and_login(&app.router).await;
+
+        // The uniqueness check excludes self; without that exclusion, sending
+        // the current username back — which any "save profile" form does —
+        // would collide with the caller's own row.
+        let (status, body) = send(
+            &app.router,
+            patch_json_auth(
+                "/account",
+                &access,
+                serde_json::json!({ "username": "admin", "displayName": "Still Admin" }),
+            ),
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::OK, "{body:#}");
+        assert_eq!(body["displayName"], "Still Admin");
+    }
+
+    #[tokio::test]
+    async fn a_display_name_can_be_cleared_and_whitespace_does_not_count() {
+        let app = test_app().await;
+        let (access, _) = setup_and_login(&app.router).await;
+
+        let (_, body) = send(
+            &app.router,
+            patch_json_auth(
+                "/account",
+                &access,
+                serde_json::json!({ "displayName": "Named" }),
+            ),
+        )
+        .await;
+        assert_eq!(body["displayName"], "Named");
+
+        // Explicit null clears it.
+        let (status, body) = send(
+            &app.router,
+            patch_json_auth(
+                "/account",
+                &access,
+                serde_json::json!({ "displayName": null }),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["displayName"], serde_json::Value::Null);
+
+        // So does whitespace, which is not a name.
+        send(
+            &app.router,
+            patch_json_auth(
+                "/account",
+                &access,
+                serde_json::json!({ "displayName": "Named" }),
+            ),
+        )
+        .await;
+        let (_, body) = send(
+            &app.router,
+            patch_json_auth(
+                "/account",
+                &access,
+                serde_json::json!({ "displayName": "   " }),
+            ),
+        )
+        .await;
+        assert_eq!(body["displayName"], serde_json::Value::Null);
+
+        // An absent field leaves it alone, rather than clearing it.
+        send(
+            &app.router,
+            patch_json_auth(
+                "/account",
+                &access,
+                serde_json::json!({ "displayName": "Kept" }),
+            ),
+        )
+        .await;
+        let (_, body) = send(
+            &app.router,
+            patch_json_auth(
+                "/account",
+                &access,
+                serde_json::json!({ "username": "admin" }),
+            ),
+        )
+        .await;
+        assert_eq!(body["displayName"], "Kept");
+    }
+
+    #[tokio::test]
+    async fn a_rename_cannot_be_pointed_at_another_account() {
+        let app = test_app().await;
+        let (admin, _) = setup_and_login(&app.router).await;
+        let other = user_with_grants(&app.router, &admin, "housemate", serde_json::json!([])).await;
+
+        // There is no id parameter to supply, so the only way to try is to send
+        // one in the body and hope it is honoured. It must be ignored: the
+        // subject comes from the token.
+        let (status, body) = send(
+            &app.router,
+            patch_json_auth(
+                "/account",
+                &other,
+                serde_json::json!({ "id": "00000000-0000-4000-8000-000000000009", "username": "hijacked" }),
+            ),
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::OK, "{body:#}");
+        assert_eq!(body["username"], "hijacked");
+
+        // The admin is untouched.
+        let (_, admin_account) =
+            send(&app.router, get_with_auth("/account", &bearer(&admin))).await;
+        assert_eq!(admin_account["username"], "admin");
+    }
+
+    #[tokio::test]
+    async fn changing_a_password_requires_the_current_one() {
+        let app = test_app().await;
+        let (access, _) = setup_and_login(&app.router).await;
+
+        let (status, body) = send(
+            &app.router,
+            post_json_auth(
+                "/account/password",
+                &access,
+                serde_json::json!({
+                    "currentPassword": "not-the-password",
+                    "newPassword": "a-better-password",
+                }),
+            ),
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::UNAUTHORIZED, "{body:#}");
+        // A distinct message from the login 401, so a client can say which
+        // field is wrong rather than "sign in failed".
+        assert_eq!(body["error"], "current password is incorrect");
+
+        // Nothing changed: the original password still works.
+        let (status, _) = send(
+            &app.router,
+            post_json(
+                "/auth/login",
+                serde_json::json!({ "username": "admin", "password": "a-good-password" }),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn a_correct_current_password_changes_it() {
+        let app = test_app().await;
+        let (access, _) = setup_and_login(&app.router).await;
+
+        let (status, _) = send(
+            &app.router,
+            post_json_auth(
+                "/account/password",
+                &access,
+                serde_json::json!({
+                    "currentPassword": "a-good-password",
+                    "newPassword": "an-even-better-password",
+                }),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::NO_CONTENT);
+
+        let (status, _) = send(
+            &app.router,
+            post_json(
+                "/auth/login",
+                serde_json::json!({ "username": "admin", "password": "an-even-better-password" }),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "the new password must authenticate");
+
+        let (status, _) = send(
+            &app.router,
+            post_json(
+                "/auth/login",
+                serde_json::json!({ "username": "admin", "password": "a-good-password" }),
+            ),
+        )
+        .await;
+        assert_eq!(
+            status,
+            StatusCode::UNAUTHORIZED,
+            "the old password must stop working"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_new_password_faces_the_same_floor_as_setup() {
+        let app = test_app().await;
+        let (access, _) = setup_and_login(&app.router).await;
+
+        let (status, body) = send(
+            &app.router,
+            post_json_auth(
+                "/account/password",
+                &access,
+                serde_json::json!({ "currentPassword": "a-good-password", "newPassword": "short" }),
+            ),
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{body:#}");
+        assert!(body["error"]
+            .as_str()
+            .expect("error")
+            .contains(&auth::password::MIN_PASSWORD_LENGTH.to_string()));
+    }
+
+    #[tokio::test]
+    async fn an_avatar_upload_stores_a_file_and_reports_its_url() {
+        let app = test_app().await;
+        let (access, _) = setup_and_login(&app.router).await;
+
+        assert!(app.avatar_files().is_empty(), "starts with no avatars");
+
+        let (status, body) = send(
+            &app.router,
+            upload_request(
+                "/account/avatar",
+                &access,
+                "me.png",
+                "image/png",
+                &tiny_png(),
+            ),
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::OK, "{body:#}");
+        let url = body["avatarUrl"].as_str().expect("avatarUrl").to_owned();
+        assert!(url.starts_with("/avatars/"), "{url}");
+        assert!(url.ends_with(".png"), "{url}");
+        // Never derived from the upload's own filename.
+        assert!(!url.contains("me.png"), "{url}");
+
+        let files = app.avatar_files();
+        assert_eq!(files.len(), 1, "{files:?}");
+        assert!(url.ends_with(&files[0]), "url {url} vs file {}", files[0]);
+
+        // And it is reachable through the static service, which is the whole
+        // point of storing it.
+        let (status, _) = send(&app.router, get(&url)).await;
+        assert_eq!(status, StatusCode::OK, "the avatar must be served at {url}");
+
+        let (_, account) = send(&app.router, get_with_auth("/account", &bearer(&access))).await;
+        assert_eq!(account["avatarUrl"], url);
+    }
+
+    #[tokio::test]
+    async fn a_replacement_avatar_deletes_the_previous_file() {
+        let app = test_app().await;
+        let (access, _) = setup_and_login(&app.router).await;
+
+        let (_, first) = send(
+            &app.router,
+            upload_request(
+                "/account/avatar",
+                &access,
+                "a.png",
+                "image/png",
+                &tiny_png(),
+            ),
+        )
+        .await;
+        let first_url = first["avatarUrl"].as_str().expect("avatarUrl").to_owned();
+        let first_files = app.avatar_files();
+        assert_eq!(first_files.len(), 1);
+
+        let (status, second) = send(
+            &app.router,
+            upload_request(
+                "/account/avatar",
+                &access,
+                "b.png",
+                "image/png",
+                &tiny_png(),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{second:#}");
+        let second_url = second["avatarUrl"].as_str().expect("avatarUrl").to_owned();
+
+        // A fresh name every time, so a cached URL cannot show the old picture.
+        assert_ne!(first_url, second_url);
+
+        // Exactly one file: the replaced one was removed rather than orphaned.
+        let files = app.avatar_files();
+        assert_eq!(files.len(), 1, "orphaned avatar files: {files:?}");
+        assert!(second_url.ends_with(&files[0]));
+
+        // The old URL now 404s, which is what "deleted from disk" means to a
+        // client.
+        let (status, _) = send(&app.router, get(&first_url)).await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn deleting_an_avatar_removes_the_file_and_clears_the_field() {
+        let app = test_app().await;
+        let (access, _) = setup_and_login(&app.router).await;
+
+        let (_, uploaded) = send(
+            &app.router,
+            upload_request(
+                "/account/avatar",
+                &access,
+                "a.png",
+                "image/png",
+                &tiny_png(),
+            ),
+        )
+        .await;
+        let url = uploaded["avatarUrl"]
+            .as_str()
+            .expect("avatarUrl")
+            .to_owned();
+        assert_eq!(app.avatar_files().len(), 1);
+
+        let (status, body) = send(&app.router, delete_auth("/account/avatar", &access)).await;
+
+        assert_eq!(status, StatusCode::OK, "{body:#}");
+        // Returns the updated profile, not just an acknowledgement.
+        assert_eq!(body["avatarUrl"], serde_json::Value::Null);
+        assert_eq!(body["username"], "admin");
+
+        assert!(
+            app.avatar_files().is_empty(),
+            "the file must be gone: {:?}",
+            app.avatar_files()
+        );
+
+        let (status, _) = send(&app.router, get(&url)).await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+
+        // Deleting again is not an error — the end state is the one asked for.
+        let (status, _) = send(&app.router, delete_auth("/account/avatar", &access)).await;
+        assert_eq!(status, StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn a_non_image_upload_is_rejected_whatever_it_claims_to_be() {
+        let app = test_app().await;
+        let (access, _) = setup_and_login(&app.router).await;
+
+        // Announced as a PNG, and it is not one. The content-type header is
+        // caller-supplied, so only the bytes get a vote.
+        let (status, body) = send(
+            &app.router,
+            upload_request(
+                "/account/avatar",
+                &access,
+                "payload.png",
+                "image/png",
+                b"#!/bin/sh\necho not an image\n",
+            ),
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{body:#}");
+        assert!(app.avatar_files().is_empty(), "nothing may be written");
+
+        let (_, account) = send(&app.router, get_with_auth("/account", &bearer(&access))).await;
+        assert_eq!(account["avatarUrl"], serde_json::Value::Null);
+    }
+
+    #[tokio::test]
+    async fn a_truncated_image_is_rejected() {
+        let app = test_app().await;
+        let (access, _) = setup_and_login(&app.router).await;
+
+        // A real PNG header followed by nothing usable. This is what a header
+        // sniff alone would wave through, and why the file is decoded in full.
+        let png = tiny_png();
+        let truncated = &png[..png.len() / 2];
+
+        let (status, body) = send(
+            &app.router,
+            upload_request(
+                "/account/avatar",
+                &access,
+                "half.png",
+                "image/png",
+                truncated,
+            ),
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{body:#}");
+        assert!(app.avatar_files().is_empty());
+    }
+
+    #[tokio::test]
+    async fn an_oversized_avatar_is_rejected() {
+        let app = test_app().await;
+        let (access, _) = setup_and_login(&app.router).await;
+
+        let too_big = vec![0u8; routes::account::MAX_AVATAR_BYTES + 1];
+
+        let (status, body) = send(
+            &app.router,
+            upload_request("/account/avatar", &access, "big.png", "image/png", &too_big),
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::PAYLOAD_TOO_LARGE, "{body:#}");
+        assert!(app.avatar_files().is_empty(), "nothing may be written");
+    }
+
+    #[tokio::test]
+    async fn an_upload_with_no_file_field_is_rejected() {
+        let app = test_app().await;
+        let (access, _) = setup_and_login(&app.router).await;
+
+        let body = format!(
+            "--{BOUNDARY}\r\nContent-Disposition: form-data; name=\"note\"\r\n\r\nhello\r\n--{BOUNDARY}--\r\n"
+        );
+        let request = Request::builder()
+            .method("POST")
+            .uri("/account/avatar")
+            .header(
+                "content-type",
+                format!("multipart/form-data; boundary={BOUNDARY}"),
+            )
+            .header("authorization", bearer(&access))
+            .body(Body::from(body))
+            .expect("valid request");
+
+        let (status, _) = send(&app.router, request).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn the_avatar_service_does_not_escape_its_directory() {
+        let app = test_app().await;
+        setup_and_login(&app.router).await;
+
+        // The database sits one level up from the avatar directory. A traversal
+        // that worked would hand out password hashes.
+        for uri in [
+            "/avatars/../loom.db",
+            "/avatars/%2e%2e/loom.db",
+            "/avatars/..%2floom.db",
+        ] {
+            let (status, _) = send(&app.router, get(uri)).await;
+            assert_ne!(status, StatusCode::OK, "{uri} escaped the avatar directory");
+        }
+    }
+
+    #[tokio::test]
+    async fn one_users_avatar_change_does_not_touch_anothers() {
+        let app = test_app().await;
+        let (admin, _) = setup_and_login(&app.router).await;
+        let other = user_with_grants(&app.router, &admin, "housemate", serde_json::json!([])).await;
+
+        let (_, admin_avatar) = send(
+            &app.router,
+            upload_request("/account/avatar", &admin, "a.png", "image/png", &tiny_png()),
+        )
+        .await;
+        let (_, other_avatar) = send(
+            &app.router,
+            upload_request("/account/avatar", &other, "b.png", "image/png", &tiny_png()),
+        )
+        .await;
+
+        // Two accounts, two files: the second upload must not have been treated
+        // as a replacement of the first.
+        assert_eq!(app.avatar_files().len(), 2);
+        assert_ne!(admin_avatar["avatarUrl"], other_avatar["avatarUrl"]);
+
+        // Deleting one leaves the other alone.
+        send(&app.router, delete_auth("/account/avatar", &other)).await;
+
+        let (_, admin_account) =
+            send(&app.router, get_with_auth("/account", &bearer(&admin))).await;
+        assert_eq!(admin_account["avatarUrl"], admin_avatar["avatarUrl"]);
+        assert_eq!(app.avatar_files().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn a_group_description_can_be_cleared_with_an_explicit_null() {
+        let app = test_app().await;
+        let (admin, _) = setup_and_login(&app.router).await;
+
+        let (status, group) = send(
+            &app.router,
+            post_json_auth(
+                "/groups",
+                &admin,
+                serde_json::json!({
+                    "name": "Viewers",
+                    "description": "Read-only access.",
+                    "permissions": [],
+                }),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED, "{group:#}");
+        let id = group["id"].as_str().expect("group id").to_owned();
+
+        // Present-and-null must clear. This distinguishes "the caller sent
+        // null" from "the caller omitted the field", which a bare
+        // `Option<Option<String>>` cannot do — see `routes::present_option`.
+        let (status, updated) = send(
+            &app.router,
+            patch_json_auth(
+                &format!("/groups/{id}"),
+                &admin,
+                serde_json::json!({ "description": null }),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{updated:#}");
+        assert_eq!(updated["description"], serde_json::Value::Null);
+
+        // An omitted field still leaves the value alone.
+        send(
+            &app.router,
+            patch_json_auth(
+                &format!("/groups/{id}"),
+                &admin,
+                serde_json::json!({ "description": "Restored." }),
+            ),
+        )
+        .await;
+        let (_, updated) = send(
+            &app.router,
+            patch_json_auth(
+                &format!("/groups/{id}"),
+                &admin,
+                serde_json::json!({ "name": "Viewers" }),
+            ),
+        )
+        .await;
+        assert_eq!(updated["description"], "Restored.");
     }
 }
