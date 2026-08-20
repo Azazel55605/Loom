@@ -1,7 +1,7 @@
 # Loom
 
 <!-- Placeholder: replace <owner> with the GitHub owner once this repo has a remote. -->
-[![CI](https://github.com/Azazel55605/Loom/actions/workflows/ci.yml/badge.svg)](https://github.com/Azazel55605/Loom/actions/workflows/ci.yml)
+[![CI](https://github.com/YOUR_GITHUB_OWNER/Loom/actions/workflows/ci.yml/badge.svg)](https://github.com/YOUR_GITHUB_OWNER/Loom/actions/workflows/ci.yml)
 
 A modular, extensible homelab management platform — not just a dashboard. Loom
 can *act* on your services through their APIs, not merely show you whether
@@ -17,9 +17,10 @@ they're up.
 
 | Path                 | What it is                                                    |
 | -------------------- | ------------------------------------------------------------- |
-| `crates/core`        | `loom-core` — shared library: connectors, business logic, later the shared UI kit. Never runs standalone. |
+| `crates/core`        | `loom-core` — shared Rust library for connectors and business logic. Never runs standalone. |
 | `crates/web-backend` | The one running server. Owns auth, access control, features. All clients talk to it. |
-| `apps/`              | Placeholder for the web frontend and the Tauri desktop/mobile clients. |
+| `apps/`              | Web frontend and Tauri desktop/mobile clients. |
+| `packages/ui-kit`    | Shared React components, API/auth logic, and design tokens consumed by clients. |
 | `docs/`              | Architecture notes, ADRs, versioning, and agent instructions.  |
 | `versions.json`      | Single source of truth for every product's version — see [`docs/VERSIONING.md`](docs/VERSIONING.md). |
 

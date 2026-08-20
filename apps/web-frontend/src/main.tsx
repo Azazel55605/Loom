@@ -4,10 +4,12 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { BrowserRouter } from "react-router-dom";
 
 import App from "@/App";
-import { AccentThemeProvider } from "@/components/AccentThemeProvider";
-import { Toaster } from "@/components/ui/sonner";
-import { AuthProvider } from "@/lib/auth-context";
-import "@/index.css";
+import { AccentThemeProvider } from "@loom/ui-kit/components/AccentThemeProvider";
+import { Toaster } from "@loom/ui-kit/components/ui/sonner";
+import { AuthProvider } from "@loom/ui-kit/lib/auth-context";
+import "@loom/ui-kit/styles.css";
+import { webBaseUrlProvider } from "@/adapters/webBaseUrlProvider";
+import { webTokenStorage } from "@/adapters/webTokenStorage";
 
 /**
  * One client for the whole app.
@@ -30,7 +32,10 @@ ReactDOM.createRoot(document.getElementById("root")!).render(
     <QueryClientProvider client={queryClient}>
       <AccentThemeProvider>
         <BrowserRouter>
-          <AuthProvider>
+      <AuthProvider
+        baseUrlProvider={webBaseUrlProvider}
+        tokenStorage={webTokenStorage}
+      >
             <App />
             <Toaster />
           </AuthProvider>

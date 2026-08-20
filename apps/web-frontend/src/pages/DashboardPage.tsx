@@ -2,14 +2,15 @@ import * as React from "react";
 import { useQuery } from "@tanstack/react-query";
 import { AlertCircle } from "lucide-react";
 
-import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
-import { AppShell } from "@/components/AppShell";
-import { ConnectorCard } from "@/components/ConnectorCard";
-import { Card, CardContent, CardHeader } from "@/components/ui/card";
-import { Skeleton } from "@/components/ui/skeleton";
-import { ApiError, getConnectors, SessionExpiredError } from "@/lib/api";
-import { useAuth } from "@/lib/auth-context";
-import { describeConnectorError } from "@/lib/connector-error";
+import { Alert, AlertDescription, AlertTitle } from "@loom/ui-kit/components/ui/alert";
+import { WebAppShell } from "@/components/WebAppShell";
+import { ConnectorCard } from "@loom/ui-kit/components/ConnectorCard";
+import { Card, CardContent, CardHeader } from "@loom/ui-kit/components/ui/card";
+import { Skeleton } from "@loom/ui-kit/components/ui/skeleton";
+import { ApiError, SessionExpiredError } from "@loom/ui-kit/lib/api";
+import { useApiClient } from "@loom/ui-kit/lib/api-context";
+import { useAuth } from "@loom/ui-kit/lib/auth-context";
+import { describeConnectorError } from "@loom/ui-kit/lib/connector-error";
 
 /**
  * How often the connector list refetches.
@@ -23,11 +24,12 @@ import { describeConnectorError } from "@/lib/connector-error";
 const REFETCH_INTERVAL_MS = 10_000;
 
 export function DashboardPage() {
+  const api = useApiClient();
   const { isAuthenticated, signOut } = useAuth();
 
   const connectors = useQuery({
     queryKey: ["connectors"],
-    queryFn: ({ signal }) => getConnectors(signal),
+    queryFn: ({ signal }) => api.getConnectors(signal),
     enabled: isAuthenticated,
     refetchInterval: REFETCH_INTERVAL_MS,
     // The client already refreshes once on a 401, so a 401 reaching here means
@@ -52,7 +54,7 @@ export function DashboardPage() {
   }, [isUnauthorized, signOut]);
 
   return (
-    <AppShell>
+    <WebAppShell>
       <div className="space-y-6">
         <div>
           <h1 className="text-2xl font-semibold tracking-tight">Connectors</h1>
@@ -95,7 +97,7 @@ export function DashboardPage() {
           </div>
         )}
       </div>
-    </AppShell>
+    </WebAppShell>
   );
 }
 

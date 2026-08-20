@@ -3,8 +3,8 @@ import { Navigate, Route, Routes, useLocation } from "react-router-dom";
 
 import { DashboardPage } from "@/pages/DashboardPage";
 import { LoginPage } from "@/pages/LoginPage";
-import { useAuth } from "@/lib/auth-context";
-import { useSetupStatus } from "@/lib/use-setup-status";
+import { useAuth } from "@loom/ui-kit/lib/auth-context";
+import { useSetupStatus } from "@loom/ui-kit/lib/use-setup-status";
 
 /**
  * Routes that are not on the way in, loaded on demand.
@@ -29,28 +29,29 @@ const SetupPage = React.lazy(async () => ({
   default: (await import("@/pages/SetupPage")).SetupPage,
 }));
 const SettingsLayout = React.lazy(async () => ({
-  default: (await import("@/components/SettingsLayout")).SettingsLayout,
+  default: (await import("@/components/WebSettingsRoute")).WebSettingsRoute,
 }));
 const PermissionsLayout = React.lazy(async () => ({
-  default: (await import("@/components/PermissionsLayout")).PermissionsLayout,
+  default: (await import("@/components/WebPermissionsRoute")).WebPermissionsRoute,
 }));
 const PermissionsIndexRedirect = React.lazy(async () => ({
-  default: (await import("@/components/PermissionsLayout")).PermissionsIndexRedirect,
+  default: (await import("@/components/WebPermissionsRoute"))
+    .WebPermissionsIndexRedirect,
 }));
 const AccountPanel = React.lazy(async () => ({
-  default: (await import("@/pages/settings/AccountPanel")).AccountPanel,
+  default: (await import("@loom/ui-kit/pages/settings/AccountPanel")).AccountPanel,
 }));
 const AppearancePanel = React.lazy(async () => ({
-  default: (await import("@/pages/settings/AppearancePanel")).AppearancePanel,
+  default: (await import("@loom/ui-kit/pages/settings/AppearancePanel")).AppearancePanel,
 }));
 const GeneralPanel = React.lazy(async () => ({
-  default: (await import("@/pages/settings/GeneralPanel")).GeneralPanel,
+  default: (await import("@loom/ui-kit/pages/settings/GeneralPanel")).GeneralPanel,
 }));
 const UsersPanel = React.lazy(async () => ({
-  default: (await import("@/pages/settings/UsersPanel")).UsersPanel,
+  default: (await import("@loom/ui-kit/pages/settings/UsersPanel")).UsersPanel,
 }));
 const GroupsPanel = React.lazy(async () => ({
-  default: (await import("@/pages/settings/GroupsPanel")).GroupsPanel,
+  default: (await import("@loom/ui-kit/pages/settings/GroupsPanel")).GroupsPanel,
 }));
 
 /**

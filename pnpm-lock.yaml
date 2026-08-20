@@ -156,6 +156,76 @@ importers:
 
   apps/web-frontend:
     dependencies:
+      '@loom/ui-kit':
+        specifier: workspace:*
+        version: link:../../packages/ui-kit
+      '@tanstack/react-query':
+        specifier: ^5.101.4
+        version: 5.101.4(react@18.3.1)
+      lucide-react:
+        specifier: ^0.469.0
+        version: 0.469.0(react@18.3.1)
+      react:
+        specifier: ^18.3.1
+        version: 18.3.1
+      react-dom:
+        specifier: ^18.3.1
+        version: 18.3.1(react@18.3.1)
+      react-router-dom:
+        specifier: ^7.18.2
+        version: 7.18.2(react-dom@18.3.1(react@18.3.1))(react@18.3.1)
+    devDependencies:
+      '@eslint/js':
+        specifier: ^9.17.0
+        version: 9.39.5
+      '@types/node':
+        specifier: ^22.10.5
+        version: 22.20.1
+      '@types/react':
+        specifier: ^18.3.18
+        version: 18.3.31
+      '@types/react-dom':
+        specifier: ^18.3.5
+        version: 18.3.7(@types/react@18.3.31)
+      '@vitejs/plugin-react':
+        specifier: ^4.3.4
+        version: 4.7.0(vite@6.4.3(@types/node@22.20.1)(jiti@1.21.7))
+      autoprefixer:
+        specifier: ^10.4.20
+        version: 10.5.4(postcss@8.5.26)
+      eslint:
+        specifier: ^9.17.0
+        version: 9.39.5(jiti@1.21.7)
+      eslint-plugin-react-hooks:
+        specifier: ^5.1.0
+        version: 5.2.0(eslint@9.39.5(jiti@1.21.7))
+      eslint-plugin-react-refresh:
+        specifier: ^0.4.16
+        version: 0.4.26(eslint@9.39.5(jiti@1.21.7))
+      globals:
+        specifier: ^15.14.0
+        version: 15.15.0
+      postcss:
+        specifier: ^8.4.49
+        version: 8.5.26
+      tailwindcss:
+        specifier: ^3.4.17
+        version: 3.4.19
+      tailwindcss-animate:
+        specifier: ^1.0.7
+        version: 1.0.7(tailwindcss@3.4.19)
+      typescript:
+        specifier: ^5.7.2
+        version: 5.9.3
+      typescript-eslint:
+        specifier: ^8.19.0
+        version: 8.67.0(eslint@9.39.5(jiti@1.21.7))(typescript@5.9.3)
+      vite:
+        specifier: ^6.0.7
+        version: 6.4.3(@types/node@22.20.1)(jiti@1.21.7)
+
+  packages/ui-kit:
+    dependencies:
       '@hookform/resolvers':
         specifier: ^5.9.1
         version: 5.9.1(react-hook-form@7.85.0(react@18.3.1))(zod@4.4.3)
@@ -210,9 +280,6 @@ importers:
       react-hook-form:
         specifier: ^7.85.0
         version: 7.85.0(react@18.3.1)
-      react-router-dom:
-        specifier: ^7.18.2
-        version: 7.18.2(react-dom@18.3.1(react@18.3.1))(react@18.3.1)
       sonner:
         specifier: ^2.0.8
         version: 2.0.8(@types/react@18.3.31)(react-dom@18.3.1(react@18.3.1))(react@18.3.1)
@@ -223,39 +290,12 @@ importers:
         specifier: ^4.4.3
         version: 4.4.3
     devDependencies:
-      '@eslint/js':
-        specifier: ^9.17.0
-        version: 9.39.5
-      '@types/node':
-        specifier: ^22.10.5
-        version: 22.20.1
       '@types/react':
         specifier: ^18.3.18
         version: 18.3.31
       '@types/react-dom':
         specifier: ^18.3.5
         version: 18.3.7(@types/react@18.3.31)
-      '@vitejs/plugin-react':
-        specifier: ^4.3.4
-        version: 4.7.0(vite@6.4.3(@types/node@22.20.1)(jiti@1.21.7))
-      autoprefixer:
-        specifier: ^10.4.20
-        version: 10.5.4(postcss@8.5.26)
-      eslint:
-        specifier: ^9.17.0
-        version: 9.39.5(jiti@1.21.7)
-      eslint-plugin-react-hooks:
-        specifier: ^5.1.0
-        version: 5.2.0(eslint@9.39.5(jiti@1.21.7))
-      eslint-plugin-react-refresh:
-        specifier: ^0.4.16
-        version: 0.4.26(eslint@9.39.5(jiti@1.21.7))
-      globals:
-        specifier: ^15.14.0
-        version: 15.15.0
-      postcss:
-        specifier: ^8.4.49
-        version: 8.5.26
       tailwindcss:
         specifier: ^3.4.17
         version: 3.4.19
@@ -265,12 +305,6 @@ importers:
       typescript:
         specifier: ^5.7.2
         version: 5.9.3
-      typescript-eslint:
-        specifier: ^8.19.0
-        version: 8.67.0(eslint@9.39.5(jiti@1.21.7))(typescript@5.9.3)
-      vite:
-        specifier: ^6.0.7
-        version: 6.4.3(@types/node@22.20.1)(jiti@1.21.7)
 
 packages:
 

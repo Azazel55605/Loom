@@ -9,14 +9,14 @@ pkgver=0.0.0.r0.g0000000
 pkgrel=1
 pkgdesc="Loom desktop client — a modular, extensible homelab management platform (git)"
 arch=('x86_64')
-url="https://github.com/Azazel55605/loom"
+url="https://github.com/YOUR_GITHUB_OWNER/loom"
 license=('MIT')
 depends=('webkit2gtk-4.1' 'gtk3' 'hicolor-icon-theme')
 makedepends=('git' 'rust' 'cargo' 'nodejs' 'pnpm' 'pkgconf' 'libsoup3' 'openssl')
 provides=('loom-desktop')
 conflicts=('loom-desktop')
 options=('!strip' '!debug' '!lto')
-source=("${pkgname}::git+https://github.com/Azazel55605/loom.git")
+source=("${pkgname}::git+https://github.com/YOUR_GITHUB_OWNER/loom.git")
 sha256sums=('updkgsums')
 
 pkgver() {

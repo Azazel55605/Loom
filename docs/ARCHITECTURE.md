@@ -35,8 +35,7 @@ A shared **library crate** (`crates/core`, package `loom-core`). It holds:
 - the connector trait and its implementations — the code that actually talks to
   the services running in a homelab,
 - business logic that must behave identically regardless of which client
-  triggered it,
-- later, a shared UI component kit consumed by the Tauri clients.
+  triggered it.
 
 Core has **no network surface of its own**: no listener, no daemon, no
 standalone mode. It is linked into whatever needs it. This is deliberate — Core
@@ -61,16 +60,23 @@ backend can ship on separate cadences — a UI fix does not require redeploying
 the server, and a backend release does not require a coordinated frontend push.
 It is a client like any other: no privileges the API does not grant it.
 
+## Shared UI/client package
+
+`packages/ui-kit` (`@loom/ui-kit`) contains the React components, design tokens,
+API wire types and transport, authentication context, and permission helpers
+shared by browser and Tauri webviews. Platform-specific navigation, token
+storage, and backend URL discovery are injected by each app. See ADR 0009.
+
 ## Desktop
 
-A **Tauri** client. Shares Core's UI kit so it looks and behaves like the web
-frontend, and connects to Web/backend over the network. It links Core for
-shared UI and local logic, but *not* to bypass the API.
+A **Tauri** client. It consumes `@loom/ui-kit` so it looks and behaves like the
+web frontend, and connects to Web/backend over the network. Native integration
+must not become a way to bypass the API.
 
 ## Mobile
 
-A **Tauri mobile** client. Same relationship as Desktop: shared UI kit from
-Core, all privileged operations over the Web/backend API.
+A **Tauri mobile** client. Same relationship as Desktop: shared UI/client logic
+from `@loom/ui-kit`, all privileged operations over the Web/backend API.
 
 ## The invariant
 

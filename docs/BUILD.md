@@ -22,8 +22,8 @@ Once, from the repo root:
 pnpm install
 ```
 
-This installs for every workspace package under `apps/`. Rust dependencies are
-fetched by Cargo on first build; no separate step.
+This installs every workspace package under `apps/` and `packages/`. Rust
+dependencies are fetched by Cargo on first build; no separate step.
 
 ## Per-component builds
 
@@ -39,15 +39,15 @@ The Cargo packages are named `loom-core` and `loom-web-backend` — a crate name
 `core` would collide with Rust's built-in `core`. The `pnpm build:*` scripts
 already use the correct names; prefer them over hand-written `cargo` commands.
 
-### `pnpm build` builds the frontend apps only
+### `pnpm build` builds frontend apps and shared packages only
 
 ```sh
 pnpm build     # === pnpm -r --if-present build
 ```
 
-`pnpm -r` iterates **pnpm workspace packages** — that is, `apps/*`. The Rust
-crates are Cargo workspace members, not pnpm packages, so **`pnpm build` does
-not build `core` or `web-backend`.** For a full build:
+`pnpm -r` iterates **pnpm workspace packages** — `apps/*` and `packages/*`.
+The Rust crates are Cargo workspace members, not pnpm packages, so **`pnpm
+build` does not build `core` or `web-backend`.** For a full build:
 
 ```sh
 pnpm build:core && pnpm build:web-backend && pnpm build
@@ -59,7 +59,7 @@ cargo build --release --workspace
 rather than failing the run, so this stays correct as `apps/` grows.
 
 > Every component is now scaffolded, so `pnpm -r` commands no longer skip
-> anything. If a future `apps/*` package has no `build` or `test` script,
+> anything. If a future `apps/*` or `packages/*` package has no `build` or `test` script,
 > `--if-present` still skips it silently — a passing exit code is not by itself
 > proof that a given component built.
 
