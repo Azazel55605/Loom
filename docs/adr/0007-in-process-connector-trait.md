@@ -43,9 +43,15 @@ loader would produce an implementation backed by declarative data, and a plugin
 host would produce one backed by a WASM module. Choosing between them does not
 require changing this trait, only adding an implementation of it.
 
-`MockConnector` ships alongside it as a permanent fixture — configurable health,
-latency, and failure mode — so client work does not depend on live
-infrastructure. See `docs/API_CONTRACT.md` for the serialized shapes.
+`DebugConnector` ships alongside it as a permanent fixture — configurable
+health, latency, and failure mode, plus simulated data points and a default
+widget layout — so client work does not depend on live infrastructure. See
+`docs/API_CONTRACT.md` for the serialized shapes.
+
+**Extended by [0011](./0011-connector-instance-registry.md)**, which adds the
+presentation half of the trait (`display_fields`, `data_points`,
+`default_layout`) and says where connector instances come from. The trait
+defined here is unchanged in kind; 0011 only adds to it.
 
 ## Consequences
 

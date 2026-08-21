@@ -1,8 +1,8 @@
 import { DesktopAppShell } from "@/components/DesktopAppShell";
-import { Dashboard } from "@loom/ui-kit/components/Dashboard";
+import { ConnectorsView } from "@loom/ui-kit/components/ConnectorsView";
 
 export function DashboardPage() {
   return (
-    <Dashboard renderShell={(content) => <DesktopAppShell>{content}</DesktopAppShell>} />
+    <ConnectorsView renderShell={(content) => <DesktopAppShell>{content}</DesktopAppShell>} />
   );
 }

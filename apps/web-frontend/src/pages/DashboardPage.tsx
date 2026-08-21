@@ -1,9 +1,9 @@
-import { Dashboard } from "@loom/ui-kit/components/Dashboard";
+import { ConnectorsView } from "@loom/ui-kit/components/ConnectorsView";
 
 import { WebAppShell } from "@/components/WebAppShell";
 
 export function DashboardPage() {
   return (
-    <Dashboard renderShell={(content) => <WebAppShell>{content}</WebAppShell>} />
+    <ConnectorsView renderShell={(content) => <WebAppShell>{content}</WebAppShell>} />
   );
 }

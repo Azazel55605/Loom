@@ -74,9 +74,19 @@ pub fn routes() -> Router<AppState> {
                     account::MAX_AVATAR_BYTES + account::AVATAR_BODY_SLACK_BYTES,
                 )),
         )
-        .route("/connectors", get(connectors::list_connectors))
+        .route("/connector-types", get(connectors::list_connector_types))
         .route(
-            "/connectors/{id}/actions/{action_id}",
+            "/connector-instances",
+            get(connectors::list_instances).post(connectors::create_instance),
+        )
+        .route(
+            "/connector-instances/{id}",
+            get(connectors::get_instance)
+                .patch(connectors::update_instance)
+                .delete(connectors::delete_instance),
+        )
+        .route(
+            "/connector-instances/{id}/actions/{action_id}",
             post(connectors::execute_action),
         )
         .route("/users", get(users::list_users).post(users::create_user))

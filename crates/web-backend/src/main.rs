@@ -29,6 +29,7 @@ use tracing_subscriber::EnvFilter;
 
 mod auth;
 mod config;
+mod connectors;
 mod error;
 mod routes;
 mod state;
@@ -199,6 +200,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let jwt_secret = auth::secret::load_or_create_jwt_secret(&pool).await?;
     let avatars_dir = config::avatars_dir(&data_dir)?;
 
+    // Built after the database is migrated: the runtime's whole job is to hold
+    // the live form of what is stored in `connector_instances`.
+    let connectors =
+        connectors::ConnectorRuntime::load(&pool, connectors::builtin_registry()).await?;
+
     let listener = tokio::net::TcpListener::bind(&bind_addr).await?;
     info!(
         addr = %listener.local_addr()?,
@@ -206,7 +212,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         "loom web-backend listening"
     );
 
-    axum::serve(listener, app(AppState::new(pool, jwt_secret, avatars_dir))).await?;
+    axum::serve(
+        listener,
+        app(AppState::new(pool, jwt_secret, avatars_dir, connectors)),
+    )
+    .await?;
     Ok(())
 }
 
@@ -266,9 +276,12 @@ mod tests {
             .await
             .expect("secret must be generated");
         let avatars = config::avatars_dir(dir.path()).expect("avatar directory must be created");
+        let connectors = connectors::ConnectorRuntime::load(&pool, connectors::builtin_registry())
+            .await
+            .expect("an empty connector table must load");
 
         TestApp {
-            router: app(AppState::new(pool, secret, avatars)),
+            router: app(AppState::new(pool, secret, avatars, connectors)),
             dir,
         }
     }
@@ -542,7 +555,7 @@ mod tests {
         assert!(body["userId"].as_str().is_some_and(|id| !id.is_empty()));
 
         // The seeded Administrators group grants every registered permission
-        // globally, so the first admin's claims must contain all five with no
+        // globally, so the first admin's claims must contain all six with no
         // resource scoping.
         let permissions = body["permissions"].as_array().expect("permissions array");
         let mut keys: Vec<&str> = permissions
@@ -555,6 +568,7 @@ mod tests {
             keys,
             vec![
                 "connectors.control",
+                "connectors.manage",
                 "connectors.view",
                 "groups.manage",
                 "system.settings",
@@ -740,7 +754,7 @@ mod tests {
         )
         .await;
         assert_eq!(status, StatusCode::OK);
-        assert_eq!(session["permissions"].as_array().expect("array").len(), 5);
+        assert_eq!(session["permissions"].as_array().expect("array").len(), 6);
 
         // The old refresh token was revoked by rotation and cannot be replayed.
         let (status, _) = send(
@@ -798,43 +812,306 @@ mod tests {
         assert_eq!(status, StatusCode::NO_CONTENT);
     }
 
+    /* ---------------------------------------------------------------- */
+    /* Connector types and instances                                     */
+    /* ---------------------------------------------------------------- */
+
+    /// Creates a debug instance through the real endpoint and returns its id.
+    async fn create_debug_instance(app: &Router, token: &str, name: &str) -> String {
+        let (status, body) = send(
+            app,
+            post_json_auth(
+                "/connector-instances",
+                token,
+                serde_json::json!({
+                    "connectorType": "debug",
+                    "name": name,
+                    "config": {},
+                }),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED, "create failed: {body:#}");
+        body["id"].as_str().expect("id").to_owned()
+    }
+
     #[tokio::test]
-    async fn connector_routes_work_for_an_administrator() {
+    async fn the_type_catalog_lists_the_debug_type_with_its_schema() {
         let app = test_app().await;
         let (access, _) = setup_and_login(&app.router).await;
 
-        let (status, body) =
-            send(&app.router, get_with_auth("/connectors", &bearer(&access))).await;
+        let (status, body) = send(
+            &app.router,
+            get_with_auth("/connector-types", &bearer(&access)),
+        )
+        .await;
         assert_eq!(status, StatusCode::OK);
-        let entries = body.as_array().expect("array");
-        assert_eq!(entries.len(), 1);
-        assert_eq!(entries[0]["metadata"]["id"], "mock");
-        assert_eq!(entries[0]["status"]["health"], "healthy");
 
-        let ids: Vec<&str> = entries[0]["actions"]
+        let types = body.as_array().expect("array");
+        assert_eq!(types.len(), 1);
+        assert_eq!(types[0]["typeId"], "debug");
+        assert!(types[0]["displayName"]
+            .as_str()
+            .is_some_and(|n| !n.is_empty()));
+        // The add-connector form is generated from this, so it has to be a
+        // usable schema rather than merely present.
+        assert_eq!(types[0]["configSchema"]["type"], "object");
+        assert!(types[0]["configSchema"]["properties"].is_object());
+    }
+
+    #[tokio::test]
+    async fn an_instance_can_be_created_read_updated_and_deleted() {
+        let app = test_app().await;
+        let (access, _) = setup_and_login(&app.router).await;
+
+        // Nothing to begin with: no connector is implicit any more.
+        let (status, body) = send(
+            &app.router,
+            get_with_auth("/connector-instances", &bearer(&access)),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body.as_array().expect("array").len(), 0);
+
+        let (status, created) = send(
+            &app.router,
+            post_json_auth(
+                "/connector-instances",
+                &access,
+                serde_json::json!({
+                    "connectorType": "debug",
+                    "name": "Fixture",
+                    "config": { "baseLoad": 10 },
+                }),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED, "create failed: {created:#}");
+        let id = created["id"].as_str().expect("id").to_owned();
+        assert_eq!(created["name"], "Fixture");
+        assert_eq!(created["connectorType"], "debug");
+        assert_eq!(created["metadata"]["id"], "debug");
+        assert_eq!(created["metadata"]["minSize"], serde_json::json!([2, 2]));
+        assert_eq!(created["status"]["health"], "healthy");
+        assert!(!created["displayFields"]
+            .as_array()
+            .expect("array")
+            .is_empty());
+        assert_eq!(created["dataPoints"].as_array().expect("array").len(), 4);
+        assert!(!created["defaultLayout"]["bindings"]
+            .as_array()
+            .expect("array")
+            .is_empty());
+
+        // Detail carries what a placement UI needs.
+        let (status, detail) = send(
+            &app.router,
+            get_with_auth(&format!("/connector-instances/{id}"), &bearer(&access)),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(detail["config"]["baseLoad"], 10);
+        let action_ids: Vec<&str> = detail["actions"]
             .as_array()
             .expect("actions")
             .iter()
             .map(|action| action["id"].as_str().expect("id"))
             .collect();
-        assert!(ids.contains(&"restart") && ids.contains(&"ping"), "{ids:?}");
+        assert!(action_ids.contains(&"ping") && action_ids.contains(&"set-enabled"));
 
-        let (status, body) = send(
+        // Update: both fields, and the live connector is rebuilt from the new
+        // configuration rather than left as it was.
+        let (status, updated) = send(
+            &app.router,
+            patch_json_auth(
+                &format!("/connector-instances/{id}"),
+                &access,
+                serde_json::json!({ "name": "Renamed", "config": { "label": "after-update" } }),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "update failed: {updated:#}");
+        assert_eq!(updated["name"], "Renamed");
+        assert_eq!(updated["config"]["label"], "after-update");
+        assert!(updated["displayFields"]
+            .as_array()
+            .expect("array")
+            .iter()
+            .any(|field| field["value"] == "after-update"));
+
+        let (status, _) = send(
+            &app.router,
+            delete_auth(&format!("/connector-instances/{id}"), &access),
+        )
+        .await;
+        assert_eq!(status, StatusCode::NO_CONTENT);
+
+        let (status, _) = send(
+            &app.router,
+            get_with_auth(&format!("/connector-instances/{id}"), &bearer(&access)),
+        )
+        .await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+
+        // And the live runtime entry went with it.
+        let (status, _) = send(
             &app.router,
             post_json_auth(
-                "/connectors/mock/actions/restart",
+                &format!("/connector-instances/{id}/actions/ping"),
                 &access,
                 serde_json::json!({}),
             ),
         )
         .await;
-        assert_eq!(status, StatusCode::OK);
-        assert_eq!(body["success"], true);
+        assert_eq!(status, StatusCode::NOT_FOUND);
+    }
 
+    /// The factory is the validator: a configuration it refuses must never be
+    /// written, or the row would be silently skipped at the next startup.
+    #[tokio::test]
+    async fn an_invalid_configuration_is_refused_and_nothing_is_stored() {
+        let app = test_app().await;
+        let (access, _) = setup_and_login(&app.router).await;
+
+        let (status, body) = send(
+            &app.router,
+            post_json_auth(
+                "/connector-instances",
+                &access,
+                serde_json::json!({
+                    "connectorType": "debug",
+                    "name": "Bad",
+                    "config": { "baseLoad": 900 },
+                }),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        // The connector's own objection, not a generic rejection.
+        assert!(body["connectorError"]["invalidConfig"]["reason"]
+            .as_str()
+            .is_some_and(|reason| reason.contains("baseLoad")));
+
+        // An unknown key is caught too, rather than silently ignored.
         let (status, _) = send(
             &app.router,
             post_json_auth(
-                "/connectors/nope/actions/ping",
+                "/connector-instances",
+                &access,
+                serde_json::json!({
+                    "connectorType": "debug",
+                    "name": "Bad",
+                    "config": { "notAField": 1 },
+                }),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+
+        // An unregistered type is a 400, not a 404: the instance was never the
+        // thing that could not be found.
+        let (status, body) = send(
+            &app.router,
+            post_json_auth(
+                "/connector-instances",
+                &access,
+                serde_json::json!({
+                    "connectorType": "not-a-type",
+                    "name": "Bad",
+                    "config": {},
+                }),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert!(body["error"]
+            .as_str()
+            .is_some_and(|error| error.contains("not-a-type")));
+
+        let (_, list) = send(
+            &app.router,
+            get_with_auth("/connector-instances", &bearer(&access)),
+        )
+        .await;
+        assert_eq!(list.as_array().expect("array").len(), 0);
+    }
+
+    #[tokio::test]
+    async fn an_update_with_an_invalid_configuration_leaves_the_instance_alone() {
+        let app = test_app().await;
+        let (access, _) = setup_and_login(&app.router).await;
+        let id = create_debug_instance(&app.router, &access, "Fixture").await;
+
+        let (status, _) = send(
+            &app.router,
+            patch_json_auth(
+                &format!("/connector-instances/{id}"),
+                &access,
+                serde_json::json!({ "name": "Renamed", "config": { "baseLoad": 900 } }),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+
+        let (_, detail) = send(
+            &app.router,
+            get_with_auth(&format!("/connector-instances/{id}"), &bearer(&access)),
+        )
+        .await;
+        assert_eq!(detail["name"], "Fixture", "the rename must not have landed");
+    }
+
+    #[tokio::test]
+    async fn actions_run_against_the_instance_that_was_named() {
+        let app = test_app().await;
+        let (access, _) = setup_and_login(&app.router).await;
+        let first = create_debug_instance(&app.router, &access, "First").await;
+        let second = create_debug_instance(&app.router, &access, "Second").await;
+
+        let (status, body) = send(
+            &app.router,
+            post_json_auth(
+                &format!("/connector-instances/{first}/actions/set-label"),
+                &access,
+                serde_json::json!({ "label": "only-the-first" }),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "action failed: {body:#}");
+        assert_eq!(body["success"], true);
+
+        // Instances are separate live connectors, not one shared fixture.
+        let (_, first_detail) = send(
+            &app.router,
+            get_with_auth(&format!("/connector-instances/{first}"), &bearer(&access)),
+        )
+        .await;
+        let (_, second_detail) = send(
+            &app.router,
+            get_with_auth(&format!("/connector-instances/{second}"), &bearer(&access)),
+        )
+        .await;
+        assert_eq!(first_detail["status"]["details"]["label"], "only-the-first");
+        assert_eq!(second_detail["status"]["details"]["label"], "debug-fixture");
+
+        // Bad parameters are the connector's objection, reported as a 400.
+        let (status, body) = send(
+            &app.router,
+            post_json_auth(
+                &format!("/connector-instances/{first}/actions/set-load"),
+                &access,
+                serde_json::json!({ "value": 900 }),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert!(body["connectorError"]["invalidParams"].is_object());
+
+        // An unknown action id is a 404 from the connector, not a 400.
+        let (status, _) = send(
+            &app.router,
+            post_json_auth(
+                &format!("/connector-instances/{first}/actions/nope"),
                 &access,
                 serde_json::json!({}),
             ),
@@ -849,15 +1126,122 @@ mod tests {
         let app = test_app().await;
         setup_and_login(&app.router).await;
 
-        let (list, _) = send(&app.router, get("/connectors")).await;
-        assert_eq!(list, StatusCode::UNAUTHORIZED);
+        for request in [
+            get("/connector-types"),
+            get("/connector-instances"),
+            get("/connector-instances/whatever"),
+        ] {
+            let (status, _) = send(&app.router, request).await;
+            assert_eq!(status, StatusCode::UNAUTHORIZED);
+        }
 
-        let (action, _) = send(
+        let (status, _) = send(
             &app.router,
-            post_json("/connectors/mock/actions/ping", serde_json::json!({})),
+            post_json(
+                "/connector-instances/whatever/actions/ping",
+                serde_json::json!({}),
+            ),
         )
         .await;
-        assert_eq!(action, StatusCode::UNAUTHORIZED);
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+    }
+
+    /// `connectors.manage` is a real split, not a synonym: viewing instances
+    /// and deciding which exist are separately granted.
+    #[tokio::test]
+    async fn managing_instances_needs_more_than_viewing_them() {
+        let app = test_app().await;
+        let (admin, _) = setup_and_login(&app.router).await;
+        let id = create_debug_instance(&app.router, &admin, "Fixture").await;
+
+        let viewer = user_with_grants(
+            &app.router,
+            &admin,
+            "viewer",
+            serde_json::json!([{
+                "key": "connectors.view",
+                "resourceType": null,
+                "resourceId": null,
+            }]),
+        )
+        .await;
+
+        // View works.
+        let (status, _) = send(
+            &app.router,
+            get_with_auth("/connector-instances", &bearer(&viewer)),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let (status, _) = send(
+            &app.router,
+            get_with_auth(&format!("/connector-instances/{id}"), &bearer(&viewer)),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+
+        // Everything that changes the instance list does not.
+        let (status, _) = send(
+            &app.router,
+            post_json_auth(
+                "/connector-instances",
+                &viewer,
+                serde_json::json!({ "connectorType": "debug", "name": "Nope", "config": {} }),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+
+        let (status, _) = send(
+            &app.router,
+            patch_json_auth(
+                &format!("/connector-instances/{id}"),
+                &viewer,
+                serde_json::json!({ "name": "Nope" }),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+
+        let (status, _) = send(
+            &app.router,
+            delete_auth(&format!("/connector-instances/{id}"), &viewer),
+        )
+        .await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+
+        // And the type catalog is part of adding one.
+        let (status, _) = send(
+            &app.router,
+            get_with_auth("/connector-types", &bearer(&viewer)),
+        )
+        .await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+
+        // A manager who cannot view still manages.
+        let manager = user_with_grants(
+            &app.router,
+            &admin,
+            "manager",
+            serde_json::json!([{
+                "key": "connectors.manage",
+                "resourceType": null,
+                "resourceId": null,
+            }]),
+        )
+        .await;
+        let (status, _) = send(
+            &app.router,
+            get_with_auth("/connector-types", &bearer(&manager)),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let (status, _) = send(
+            &app.router,
+            get_with_auth("/connector-instances", &bearer(&manager)),
+        )
+        .await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
     }
 
     /* ---------------------------------------------------------------- */
@@ -870,10 +1254,12 @@ mod tests {
     async fn a_user_without_a_grant_is_forbidden_not_unauthorized() {
         let app = test_app().await;
         let (admin, _) = setup_and_login(&app.router).await;
+        let id = create_debug_instance(&app.router, &admin, "Fixture").await;
         let nobody = user_with_grants(&app.router, &admin, "nobody", serde_json::json!([])).await;
 
         for request in [
-            get_with_auth("/connectors", &bearer(&nobody)),
+            get_with_auth("/connector-types", &bearer(&nobody)),
+            get_with_auth("/connector-instances", &bearer(&nobody)),
             get_with_auth("/users", &bearer(&nobody)),
             get_with_auth("/groups", &bearer(&nobody)),
             get_with_auth("/permissions", &bearer(&nobody)),
@@ -886,7 +1272,7 @@ mod tests {
         let (status, _) = send(
             &app.router,
             post_json_auth(
-                "/connectors/mock/actions/ping",
+                &format!("/connector-instances/{id}/actions/ping"),
                 &nobody,
                 serde_json::json!({}),
             ),
@@ -895,13 +1281,16 @@ mod tests {
         assert_eq!(status, StatusCode::FORBIDDEN);
     }
 
-    /// The three cases the resource-scoped check has to get right.
+    /// The three cases the resource-scoped check has to get right — now scoped
+    /// to a real instance id rather than one hardcoded connector.
     #[tokio::test]
     async fn connector_action_respects_scoped_global_and_absent_grants() {
         let app = test_app().await;
         let (admin, _) = setup_and_login(&app.router).await;
+        let id = create_debug_instance(&app.router, &admin, "Fixture").await;
+        let other = create_debug_instance(&app.router, &admin, "Other").await;
 
-        // 1. A grant naming exactly the mock connector.
+        // 1. A grant naming exactly this instance.
         let scoped = user_with_grants(
             &app.router,
             &admin,
@@ -909,7 +1298,7 @@ mod tests {
             serde_json::json!([{
                 "key": "connectors.control",
                 "resourceType": "connector",
-                "resourceId": "mock",
+                "resourceId": id,
             }]),
         )
         .await;
@@ -927,41 +1316,32 @@ mod tests {
         )
         .await;
 
-        // 3. A grant for a *different* connector.
-        let elsewhere = user_with_grants(
-            &app.router,
-            &admin,
-            "elsewhere",
-            serde_json::json!([{
-                "key": "connectors.control",
-                "resourceType": "connector",
-                "resourceId": "some-other-connector",
-            }]),
-        )
-        .await;
-
-        let act = |token: &str| {
+        let act = |instance: &str, token: &str| {
             post_json_auth(
-                "/connectors/mock/actions/ping",
+                &format!("/connector-instances/{instance}/actions/ping"),
                 token,
                 serde_json::json!({}),
             )
         };
 
-        let (status, body) = send(&app.router, act(&scoped)).await;
+        let (status, body) = send(&app.router, act(&id, &scoped)).await;
         assert_eq!(status, StatusCode::OK, "scoped grant must work: {body:#}");
 
-        let (status, body) = send(&app.router, act(&global)).await;
+        let (status, body) = send(&app.router, act(&id, &global)).await;
         assert_eq!(status, StatusCode::OK, "global grant must work: {body:#}");
 
-        // The whole point of scoping: a grant for another connector authorizes
-        // nothing here.
-        let (status, _) = send(&app.router, act(&elsewhere)).await;
+        // The whole point of scoping: a grant for one instance authorizes
+        // nothing on another, even of the same type.
+        let (status, _) = send(&app.router, act(&other, &scoped)).await;
         assert_eq!(status, StatusCode::FORBIDDEN);
 
-        // And a connector-scoped grant is not authority over connectors at
+        // And an instance-scoped grant is not authority over connectors at
         // large, so the global-only list endpoint still refuses it.
-        let (status, _) = send(&app.router, get_with_auth("/connectors", &bearer(&scoped))).await;
+        let (status, _) = send(
+            &app.router,
+            get_with_auth("/connector-instances", &bearer(&scoped)),
+        )
+        .await;
         assert_eq!(status, StatusCode::FORBIDDEN);
     }
 
@@ -971,12 +1351,13 @@ mod tests {
     async fn an_unauthorized_action_does_not_reveal_whether_the_connector_exists() {
         let app = test_app().await;
         let (admin, _) = setup_and_login(&app.router).await;
+        let id = create_debug_instance(&app.router, &admin, "Fixture").await;
         let nobody = user_with_grants(&app.router, &admin, "nobody", serde_json::json!([])).await;
 
         let (real, real_body) = send(
             &app.router,
             post_json_auth(
-                "/connectors/mock/actions/ping",
+                &format!("/connector-instances/{id}/actions/ping"),
                 &nobody,
                 serde_json::json!({}),
             ),
@@ -985,7 +1366,7 @@ mod tests {
         let (fake, fake_body) = send(
             &app.router,
             post_json_auth(
-                "/connectors/ghost/actions/ping",
+                "/connector-instances/00000000-0000-4000-8000-00000000ffff/actions/ping",
                 &nobody,
                 serde_json::json!({}),
             ),
@@ -1078,6 +1459,7 @@ mod tests {
             keys,
             vec![
                 "connectors.control",
+                "connectors.manage",
                 "connectors.view",
                 "groups.manage",
                 "system.settings",

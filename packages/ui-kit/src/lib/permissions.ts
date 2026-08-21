@@ -37,6 +37,7 @@ export function hasPermission(permissions: PermissionGrant[], key: string): bool
 export const PERMISSION_KEYS = {
   connectorsView: "connectors.view",
   connectorsControl: "connectors.control",
+  connectorsManage: "connectors.manage",
   usersManage: "users.manage",
   groupsManage: "groups.manage",
   systemSettings: "system.settings",

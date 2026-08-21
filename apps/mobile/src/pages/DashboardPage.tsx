@@ -1,8 +1,8 @@
 import { MobileAppShell } from "@/components/MobileAppShell";
-import { Dashboard } from "@loom/ui-kit/components/Dashboard";
+import { ConnectorsView } from "@loom/ui-kit/components/ConnectorsView";
 
 export function DashboardPage() {
   return (
-    <Dashboard renderShell={(content) => <MobileAppShell>{content}</MobileAppShell>} />
+    <ConnectorsView renderShell={(content) => <MobileAppShell>{content}</MobileAppShell>} />
   );
 }

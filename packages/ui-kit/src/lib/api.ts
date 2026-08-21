@@ -90,11 +90,91 @@ export type ActionResult = {
 
 /** Identifying information for a connector. */
 export type ConnectorMetadata = {
+  /**
+   * The connector **type**'s identifier (`"debug"`), not the instance's.
+   * The instance's own id is the sibling `id` on the response envelope — do
+   * not use this one in a URL or a resource-scoped grant.
+   */
   id: string;
   name: string;
   /** Icon identifier, not a URL. `null` when the connector declares none. */
   icon: string | null;
   version: string;
+  /** `[width, height]` in dashboard grid units: the smallest footprint at which
+   *  this connector is still readable. Carried for the placement UI that does
+   *  not exist yet; nothing renders it today. */
+  minSize: [number, number];
+};
+
+/** One resolved value a connector has agreed may be shown on the shell.
+ *
+ *  Never derived from `configSchema` — the connector author writes these out by
+ *  hand, precisely so stored credentials cannot reach a dashboard. */
+export type DisplayField = {
+  label: string;
+  value: string;
+};
+
+/** The shape of a data point's values, constraining which widgets can draw it. */
+export type DataPointValueType = "number" | "string" | "bool" | "timeSeries";
+
+/**
+ * One piece of data an instance can bind to a widget.
+ *
+ * A descriptor, not a reading: the current value lives in `status.details` under
+ * this `id`.
+ */
+export type DataPointDescriptor = {
+  id: string;
+  label: string;
+  valueType: DataPointValueType;
+  /** Display suffix (`"%"`, `"MiB"`). `null` for a dimensionless value; the
+   *  value itself is never scaled. */
+  unit: string | null;
+};
+
+/** Which plot a `metricChart` widget draws. */
+export type ChartType = "pie" | "bar" | "line";
+
+/**
+ * How a data point is drawn, or how an action is offered.
+ *
+ * **Not always a string.** Unit variants serialize bare; the one variant
+ * carrying data is a single-key object, the same externally-tagged shape as
+ * `ConnectorError`. A consumer that assumes a string throws on the chart case.
+ */
+export type WidgetType =
+  | "statTile"
+  | "progressBar"
+  | { metricChart: { chartType: ChartType } }
+  | "gauge"
+  | "statusDot"
+  | "logStream"
+  | "button"
+  | "toggle"
+  | "slider"
+  | "textField"
+  | "selector";
+
+/** One data point drawn as one widget. */
+export type WidgetBinding = {
+  /** A `DataPointDescriptor.id`, or — for a control widget — a
+   *  `ConnectorAction.id`. */
+  dataPointId: string;
+  widgetType: WidgetType;
+  /** Widget-specific extras (`min`/`max`, `options`). Always an object. */
+  config: unknown;
+};
+
+/**
+ * The widget arrangement a connector ships with.
+ *
+ * Carried through the client so the widget-rendering system can be built
+ * against it. **Nothing renders it yet** — that, and the dashboard placement it
+ * feeds, are the deliberate follow-up this change stops short of.
+ */
+export type WidgetLayout = {
+  bindings: WidgetBinding[];
 };
 
 /**
@@ -108,24 +188,91 @@ export type ConnectorError =
   | { authFailed: { reason: string } }
   | { invalidAction: { actionId: string } }
   | { invalidParams: { actionId: string; reason: string } }
+  | { invalidConfig: { reason: string } }
   | { internal: string };
 
-/** One element of `GET /connectors`. */
-export type ConnectorSummary = {
+/**
+ * One element of `GET /connector-types`: a kind of connector this build can
+ * create instances of.
+ *
+ * The catalog is code-defined and identical on every deployment of a version.
+ * `configSchema` is what the add-connector form is generated from, which is why
+ * no client hardcodes a per-type form.
+ */
+export type ConnectorTypeSummary = {
+  typeId: string;
+  displayName: string;
+  /**
+   * JSON Schema for this type's configuration.
+   *
+   * **Advisory for the client, not the server's validator.** The backend hands
+   * the submitted value to the connector's own factory, which can refuse a
+   * configuration this schema would accept — an out-of-range number, say. So a
+   * form built from this must still surface the 400 that comes back.
+   */
+  configSchema: unknown;
+};
+
+/** One element of `GET /connector-instances`: a connector this deployment has. */
+export type ConnectorInstanceSummary = {
+  /** The instance's UUID. This is what goes in a URL and in a resource-scoped
+   *  `connectors.control` grant — not `metadata.id`. */
+  id: string;
+  name: string;
+  connectorType: string;
+  /** RFC 3339. */
+  createdAt: string;
   metadata: ConnectorMetadata;
   /** `null` when the connector's own status check failed. */
   status: ConnectorStatus | null;
   /** Present only when `status` is null; absent otherwise. */
   statusError?: ConnectorError;
-  /**
-   * What this connector can be asked to do right now. May be empty.
-   *
-   * Delivered with the list rather than fetched per connector, so rendering the
-   * dashboard is one request. Treat it as data to render: it can vary with the
-   * connector's configuration or the remote service's state, so never hardcode
-   * an action id against it.
-   */
+  /** Values the connector agreed may be shown. May be empty — notably for an
+   *  instance the backend could not construct at startup. */
+  displayFields: DisplayField[];
+};
+
+/**
+ * `GET /connector-instances/{id}`: everything the list carries, plus what only
+ * a detail view needs.
+ *
+ * `actions` is **not** in the list response. It is per-instance and can vary
+ * with configuration and remote state, so it costs a request rather than
+ * bloating every list entry — see `ConnectorCard`, which renders the summary
+ * immediately and fills the actions in when this resolves.
+ */
+export type ConnectorInstanceDetail = ConnectorInstanceSummary & {
+  /** The stored configuration, as written. `null` when it is unreadable. */
+  config: unknown;
+  /** What this instance can be asked to do right now. May be empty. */
   actions: ConnectorAction[];
+  /** What this instance can bind to a widget. Not rendered yet. */
+  dataPoints: DataPointDescriptor[];
+  /** The arrangement the connector ships with. Not rendered yet. */
+  defaultLayout: WidgetLayout;
+};
+
+/** `POST /connector-instances` body. */
+export type CreateConnectorInstanceRequest = {
+  /** A `typeId` from `GET /connector-types`. */
+  connectorType: string;
+  name: string;
+  /** Omitting it means "no configuration", which is what an unfilled form
+   *  submits. */
+  config?: unknown;
+};
+
+/**
+ * `PATCH /connector-instances/{id}` body. Both fields optional; an absent field
+ * is left alone.
+ *
+ * `config` **replaces** the whole configuration rather than merging into it — a
+ * connector is rebuilt from its configuration wholesale, so a partial one has
+ * no coherent meaning.
+ */
+export type UpdateConnectorInstanceRequest = {
+  name?: string;
+  config?: unknown;
 };
 
 /** `GET /setup/status` and `POST /setup` response. */
@@ -658,26 +805,108 @@ function getSession(runtime: ApiRuntime, signal?: AbortSignal): Promise<SessionR
   return authorizedRequest<SessionResponse>(runtime, "/auth/session", { signal });
 }
 
-/** `GET /connectors` — every registered connector with its current status. */
-function getConnectors(runtime: ApiRuntime, signal?: AbortSignal): Promise<ConnectorSummary[]> {
-  return authorizedRequest<ConnectorSummary[]>(runtime, "/connectors", { signal });
+/**
+ * `GET /connector-types` — the kinds of connector this build can create.
+ *
+ * Requires `connectors.manage`, not `connectors.view`: this is the catalog
+ * behind the add-connector form, and a caller who cannot add one has no use
+ * for it.
+ */
+function getConnectorTypes(
+  runtime: ApiRuntime,
+  signal?: AbortSignal,
+): Promise<ConnectorTypeSummary[]> {
+  return authorizedRequest<ConnectorTypeSummary[]>(runtime, "/connector-types", { signal });
+}
+
+/** `GET /connector-instances` — every configured instance with a live status. */
+function getConnectorInstances(
+  runtime: ApiRuntime,
+  signal?: AbortSignal,
+): Promise<ConnectorInstanceSummary[]> {
+  return authorizedRequest<ConnectorInstanceSummary[]>(runtime, "/connector-instances", {
+    signal,
+  });
+}
+
+/** `GET /connector-instances/{id}` — the same entry plus actions, data points,
+ *  the shipped layout, and the stored configuration. */
+function getConnectorInstance(
+  runtime: ApiRuntime,
+  id: string,
+  signal?: AbortSignal,
+): Promise<ConnectorInstanceDetail> {
+  return authorizedRequest<ConnectorInstanceDetail>(
+    runtime,
+    `/connector-instances/${encodeURIComponent(id)}`,
+    { signal },
+  );
 }
 
 /**
- * `POST /connectors/{id}/actions/{actionId}`.
+ * `POST /connector-instances` — add one.
+ *
+ * A 400 here is usually the *connector* refusing the configuration, and it
+ * carries `connectorError` (typically `invalidConfig`) alongside a rendered
+ * message. Show that message on the form: it names the field the user has to
+ * fix, which a generic failure toast throws away.
+ */
+function createConnectorInstance(
+  runtime: ApiRuntime,
+  data: CreateConnectorInstanceRequest,
+  signal?: AbortSignal,
+): Promise<ConnectorInstanceDetail> {
+  return authorizedRequest<ConnectorInstanceDetail>(runtime, "/connector-instances", {
+    method: "POST",
+    body: data,
+    signal,
+  });
+}
+
+/** `PATCH /connector-instances/{id}` — rename and/or reconfigure. Rejected
+ *  configurations change nothing. */
+function updateConnectorInstance(
+  runtime: ApiRuntime,
+  id: string,
+  data: UpdateConnectorInstanceRequest,
+  signal?: AbortSignal,
+): Promise<ConnectorInstanceDetail> {
+  return authorizedRequest<ConnectorInstanceDetail>(
+    runtime,
+    `/connector-instances/${encodeURIComponent(id)}`,
+    { method: "PATCH", body: data, signal },
+  );
+}
+
+/** `DELETE /connector-instances/{id}` — 204, no body. */
+function deleteConnectorInstance(
+  runtime: ApiRuntime,
+  id: string,
+  signal?: AbortSignal,
+): Promise<void> {
+  return authorizedRequest<void>(runtime, `/connector-instances/${encodeURIComponent(id)}`, {
+    method: "DELETE",
+    signal,
+  });
+}
+
+/**
+ * `POST /connector-instances/{id}/actions/{actionId}`.
  *
  * `params` is forwarded as the request body. Omitting it sends no body at all,
  * which the backend reads as JSON `null` — deliberately distinct from an empty
  * object, so "sent nothing" and "sent {}" stay distinguishable.
  */
-function executeAction(runtime: ApiRuntime, 
-  connectorId: string,
+function executeConnectorAction(
+  runtime: ApiRuntime,
+  instanceId: string,
   actionId: string,
   params?: unknown,
   signal?: AbortSignal,
 ): Promise<ActionResult> {
-  return authorizedRequest<ActionResult>(runtime, 
-    `/connectors/${encodeURIComponent(connectorId)}/actions/${encodeURIComponent(actionId)}`,
+  return authorizedRequest<ActionResult>(
+    runtime,
+    `/connector-instances/${encodeURIComponent(instanceId)}/actions/${encodeURIComponent(actionId)}`,
     { method: "POST", body: params, signal },
   );
 }
@@ -1041,13 +1270,25 @@ export function createApiClient(options: {
     logout: (refreshToken: string, signal?: AbortSignal) =>
       logout(runtime, refreshToken, signal),
     getSession: (signal?: AbortSignal) => getSession(runtime, signal),
-    getConnectors: (signal?: AbortSignal) => getConnectors(runtime, signal),
-    executeAction: (
-      connectorId: string,
+    getConnectorTypes: (signal?: AbortSignal) => getConnectorTypes(runtime, signal),
+    getConnectorInstances: (signal?: AbortSignal) => getConnectorInstances(runtime, signal),
+    getConnectorInstance: (id: string, signal?: AbortSignal) =>
+      getConnectorInstance(runtime, id, signal),
+    createConnectorInstance: (data: CreateConnectorInstanceRequest, signal?: AbortSignal) =>
+      createConnectorInstance(runtime, data, signal),
+    updateConnectorInstance: (
+      id: string,
+      data: UpdateConnectorInstanceRequest,
+      signal?: AbortSignal,
+    ) => updateConnectorInstance(runtime, id, data, signal),
+    deleteConnectorInstance: (id: string, signal?: AbortSignal) =>
+      deleteConnectorInstance(runtime, id, signal),
+    executeConnectorAction: (
+      instanceId: string,
       actionId: string,
       params?: unknown,
       signal?: AbortSignal,
-    ) => executeAction(runtime, connectorId, actionId, params, signal),
+    ) => executeConnectorAction(runtime, instanceId, actionId, params, signal),
     getUsers: (signal?: AbortSignal) => getUsers(runtime, signal),
     createUser: (data: CreateUserRequest, signal?: AbortSignal) =>
       createUser(runtime, data, signal),

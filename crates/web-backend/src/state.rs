@@ -3,8 +3,9 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use loom_core::connector::{mock::MockConnector, Connector};
 use sqlx::SqlitePool;
+
+use crate::connectors::ConnectorRuntime;
 
 /// Everything a handler needs, cloned per request.
 ///
@@ -22,35 +23,32 @@ pub struct AppState {
     /// cannot disagree with the static file service about where avatars live —
     /// they are handed the same path at startup.
     pub avatars_dir: Arc<PathBuf>,
-    /// The connector registry.
+    /// The connector types this build registers, and the live connector
+    /// instances built from the `connector_instances` table.
     ///
-    /// Heterogeneous and plural from the start — `Vec<Arc<dyn Connector>>`
-    /// rather than one concrete connector — so registering real connectors is
-    /// an insertion rather than a reshape of this type and every handler that
-    /// reads it.
-    pub connectors: Arc<Vec<Arc<dyn Connector>>>,
+    /// Both halves live here because a handler that creates an instance needs
+    /// the registry to validate it and the runtime to install it, in one
+    /// request. See `crates/web-backend/src/connectors/mod.rs`.
+    pub connectors: ConnectorRuntime,
 }
 
 impl AppState {
-    /// Builds state around an already-migrated pool.
+    /// Builds state around an already-migrated pool and a loaded runtime.
     ///
-    /// The connector registry still holds only `MockConnector`: real connector
-    /// loading depends on the contract question left open in
-    /// `docs/adr/0002-connector-contract-tbd.md`, and the mock is a permanent
-    /// fixture regardless — see `crates/core/src/connector/mock.rs`.
-    pub fn new(pool: SqlitePool, jwt_secret: String, avatars_dir: PathBuf) -> Self {
+    /// The runtime is passed in rather than constructed here because loading it
+    /// reads the database and can fail, and state construction should not be a
+    /// fallible async operation buried inside a struct literal.
+    pub fn new(
+        pool: SqlitePool,
+        jwt_secret: String,
+        avatars_dir: PathBuf,
+        connectors: ConnectorRuntime,
+    ) -> Self {
         Self {
             pool,
             jwt_secret: Arc::new(jwt_secret),
             avatars_dir: Arc::new(avatars_dir),
-            connectors: Arc::new(vec![Arc::new(MockConnector::default())]),
+            connectors,
         }
-    }
-
-    /// Finds a registered connector by its metadata id.
-    pub fn connector(&self, id: &str) -> Option<&Arc<dyn Connector>> {
-        self.connectors
-            .iter()
-            .find(|connector| connector.metadata().id == id)
     }
 }

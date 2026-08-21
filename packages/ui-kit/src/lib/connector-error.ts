@@ -47,9 +47,14 @@ function isConnectorError(value: unknown): value is ConnectorError {
   const keys = Object.keys(value);
   return (
     keys.length === 1 &&
-    ["unreachable", "authFailed", "invalidAction", "invalidParams", "internal"].includes(
-      keys[0],
-    )
+    [
+      "unreachable",
+      "authFailed",
+      "invalidAction",
+      "invalidParams",
+      "invalidConfig",
+      "internal",
+    ].includes(keys[0])
   );
 }
 
@@ -67,6 +72,11 @@ function describeVariant(error: ConnectorError): string {
   }
   if ("invalidParams" in error) {
     return `Invalid parameters for "${error.invalidParams.actionId}": ${error.invalidParams.reason}`;
+  }
+  if ("invalidConfig" in error) {
+    // About the connector's own configuration, not one action's arguments —
+    // what a rejected "add connector" submission comes back as.
+    return `That configuration was rejected: ${error.invalidConfig.reason}`;
   }
   return `The connector failed internally: ${error.internal}`;
 }

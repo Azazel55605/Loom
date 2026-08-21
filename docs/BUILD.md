@@ -87,8 +87,9 @@ the backend reports `setupComplete: false`, and setup outranks authentication
 because an instance with no administrator has nothing to log in against. Create
 the administrator — the password must be at least 8 characters — and you are
 sent on to the login screen. Sign in with those credentials and you land on a
-dashboard showing one connector, the `MockConnector`, with `Restart` and `Ping`
-buttons.
+dashboard with no connectors on it. Connectors are added rather than shipped:
+`GET /connector-types` lists what this build can create (today, the
+`DebugConnector` fixture) and `POST /connector-instances` adds one.
 
 Unlike the removed stub, **setup now persists**: it runs once per database, not
 once per backend start. Restarting the backend keeps you set up and keeps you

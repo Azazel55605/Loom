@@ -27,7 +27,7 @@
 /// service's health and exposes the actions Loom can ask it to perform. This is
 /// the piece that makes Loom a management platform rather than a status page,
 /// and it lives in core because the backend and the native clients must agree
-/// on it exactly. Includes [`connector::mock::MockConnector`], a permanent
+/// on it exactly. Includes [`connector::debug::DebugConnector`], a permanent
 /// fixture for developing and testing clients with no real services around.
 pub mod connector;
 

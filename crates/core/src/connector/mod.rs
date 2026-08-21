@@ -27,7 +27,7 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-pub mod mock;
+pub mod debug;
 
 /// An adapter for one manageable service.
 ///
@@ -97,6 +97,36 @@ pub trait Connector: Send + Sync {
     /// Cheap and synchronous on purpose — it is used for registry keys, list
     /// rendering, and log lines, none of which should have to await a service.
     fn metadata(&self) -> ConnectorMetadata;
+
+    /// Resolved values this connector is willing to have shown on the shell.
+    ///
+    /// Deliberately hand-written by the connector author rather than derived
+    /// from [`Connector::config_schema`]: stored configuration is where
+    /// credentials live, so anything automatic here would eventually put a
+    /// token on a dashboard. Opting a field in is a decision someone makes on
+    /// purpose, once, in code.
+    ///
+    /// Synchronous, so this must not reach out to the service. Values that
+    /// require a round trip belong in [`ConnectorStatus::details`].
+    fn display_fields(&self) -> Vec<DisplayField>;
+
+    /// The data this instance can bind to a widget.
+    ///
+    /// Descriptors only — the readings themselves arrive in
+    /// [`ConnectorStatus::details`] keyed by [`DataPointDescriptor::id`]. The
+    /// split is what lets a saved dashboard survive: a layout stores ids, and
+    /// each poll refreshes the values underneath them without the layout being
+    /// re-derived.
+    ///
+    /// May legitimately be empty for a connector that only reports health.
+    fn data_points(&self) -> Vec<DataPointDescriptor>;
+
+    /// The widget arrangement this connector ships with.
+    ///
+    /// Used when a user adds the connector to a dashboard without configuring
+    /// anything. It is a starting point the user then owns, not a constraint —
+    /// nothing re-applies it after placement.
+    fn default_layout(&self) -> WidgetLayout;
 }
 
 /// How a service is doing, as of a particular moment.
@@ -280,6 +310,227 @@ pub struct ConnectorMetadata {
     /// Version of the connector implementation itself, independent of the Loom
     /// release, so a connector can be revised without a platform bump.
     pub version: String,
+    /// Smallest useful footprint on the dashboard grid, as `(width, height)`
+    /// in grid units.
+    ///
+    /// A floor the placement UI enforces, not a preferred size: a connector
+    /// that needs a chart to be readable says so here instead of being shrunk
+    /// into illegibility by a user who does not yet know what it draws. `u8`
+    /// because a grid that needs more than 255 units in a direction is not a
+    /// grid.
+    pub min_size: (u8, u8),
+}
+
+/// One resolved, currently-true fact about a connector instance that is
+/// explicitly safe to put on screen.
+///
+/// This exists because the obvious alternative is unsafe: deriving what to show
+/// from [`Connector::config_schema`] would put whatever is in the stored
+/// configuration on the shell, and stored configuration is exactly where API
+/// tokens and passwords live. So nothing is ever derived automatically — a
+/// connector author writes out the fields they want visible, one by one, and a
+/// field that is not written out is not shown. The values are already resolved
+/// strings rather than keys into anything, so the clients need no formatting
+/// rules and no per-connector display code.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DisplayField {
+    /// Short caption, e.g. `"Host"` or `"Version"`.
+    pub label: String,
+    /// The value as it should appear, already rendered to text.
+    pub value: String,
+}
+
+impl DisplayField {
+    /// A field with a label and a value.
+    pub fn new(label: impl Into<String>, value: impl Into<String>) -> Self {
+        Self {
+            label: label.into(),
+            value: value.into(),
+        }
+    }
+}
+
+/// The shape of a data point's values, so a client knows what it is binding.
+///
+/// Coarse on purpose: this decides which widgets a data point can legally drive
+/// (a `Bool` cannot fill a chart; a `TimeSeries` cannot fill a status dot), and
+/// a finer type system here would constrain connector authors without telling
+/// the renderer anything more.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum DataPointValueType {
+    /// A single numeric reading.
+    Number,
+    /// A single text value.
+    String,
+    /// A single on/off flag.
+    Bool,
+    /// An ordered run of recent numeric readings, oldest first.
+    TimeSeries,
+}
+
+/// One piece of data an instance can expose to a widget.
+///
+/// A *descriptor*, not a reading: it says what exists and what it means, and
+/// the current values arrive separately in
+/// [`ConnectorStatus::details`], keyed by [`DataPointDescriptor::id`]. Keeping
+/// them apart is what lets a dashboard be laid out once and re-rendered on
+/// every poll without re-reading the schema.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DataPointDescriptor {
+    /// Stable machine identifier, and the key this data point's value appears
+    /// under in [`ConnectorStatus::details`]. Stored in saved layouts, so it
+    /// must not change when the label does.
+    pub id: String,
+    /// Human-facing name for the widget's caption or legend entry.
+    pub label: String,
+    /// What kind of value this is, which constrains the widgets it can drive.
+    pub value_type: DataPointValueType,
+    /// Unit suffix (`"%"`, `"MiB"`, `"ms"`), or `None` for a dimensionless
+    /// value. A *display* concern only: the value itself is never scaled.
+    pub unit: Option<String>,
+}
+
+impl DataPointDescriptor {
+    /// A descriptor with no unit.
+    pub fn new(
+        id: impl Into<String>,
+        label: impl Into<String>,
+        value_type: DataPointValueType,
+    ) -> Self {
+        Self {
+            id: id.into(),
+            label: label.into(),
+            value_type,
+            unit: None,
+        }
+    }
+
+    /// Attaches a unit, for chaining onto [`DataPointDescriptor::new`].
+    #[must_use]
+    pub fn with_unit(mut self, unit: impl Into<String>) -> Self {
+        self.unit = Some(unit.into());
+        self
+    }
+}
+
+/// Which plot a [`WidgetType::MetricChart`] draws.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum ChartType {
+    /// Proportions of a whole.
+    Pie,
+    /// Discrete categories side by side.
+    Bar,
+    /// A value over time.
+    Line,
+}
+
+/// How a data point is drawn — or, for the input widgets, how an action is
+/// offered.
+///
+/// A closed enum rather than a free-form string because the clients have to
+/// render each case, and an unrecognised widget type is a blank space in a
+/// dashboard with no way for the user to work out why. Adding a widget is
+/// therefore deliberately a change to this crate and to every renderer, which
+/// is the honest cost of the guarantee that everything here draws.
+///
+/// The first six are read-only displays; the last five are controls that
+/// invoke [`Connector::execute_action`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", rename_all_fields = "camelCase")]
+pub enum WidgetType {
+    /// One prominent number with its label.
+    StatTile,
+    /// A filled bar for a bounded value; `config` supplies `min`/`max`.
+    ProgressBar,
+    /// A plot of a [`DataPointValueType::TimeSeries`] or of several numbers.
+    MetricChart {
+        /// Which plot to draw.
+        chart_type: ChartType,
+    },
+    /// A dial for a bounded value; `config` supplies `min`/`max`.
+    Gauge,
+    /// A coloured dot for a boolean or a health state.
+    StatusDot,
+    /// A scrolling run of text lines.
+    LogStream,
+    /// A button that triggers a parameterless action.
+    Button,
+    /// A switch that triggers an action taking a boolean.
+    Toggle,
+    /// A slider that triggers an action taking a number; `config` supplies
+    /// `min`/`max`/`step`.
+    Slider,
+    /// A text input that triggers an action taking a string.
+    TextField,
+    /// A dropdown that triggers an action taking one of a set of values;
+    /// `config` supplies `options`.
+    Selector,
+}
+
+/// One data point drawn as one widget.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WidgetBinding {
+    /// Which [`DataPointDescriptor::id`] this widget shows — or, for a control
+    /// widget, which [`ConnectorAction::id`] it invokes.
+    pub data_point_id: String,
+    /// How to draw it.
+    pub widget_type: WidgetType,
+    /// Widget-specific extras: `min`/`max` for a [`WidgetType::Gauge`],
+    /// `options` for a [`WidgetType::Selector`], and so on.
+    ///
+    /// Free-form for now, and deliberately so. Every candidate typed
+    /// representation would have to enumerate the settings of every widget in
+    /// one struct before the widgets themselves have been built against real
+    /// connectors, which is the wrong order to design in. A connector that
+    /// needs no extras uses an empty object rather than `null`, so consumers
+    /// can always treat this as an object.
+    pub config: Value,
+}
+
+impl WidgetBinding {
+    /// A binding with no extra configuration.
+    pub fn new(data_point_id: impl Into<String>, widget_type: WidgetType) -> Self {
+        Self {
+            data_point_id: data_point_id.into(),
+            widget_type,
+            config: Value::Object(Default::default()),
+        }
+    }
+
+    /// Attaches widget-specific configuration, for chaining onto
+    /// [`WidgetBinding::new`].
+    #[must_use]
+    pub fn with_config(mut self, config: Value) -> Self {
+        self.config = config;
+        self
+    }
+}
+
+/// The arrangement of widgets a connector ships with.
+///
+/// A *default*, not a mandate: it is what a user gets when they add the
+/// connector and place it without configuring anything, and it is theirs to
+/// edit afterwards. Ordering is the connector author's suggested reading order;
+/// there are no coordinates here, because where a widget sits on a grid is the
+/// dashboard's business and not the connector's.
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WidgetLayout {
+    /// The widgets, in the order the connector author suggests showing them.
+    /// May be empty for a connector that exposes nothing to draw.
+    pub bindings: Vec<WidgetBinding>,
+}
+
+impl WidgetLayout {
+    /// A layout holding exactly these bindings.
+    pub fn new(bindings: Vec<WidgetBinding>) -> Self {
+        Self { bindings }
+    }
 }
 
 /// Why a connector could not answer.
@@ -292,7 +543,7 @@ pub struct ConnectorMetadata {
 ///
 /// Three properties are load-bearing beyond `Error`:
 ///
-/// - `Clone`, so a stored error (notably [`mock::MockConnector`]'s fail mode)
+/// - `Clone`, so a stored error (notably [`debug::DebugConnector`]'s fail mode)
 ///   can be handed out repeatedly.
 /// - `Serialize`/`Deserialize`, so the backend can forward the discriminant to
 ///   the clients instead of flattening everything to a string. This works
@@ -342,6 +593,21 @@ pub enum ConnectorError {
         reason: String,
     },
 
+    /// The stored configuration is not something this connector can be built
+    /// from — an unknown key, a missing one, a value out of range.
+    ///
+    /// Distinct from [`ConnectorError::InvalidParams`], which is about the
+    /// arguments to one action. This one is about the connector itself, and it
+    /// is what a factory returns when it refuses to construct an instance, so
+    /// the backend can answer a bad "add connector" request with the
+    /// connector's own objection instead of a generic rejection.
+    #[error("invalid connector configuration: {reason}")]
+    InvalidConfig {
+        /// Which part of the configuration was unusable, in terms a user can
+        /// act on, with any supplied secret left out.
+        reason: String,
+    },
+
     /// Anything else went wrong inside the connector — a bug, an unexpected
     /// response shape, a failed parse. The catch-all exists so implementors are
     /// never tempted to panic; it should not be the answer to a foreseeable
@@ -364,6 +630,13 @@ impl ConnectorError {
             action_id: action_id.into(),
         }
     }
+
+    /// Shorthand for [`ConnectorError::InvalidConfig`].
+    pub fn invalid_config(reason: impl Into<String>) -> Self {
+        Self::InvalidConfig {
+            reason: reason.into(),
+        }
+    }
 }
 
 #[cfg(test)]
@@ -372,7 +645,7 @@ mod tests {
     use chrono::TimeZone;
     use serde_json::json;
 
-    /// A minimal in-test implementation, separate from [`mock::MockConnector`]
+    /// A minimal in-test implementation, separate from [`debug::DebugConnector`]
     /// on purpose: it proves the trait alone is enough to write a connector,
     /// with no help from the fixture's machinery.
     struct StubConnector {
@@ -412,7 +685,23 @@ mod tests {
                 name: "Stub".to_string(),
                 icon: None,
                 version: "0.0.1".to_string(),
+                min_size: (1, 1),
             }
+        }
+
+        fn display_fields(&self) -> Vec<DisplayField> {
+            vec![DisplayField::new("Kind", "stub")]
+        }
+
+        fn data_points(&self) -> Vec<DataPointDescriptor> {
+            vec![
+                DataPointDescriptor::new("reading", "Reading", DataPointValueType::Number)
+                    .with_unit("%"),
+            ]
+        }
+
+        fn default_layout(&self) -> WidgetLayout {
+            WidgetLayout::new(vec![WidgetBinding::new("reading", WidgetType::StatTile)])
         }
     }
 
@@ -427,19 +716,42 @@ mod tests {
                 id: "stub-b",
                 health: HealthState::Degraded,
             }),
-            Box::new(mock::MockConnector::default()),
+            Box::new(debug::DebugConnector::default()),
         ];
 
         assert_eq!(connectors.len(), 3);
 
         let ids: Vec<String> = connectors.iter().map(|c| c.metadata().id).collect();
-        assert_eq!(ids, vec!["stub-a", "stub-b", "mock"]);
+        assert_eq!(ids, vec!["stub-a", "stub-b", "debug"]);
 
         for connector in &connectors {
             let status = connector.status().await.expect("status should succeed");
             assert_ne!(status.health, HealthState::Unknown);
             assert!(connector.config_schema().is_object());
             assert!(!connector.actions().await.is_empty());
+
+            // The presentation half of the trait, exercised through the trait
+            // object: these are the methods a dashboard calls, and they have to
+            // stay callable without knowing the concrete type.
+            let metadata = connector.metadata();
+            assert!(metadata.min_size.0 >= 1 && metadata.min_size.1 >= 1);
+
+            assert!(!connector.display_fields().is_empty());
+
+            let data_points = connector.data_points();
+            assert!(!data_points.is_empty());
+
+            // Every binding in the shipped layout must name a data point that
+            // actually exists, or the connector ships a dashboard with a hole
+            // in it.
+            let point_ids: Vec<&str> = data_points.iter().map(|dp| dp.id.as_str()).collect();
+            for binding in connector.default_layout().bindings {
+                assert!(
+                    point_ids.contains(&binding.data_point_id.as_str()),
+                    "layout binds unknown data point {}",
+                    binding.data_point_id
+                );
+            }
         }
 
         assert_eq!(
@@ -536,20 +848,22 @@ mod tests {
     #[test]
     fn connector_metadata_serializes_with_camel_case_keys() {
         let metadata = ConnectorMetadata {
-            id: "mock".to_string(),
-            name: "Mock Service".to_string(),
+            id: "debug".to_string(),
+            name: "Debug Connector".to_string(),
             icon: Some("beaker".to_string()),
             version: "1.0.0".to_string(),
+            min_size: (2, 2),
         };
 
         let value = serde_json::to_value(&metadata).unwrap();
         assert_eq!(
             value,
             json!({
-                "id": "mock",
-                "name": "Mock Service",
+                "id": "debug",
+                "name": "Debug Connector",
                 "icon": "beaker",
-                "version": "1.0.0"
+                "version": "1.0.0",
+                "minSize": [2, 2]
             })
         );
         assert_eq!(
@@ -584,6 +898,10 @@ mod tests {
                     "actionId": "restart",
                     "reason": "missing field `force`"
                 } }),
+            ),
+            (
+                ConnectorError::invalid_config("unknown field `wat`"),
+                json!({ "invalidConfig": { "reason": "unknown field `wat`" } }),
             ),
             (
                 ConnectorError::Internal("unexpected response shape".to_string()),
@@ -647,12 +965,40 @@ mod tests {
         println!(
             "ConnectorMetadata =\n{}",
             serde_json::to_string_pretty(&ConnectorMetadata {
-                id: "mock".to_string(),
-                name: "Mock Service".to_string(),
+                id: "debug".to_string(),
+                name: "Debug Connector".to_string(),
                 icon: Some("beaker".to_string()),
                 version: "1.0.0".to_string(),
+                min_size: (2, 2),
             })
             .unwrap()
+        );
+        println!(
+            "WidgetLayout =\n{}",
+            serde_json::to_string_pretty(&WidgetLayout::new(vec![
+                WidgetBinding::new("load", WidgetType::StatTile),
+                WidgetBinding::new(
+                    "loadHistory",
+                    WidgetType::MetricChart {
+                        chart_type: ChartType::Line
+                    }
+                ),
+                WidgetBinding::new("load", WidgetType::Gauge)
+                    .with_config(json!({ "min": 0, "max": 100 })),
+            ]))
+            .unwrap()
+        );
+        println!(
+            "DataPointDescriptor =\n{}",
+            serde_json::to_string_pretty(
+                &DataPointDescriptor::new("load", "Load", DataPointValueType::Number)
+                    .with_unit("%")
+            )
+            .unwrap()
+        );
+        println!(
+            "DisplayField =\n{}",
+            serde_json::to_string_pretty(&DisplayField::new("Host", "debug.invalid")).unwrap()
         );
         for error in [
             ConnectorError::unreachable("connection refused"),
@@ -664,6 +1010,7 @@ mod tests {
                 action_id: "restart".to_string(),
                 reason: "missing field `force`".to_string(),
             },
+            ConnectorError::invalid_config("unknown field `wat`"),
             ConnectorError::Internal("unexpected response shape".to_string()),
         ] {
             println!(

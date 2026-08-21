@@ -1,14 +1,13 @@
 # Loom API contract
 
 This describes the API surface that exists **today**: real multi-user
-authentication backed by SQLite, and a single mock-backed connector.
-Authentication is real; **authorization is not yet enforced** — see
-[Known temporary behavior](#known-temporary-behavior) before assuming this
-instance is access-controlled.
+authentication backed by SQLite, and a registry-driven connector system with
+per-instance CRUD.
 
 Connector shapes will still change as the connector contract settles
 ([ADR 0002](./adr/0002-connector-contract-tbd.md),
-[ADR 0007](./adr/0007-in-process-connector-trait.md)). The *shape* — field
+[ADR 0007](./adr/0007-in-process-connector-trait.md),
+[ADR 0011](./adr/0011-connector-instance-registry.md)). The *shape* — field
 names, JSON types, nesting — is meant to survive that. Treat a change to a field
 name or type here as a breaking change to three clients, and make it
 deliberately.
@@ -50,7 +49,7 @@ scope. See [Permission grants](#permission-grants).
 ## Paths carry no `/api` prefix
 
 Backend paths are written exactly as the backend serves them: `/health`,
-`/auth/login`, `/connectors`. There is no `/api` prefix in the backend's own URL
+`/auth/login`, `/connector-instances`. There is no `/api` prefix in the backend's own URL
 space, and that is deliberate — the prefix belongs to whoever is *routing* to
 the backend, not to the backend itself.
 
@@ -88,9 +87,9 @@ Other conventions:
 | --- | --- |
 | Content type | Requests and responses are `application/json`. Responses always set it; see per-endpoint notes for where the *request* content type is enforced. |
 | Key order | Not significant. Serialization order follows the Rust struct, but clients must not depend on it. |
-| Timestamps | RFC 3339, UTC, `Z`-suffixed (`"2026-08-19T12:00:00Z"`). |
+| Timestamps | RFC 3339, UTC. **Two spellings, both valid RFC 3339, and a client must parse either.** Values serialized by chrono's serde — notably `ConnectorStatus.lastChecked` — are `Z`-suffixed to whole seconds (`"2026-08-19T12:00:00Z"`). Values stored as text by a handler — every `createdAt`, and `expiresAt` — are written with `to_rfc3339()`, which emits a numeric offset and sub-second digits (`"2026-08-21T15:59:53.562608497+00:00"`). This was found by reading real responses, not assumed; unifying them would change the `createdAt` on users, groups, and connector instances at once, so it is recorded here rather than quietly changed. `new Date(...)` in JavaScript accepts both. |
 | Absent values | An optional field is either serialized as `null` or omitted entirely. Which one it is is part of the contract and is stated per field below. |
-| Path parameters | Connector and action ids are path segments: `/connectors/{id}/actions/{actionId}`. |
+| Path parameters | Instance and action ids are path segments: `/connector-instances/{id}/actions/{actionId}`. |
 
 CORS permits local web development plus Tauri's known webview origins:
 `tauri://localhost` for the custom protocol, `http://tauri.localhost` for
@@ -106,7 +105,7 @@ ambient cookies. See
 Every error response produced by Loom's own handlers has the shape:
 
 ```json
-{ "error": "no such connector: nope" }
+{ "error": "no such connector instance: nope" }
 ```
 
 When the failure came from a connector, the serialized `ConnectorError` is
@@ -425,7 +424,8 @@ Scope reads as:
 | set | `null` | Every resource of that type |
 | set | set | Exactly that one resource |
 
-Registered keys today: `connectors.view`, `connectors.control`, `users.manage`,
+Registered keys today: `connectors.view`, `connectors.control`,
+`connectors.manage`, `users.manage`,
 `groups.manage`, `system.settings`. The set is defined by the `permissions`
 table and extended only by migration.
 
@@ -480,21 +480,38 @@ The asymmetry is deliberate and load-bearing:
 
 | Route | Permission | Scope checked |
 | --- | --- | --- |
-| `GET /connectors` | `connectors.view` | global |
-| `POST /connectors/{id}/actions/{actionId}` | `connectors.control` | `connector` / `{id}` |
+| `GET /connector-types` | `connectors.manage` | global |
+| `GET /connector-instances`, `GET /connector-instances/{id}` | `connectors.view` | global |
+| `POST /connector-instances`, `PATCH /connector-instances/{id}`, `DELETE /connector-instances/{id}` | `connectors.manage` | global |
+| `POST /connector-instances/{id}/actions/{actionId}` | `connectors.control` | `connector` / `{id}` |
 | `GET /users`, `POST /users`, `PATCH /users/{id}`, `DELETE /users/{id}` | `users.manage` | global |
 | `GET /groups`, `POST /groups`, `PATCH /groups/{id}`, `DELETE /groups/{id}` | `groups.manage` | global |
 | `GET /permissions` | `groups.manage` | global |
 | `GET /account`, `PATCH /account`, `POST /account/password`, `POST /account/avatar`, `DELETE /account/avatar` | none — token only | n/a, the subject is the token's `sub` |
 
-`GET /connectors` requires a **global** `connectors.view`, so a user holding
-only a connector-scoped view grant is refused rather than shown a filtered list.
-Filtering the response to what the caller may see would be friendlier and is the
-natural next step — it is not built because nothing issues scoped view grants
-yet, and a filter with no way to create the case it filters cannot be tested
-against reality.
+**The three connector permissions answer three different questions**, and the
+split is deliberate:
 
-A 403 on the action route is returned **before** the connector id is looked up,
+| Key | Question it answers |
+| --- | --- |
+| `connectors.view` | May you see this connector and its status? |
+| `connectors.control` | May you press this connector's buttons? |
+| `connectors.manage` | May you decide which connectors exist at all? |
+
+`connectors.manage` is **not scopeable to a connector**, because the connector
+is what is being created or destroyed; it is authority over the instance list.
+Folding it into `connectors.control` would mean anyone allowed to restart one
+service could also delete every connector on the instance, which is not what
+granting a restart button is meant to say.
+
+`GET /connector-instances` requires a **global** `connectors.view`, so a user
+holding only an instance-scoped view grant is refused rather than shown a
+filtered list. Filtering the response to what the caller may see would be
+friendlier and is the natural next step — it is not built because nothing issues
+scoped view grants yet, and a filter with no way to create the case it filters
+cannot be tested against reality.
+
+A 403 on the action route is returned **before** the instance id is looked up,
 so an unauthorized caller gets the same response whether or not the id exists.
 Otherwise the endpoint would report 404 for unknown ids and 403 for real ones,
 which is a way to enumerate what is configured.
@@ -546,106 +563,307 @@ algorithm is HS256 and the verifier pins it — a token presenting any other
 Decoding a JWT client-side is reading an unverified assertion: a client has no
 signing secret and cannot check the signature. Use it for display only.
 
-### `GET /connectors`
+## Connectors
 
-**No authorization is checked** — see
-[Known temporary behavior](#known-temporary-behavior).
+Two route groups, and the split between them is the whole design:
+
+- **`/connector-types`** is the catalog of what this *build* can create. It is
+  code — each registration carries a factory function — so it is identical on
+  every deployment of the same version and cannot be edited through the API.
+- **`/connector-instances`** is what this *deployment* actually has. One row per
+  connector a user added, stored as a type id plus an opaque JSON configuration,
+  with a live connector object held in memory behind it.
+
+Adding a connector *type* is a code change. Adding an *instance* of a registered
+type is an ordinary `POST`, with the form generated from the type's published
+`configSchema`. That is what keeps "add a connector" from requiring a matching
+UI change in three clients. See
+[ADR 0011](./adr/0011-connector-instance-registry.md).
+
+**Status is read live on every request.** `GET /connector-instances` calls
+`status()` once per instance, in sequence, so the list is as slow as the
+connectors in it. Nothing is cached and nothing is pushed. A polling task that
+caches readings and pushes updates over a WebSocket is a planned follow-up; it
+is not implemented, and no endpoint here should be read as if it were.
+
+### `GET /connector-types`
+
+Requires a global `connectors.manage` grant. This is the catalog behind the "add
+a connector" form, and a caller who cannot add one has nothing to do with it —
+the instances they may see are on `/connector-instances`, which asks only for
+`connectors.view`.
 
 **Request:** no body.
 
-**Response 200** — a JSON **array**, one element per registered connector:
+**Response 200** — a JSON **array**, one element per registered type, sorted by
+`displayName` so a picker does not reshuffle between restarts:
 
 ```json
 [
   {
+    "typeId": "debug",
+    "displayName": "Debug Connector",
+    "configSchema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "title": "Debug connector configuration",
+      "type": "object",
+      "properties": {
+        "simulatedLatencyMs": { "type": "integer", "minimum": 0, "default": 0 },
+        "simulatedHealth": {
+          "type": "string",
+          "enum": ["healthy", "degraded", "down", "unknown"],
+          "default": "healthy"
+        },
+        "failMode": {
+          "type": "string",
+          "enum": ["unreachable", "authFailed", "internal"]
+        },
+        "baseLoad": { "type": "number", "minimum": 0, "maximum": 100, "default": 42 },
+        "label": { "type": "string", "minLength": 1, "default": "debug-fixture" },
+        "enabled": { "type": "boolean", "default": true }
+      },
+      "additionalProperties": false
+    }
+  }
+]
+```
+
+| Field | JSON type | Meaning | Nullability |
+| --- | --- | --- | --- |
+| `typeId` | string | Stable machine identifier, sent back as `connectorType` when creating an instance. | Always present. |
+| `displayName` | string | Human-facing name for the type picker. | Always present. |
+| `configSchema` | object | JSON Schema for this type's configuration, published by the connector itself. | Always present; an object, never `null`. A type needing no configuration returns an empty schema object. |
+
+**The schema is advisory for the client and not the server's validator.** The
+backend does not check a submitted configuration against it — it hands the value
+to the connector's factory, which is the only thing that knows what the keys
+mean. A configuration that satisfies the schema's shape can still be refused
+(see [`POST /connector-instances`](#post-connector-instances)).
+
+Today the array has exactly one element, the debug fixture. It is an array from
+day one so that registering real connector types is an insertion rather than a
+reshape of this response.
+
+### `GET /connector-instances`
+
+Requires a **global** `connectors.view` grant.
+
+**Request:** no body.
+
+**Response 200** — a JSON **array**, one element per stored instance, ordered by
+`name`:
+
+```json
+[
+  {
+    "id": "3f1c1c5a-0f2e-4d1a-9c1e-2b6a8f0d4e77",
+    "name": "Fixture",
+    "connectorType": "debug",
+    "createdAt": "2026-08-21T09:14:03.914238771+00:00",
     "metadata": {
-      "id": "mock",
-      "name": "Mock Service",
+      "id": "debug",
+      "name": "Debug Connector",
       "icon": "beaker",
-      "version": "0.1.0"
+      "version": "0.1.0",
+      "minSize": [2, 2]
     },
     "status": {
       "health": "healthy",
-      "details": {},
-      "lastChecked": "2026-08-19T08:45:27.380462351Z"
-    },
-    "actions": [
-      {
-        "id": "restart",
-        "label": "Restart",
-        "description": "Pretends to restart the simulated service.",
-        "paramsSchema": {}
+      "details": {
+        "load": 45.87,
+        "label": "debug-fixture",
+        "enabled": true,
+        "loadHistory": [42.1, 44.6, 45.87]
       },
-      {
-        "id": "ping",
-        "label": "Ping",
-        "description": "Pretends to check that the simulated service answers.",
-        "paramsSchema": {}
-      }
+      "lastChecked": "2026-08-21T09:20:11Z"
+    },
+    "displayFields": [
+      { "label": "Host", "value": "debug.invalid" },
+      { "label": "Connector version", "value": "0.1.0" }
     ]
   }
 ]
 ```
 
-Today that array always has exactly one element, the `MockConnector`. It is an
-array anyway, from day one, so that registering real connectors is an insertion
-and not a reshape of the response — the client's list rendering, its TypeScript
-types, and its loading states are all written once and stay correct. The
-backend's registry is `Vec<Arc<dyn Connector>>` for the same reason.
-
-`metadata`, `status`, and `actions` are nested rather than flattened into the
-element, because all three are Core wire types the clients deserialize elsewhere
-too. Nesting lets the TypeScript types compose instead of being re-declared per
-response.
-
-`actions` is included here rather than behind a separate request because the
-dashboard needs it for every connector it draws: fetching it per connector would
-be an N+1 round trip to build one screen. It is also what makes the contract
-mean anything — a client that had to hardcode action ids would reduce
-`Connector::actions` to decoration.
-
 | Field | JSON type | Meaning | Nullability |
 | --- | --- | --- | --- |
-| `metadata` | object | `ConnectorMetadata`. Always available; it is synchronous and never fails. | Always present. |
-| `status` | object | `ConnectorStatus` from a successful `status()` call. | **`null`** when the check itself failed. |
-| `statusError` | object | The `ConnectorError` that made `status` null. | **Omitted** (not null) on the healthy path. |
-| `actions` | array | `ConnectorAction[]` — what this connector can be asked to do right now. | Always present; **may be empty** for a read-only connector. |
+| `id` | string | The instance's UUID. This is the id used in every other connector path and in resource-scoped grants. | Always present. |
+| `name` | string | The user's name for this instance. | Always present. |
+| `connectorType` | string | Which registered type it is. | Always present. |
+| `createdAt` | string | RFC 3339 timestamp, in the stored spelling — numeric offset, sub-second digits. See [Conventions](#conventions). | Always present. |
+| `metadata` | object | [`ConnectorMetadata`](#connectormetadata) from the live connector. | Always present. |
+| `status` | object | [`ConnectorStatus`](#connectorstatus) from a successful live `status()` call. | **`null`** when the check itself failed. |
+| `statusError` | object | The [`ConnectorError`](#connectorerror) that made `status` null. | **Omitted** (not null) on the healthy path. |
+| `displayFields` | array | [`DisplayField`](#displayfield) values the connector agreed may be shown. | Always present; may be empty. |
 
 **One failing connector does not fail the list.** A connector whose `status()`
-returns `Err` contributes an element with `status: null` and a `statusError`,
-and every other connector still reports normally:
+returns an error contributes `"status": null` plus a `statusError`, and every
+other instance still reports normally.
 
-```json
-[
-  {
-    "metadata": {
-      "id": "mock",
-      "name": "Mock Service",
-      "icon": "beaker",
-      "version": "0.1.0"
-    },
-    "status": null,
-    "statusError": { "unreachable": { "reason": "connection refused" } },
-    "actions": []
-  }
-]
-```
+**A row with no live connector is still listed.** If an instance could not be
+constructed at startup — its type is not registered in this build, or its stored
+configuration is no longer valid — it appears with stand-in `metadata`, an empty
+`displayFields`, and a `statusError` explaining that nothing was loaded. Hiding
+it would leave a user with a connector they can neither see nor delete.
 
-This is the whole reason the failure is per entry rather than at the response
-level: in a homelab, *something* being down is the normal state, and a dashboard
-that blanks out because one service is unreachable is useless exactly when it is
-needed. Note also the distinction the shape preserves — a connector reporting
-`health: "down"` is a **successful** status call, so it arrives in `status`, not
-in `statusError`. `statusError` means Loom could not get a reading at all.
+`GET /connector-instances` requires a **global** `connectors.view`, so a user
+holding only an instance-scoped view grant is refused rather than shown a
+filtered list. Filtering the response to what the caller may see would be
+friendlier and is the natural next step — it is not built because nothing issues
+scoped view grants yet, and a filter with no way to create the case it filters
+cannot be tested against reality.
 
 | Status | Meaning |
 | --- | --- |
-| 200 | The list was produced. This is the only outcome, including when every connector failed. |
-| 404 | The feature is not compiled in. |
+| 200 | The list was produced. This is the only success outcome, including when every connector failed. |
+| 403 | The caller lacks a global `connectors.view` grant. |
 
-### `POST /connectors/{id}/actions/{actionId}`
+### `GET /connector-instances/{id}`
 
-**No authorization is checked.** Executes one action on one connector.
+Requires a **global** `connectors.view` grant. Everything the list entry
+carries, plus what a dashboard placement UI needs.
+
+**Response 200:**
+
+```json
+{
+  "id": "3f1c1c5a-0f2e-4d1a-9c1e-2b6a8f0d4e77",
+  "name": "Fixture",
+  "connectorType": "debug",
+  "createdAt": "2026-08-21T09:14:03.914238771+00:00",
+  "metadata": { "id": "debug", "name": "Debug Connector", "icon": "beaker", "version": "0.1.0", "minSize": [2, 2] },
+  "status": { "health": "healthy", "details": {}, "lastChecked": "2026-08-21T09:20:11Z" },
+  "displayFields": [{ "label": "Host", "value": "debug.invalid" }],
+  "config": { "baseLoad": 10 },
+  "actions": [
+    { "id": "ping", "label": "Ping", "description": "…", "paramsSchema": {} }
+  ],
+  "dataPoints": [
+    { "id": "load", "label": "Load", "valueType": "number", "unit": "%" },
+    { "id": "label", "label": "Label", "valueType": "string", "unit": null },
+    { "id": "enabled", "label": "Enabled", "valueType": "bool", "unit": null },
+    { "id": "loadHistory", "label": "Load history", "valueType": "timeSeries", "unit": "%" }
+  ],
+  "defaultLayout": {
+    "bindings": [
+      { "dataPointId": "load", "widgetType": "statTile", "config": {} },
+      { "dataPointId": "enabled", "widgetType": "statusDot", "config": {} },
+      { "dataPointId": "loadHistory", "widgetType": { "metricChart": { "chartType": "line" } }, "config": {} },
+      { "dataPointId": "load", "widgetType": "gauge", "config": { "min": 0, "max": 100 } }
+    ]
+  }
+}
+```
+
+| Field | JSON type | Meaning | Nullability |
+| --- | --- | --- | --- |
+| *(list-entry fields)* | | Exactly as in `GET /connector-instances`. | |
+| `config` | any | The stored configuration, as written. Returned so an edit form can be pre-filled. | `null` for a row whose stored config is unreadable. |
+| `actions` | array | [`ConnectorAction`](#connectoraction) — what this instance can be asked to do right now. | Always present; **may be empty** for a read-only or currently-broken connector. |
+| `dataPoints` | array | [`DataPointDescriptor`](#datapointdescriptor) — what can be bound to a widget. | Always present; may be empty. |
+| `defaultLayout` | object | [`WidgetLayout`](#widgetlayout) the connector ships with. | Always present; `bindings` may be empty. |
+
+**`config` is `connectors.view`-gated, which will not be good enough forever.**
+The only registered type has nothing secret in it. A real integration storing an
+API token will need either a redaction pass here or a stricter permission on
+this field; treat that as a known open item rather than a settled decision.
+
+| Status | Meaning |
+| --- | --- |
+| 200 | Found. |
+| 403 | The caller lacks a global `connectors.view` grant. |
+| 404 | No instance with that id. |
+
+### `POST /connector-instances`
+
+Requires a global **`connectors.manage`** grant — not `connectors.view`. Adding
+and removing connectors is authority over the instance list itself, which is a
+different capability from seeing or operating a connector that already exists.
+
+**Request:**
+
+```json
+{
+  "connectorType": "debug",
+  "name": "Fixture",
+  "config": { "baseLoad": 10 }
+}
+```
+
+| Field | JSON type | Required | Meaning |
+| --- | --- | --- | --- |
+| `connectorType` | string | yes | A `typeId` from `GET /connector-types`. |
+| `name` | string | yes | Trimmed; must not be empty. |
+| `config` | any | no | Absent means "no configuration", which is what an unfilled form submits. |
+
+**Validation is the connector's, not the schema's.** The backend builds a live
+connector from `config` *before* writing anything. If the factory refuses, the
+response is 400 carrying the connector's own `ConnectorError` — usually
+[`invalidConfig`](#connectorerror) — and no row is created. This catches what a
+shape check cannot: an unknown key, or a value that is the right type and still
+out of range. A row the factory would refuse must never reach the database, or
+it would be silently skipped at the next startup.
+
+**Response 201** — the same body as `GET /connector-instances/{id}`.
+
+| Status | Meaning |
+| --- | --- |
+| 201 | Created, persisted, and installed in the runtime. |
+| 400 | `name` was empty, `connectorType` is not registered, or the connector refused `config`. |
+| 403 | The caller lacks a global `connectors.manage` grant. |
+
+An unregistered `connectorType` is **400, not 404**: the request as a whole is
+malformed, and a 404 would suggest the *instance* was not found.
+
+### `PATCH /connector-instances/{id}`
+
+Requires a global `connectors.manage` grant.
+
+**Request** — both fields optional; an absent field is left alone:
+
+```json
+{ "name": "Renamed", "config": { "label": "after-update" } }
+```
+
+**`config` replaces the whole configuration**; it is not merged. A connector is
+rebuilt from its configuration wholesale, so there is no coherent meaning for a
+partial one.
+
+The live connector is rebuilt and replaced on every successful update, whether
+or not `config` changed. That is also how an instance that failed to load at
+startup gets a second chance once its configuration is fixed.
+
+**Response 200** — the same body as `GET /connector-instances/{id}`.
+
+| Status | Meaning |
+| --- | --- |
+| 200 | Updated, persisted, and the live connector replaced. |
+| 400 | `name` was present and empty, or the connector refused the new `config`. Nothing is changed. |
+| 403 | The caller lacks a global `connectors.manage` grant. |
+| 404 | No instance with that id. |
+
+### `DELETE /connector-instances/{id}`
+
+Requires a global `connectors.manage` grant. Removes the row and drops the live
+connector.
+
+**Response 204** — no body.
+
+| Status | Meaning |
+| --- | --- |
+| 204 | Deleted. |
+| 403 | The caller lacks a global `connectors.manage` grant. |
+| 404 | No instance with that id. |
+
+Nothing cascades yet. Once dashboards exist, widget placements will reference an
+instance id and deleting one will have to remove or orphan them; that table does
+not exist, so there is nothing to cascade to.
+
+### `POST /connector-instances/{id}/actions/{actionId}`
+
+Requires `connectors.control` over **this instance**, checked as
+`connector` / `{id}`. A global grant covers every instance; a grant scoped to
+one instance covers only that one.
 
 **Request:** an **optional** JSON body, forwarded verbatim as the action's
 `params`. The handler reads raw bytes rather than using the `Json` extractor, so
@@ -675,17 +893,21 @@ one who explicitly submitted an empty form.
 A 200 with `success: false` is a normal answer, not an error; see
 [`ActionResult`](#actionresult) for why that is different from a 5xx.
 
+A 403 is returned **before** the instance id is looked up, so an unauthorized
+caller gets the same response whether or not the id exists. Otherwise the
+endpoint would report 404 for unknown ids and 403 for real ones, which is a way
+to enumerate what is configured.
+
 | Status | Meaning |
 | --- | --- |
 | 200 | The connector was reached and produced an `ActionResult` — successful or not. |
 | 400 | The request body was present but not valid JSON. Loom's error shape. |
 | 400 | `ConnectorError::InvalidParams` — the action exists, the parameters do not satisfy it. |
-| 404 | No connector with that `id`. Loom's error shape, with **no** `connectorError` — no connector ran. |
+| 403 | The caller lacks `connectors.control` over this instance. |
+| 404 | No instance with that id. Loom's error shape, with **no** `connectorError` — no connector ran. |
 | 404 | `ConnectorError::InvalidAction` — the connector exists, the action id does not. |
 | 502 | `ConnectorError::Unreachable` or `ConnectorError::AuthFailed`. |
 | 500 | `ConnectorError::Internal`. |
-| 404 | The feature is not compiled in. |
-
 ## Account
 
 Self-service routes: a signed-in user managing their **own** account. Every one
@@ -712,7 +934,7 @@ the tables below.
   "username": "admin",
   "displayName": "The Admin",
   "avatarUrl": "/avatars/2f1c8b90-5d3e-4a71-9c02-6b8d4e1f7a35.png",
-  "createdAt": "2026-08-19T17:04:11.882401Z",
+  "createdAt": "2026-08-19T17:04:11.882401553+00:00",
   "groups": [
     { "id": "00000000-0000-4000-8000-000000000001", "name": "Administrators" }
   ]
@@ -900,7 +1122,7 @@ Requires `users.manage`.
     "id": "9d1f8c2e-4b7a-4c3d-9e21-0a5b6c7d8e9f",
     "username": "admin",
     "isActive": true,
-    "createdAt": "2026-08-19T17:04:11.882401Z",
+    "createdAt": "2026-08-19T17:04:11.882401553+00:00",
     "groupIds": ["00000000-0000-4000-8000-000000000001"]
   }
 ]
@@ -1091,14 +1313,16 @@ everything else is Loom failing, or being failed by the upstream service.
 
 | Variant | Status | Reasoning |
 | --- | --- | --- |
-| `InvalidAction` | 404 Not Found | Consistent with an unknown connector id — the path `/connectors/{id}/actions/{actionId}` names something that is not there. |
+| `InvalidAction` | 404 Not Found | Consistent with an unknown instance id — the path `/connector-instances/{id}/actions/{actionId}` names something that is not there. |
 | `InvalidParams` | 400 Bad Request | The request reached a real action and was malformed. |
+| `InvalidConfig` | 400 Bad Request | The submitted connector configuration was refused by the connector itself. Returned by `POST` and `PATCH /connector-instances`. |
 | `AuthFailed` | **502 Bad Gateway** | Deliberately *not* 401. It means the *upstream service* rejected *Loom's* stored credentials. The caller is not the party that failed to authenticate and holds no credentials that would fix it; a 401 would tell a client to re-prompt its user, which cannot repair a bad token in Loom's connector configuration. It is a gateway failure, like `Unreachable`. |
 | `Unreachable` | 502 Bad Gateway | Loom could not reach the upstream at all. |
 | `Internal` | 500 Internal Server Error | The failure is inside Loom. |
 
-Plus, outside the enum: an **unknown connector id is 404**, with `error` set and
-`connectorError` omitted, since no connector was invoked.
+Plus, outside the enum: an **unknown instance id is 404**, and an unregistered
+`connectorType` is **400**, both with `error` set and `connectorError` omitted,
+since no connector was invoked.
 
 ## Core wire types
 
@@ -1161,7 +1385,7 @@ automations or URLs. `paramsSchema` is `{}` rather than `null` for parameterless
 actions so a consumer can always treat it as a schema and never has to
 special-case the absence of one.
 
-Delivered in the `actions` array of every `GET /connectors` element, so a
+Delivered in the `actions` array of `GET /connector-instances/{id}`, so a
 client never has to know an action id in advance. The list is not fixed for a
 connector type: it may vary with the connector's configuration or the remote
 service's state, so treat it as data to render, not as a schema to compile
@@ -1200,24 +1424,108 @@ first is the user's service to look at; the second is Loom's setup.
 
 ```json
 {
-  "id": "mock",
-  "name": "Mock Service",
+  "id": "debug",
+  "name": "Debug Connector",
   "icon": "beaker",
-  "version": "1.0.0"
+  "version": "1.0.0",
+  "minSize": [2, 2]
 }
 ```
 
 | Field | JSON type | Meaning | Nullability |
 | --- | --- | --- | --- |
-| `id` | string | Stable machine identifier: registry key and URL segment. Lowercase kebab-case by convention (`"mock"`, `"reverse-proxy"`). | Always present. |
+| `id` | string | The connector **type**'s identifier, not the instance's. Lowercase kebab-case by convention (`"debug"`, `"reverse-proxy"`). The instance's own id is the sibling `id` on the response envelope. | Always present. |
 | `name` | string | Display name shown in the UI. | Always present. |
 | `icon` | string | Icon *identifier*, not image data — a name each client resolves against its own icon set. | Serialized as **`null`** when absent, meaning "use the generic fallback". |
 | `version` | string | Version of the connector implementation, independent of the Loom release. | Always present. |
+| `minSize` | array | `[width, height]` in dashboard grid units: the smallest footprint at which this connector is still readable. A floor the placement UI enforces, not a preferred size. | Always present; a two-element array of integers. |
 
 `icon` carries a name rather than a URL or bytes so that Core ships no assets
 and assumes no renderer — the web, desktop, and mobile clients each map the name
 onto their own icon set. `version` is the connector's own, so a connector can be
 revised without a platform bump.
+
+### `DisplayField`
+
+```json
+{ "label": "Host", "value": "debug.invalid" }
+```
+
+| Field | JSON type | Meaning | Nullability |
+| --- | --- | --- | --- |
+| `label` | string | Short caption. | Always present. |
+| `value` | string | The value as it should appear, already rendered to text. | Always present. |
+
+**Never derived from `configSchema`.** A connector author writes these out one
+by one, in code, and a field that is not written out is not shown. The obvious
+automatic alternative would put whatever is in the stored configuration on the
+shell, and stored configuration is exactly where credentials live.
+
+### `DataPointDescriptor`
+
+```json
+{ "id": "load", "label": "Load", "valueType": "number", "unit": "%" }
+```
+
+| Field | JSON type | Meaning | Nullability |
+| --- | --- | --- | --- |
+| `id` | string | Stable machine identifier, **and** the key this data point's value appears under in `status.details`. Stored in saved layouts, so it must not change when the label does. | Always present. |
+| `label` | string | Human-facing name for a caption or legend entry. | Always present. |
+| `valueType` | string | One of `"number"`, `"string"`, `"bool"`, `"timeSeries"`. Constrains which widgets may render it. | Always present. |
+| `unit` | string | Display suffix (`"%"`, `"MiB"`, `"ms"`). A display concern only — the value is never scaled. | Serialized as **`null`** for a dimensionless value. |
+
+**Descriptors, not readings.** The current values arrive separately, in
+`status.details`, keyed by `id`. That split is what lets a dashboard be laid out
+once and re-rendered on every poll without re-reading the schema.
+
+### `WidgetLayout`
+
+```json
+{
+  "bindings": [
+    { "dataPointId": "load", "widgetType": "statTile", "config": {} },
+    { "dataPointId": "load", "widgetType": "gauge", "config": { "min": 0, "max": 100 } },
+    {
+      "dataPointId": "loadHistory",
+      "widgetType": { "metricChart": { "chartType": "line" } },
+      "config": {}
+    }
+  ]
+}
+```
+
+| Field | JSON type | Meaning | Nullability |
+| --- | --- | --- | --- |
+| `bindings` | array | The widgets, in the connector author's suggested reading order. | Always present; may be empty. |
+
+Each binding:
+
+| Field | JSON type | Meaning | Nullability |
+| --- | --- | --- | --- |
+| `dataPointId` | string | Which `DataPointDescriptor.id` this widget shows — or, for a control widget, which `ConnectorAction.id` it invokes. | Always present. |
+| `widgetType` | string **or** object | See below. | Always present. |
+| `config` | object | Widget-specific extras: `min`/`max` for a gauge or slider, `options` for a selector. Free-form. | Always present; an empty object, never `null`. |
+
+**`widgetType` is not always a string.** Unit variants serialize as a bare
+string; the one variant carrying data serializes as a single-key object:
+
+```json
+"statTile"
+{ "metricChart": { "chartType": "line" } }
+```
+
+This is the same externally-tagged shape as `ConnectorError`, and the same
+warning applies — a client that assumes a string will throw on the chart case.
+
+Display widgets: `"statTile"`, `"progressBar"`, `{"metricChart": {"chartType":
+"pie" | "bar" | "line"}}`, `"gauge"`, `"statusDot"`, `"logStream"`. Control
+widgets, which invoke an action: `"button"`, `"toggle"`, `"slider"`,
+`"textField"`, `"selector"`.
+
+The layout is a **default, not a mandate**: it is what a user gets when they
+place the connector without configuring anything, and it is theirs to edit
+afterwards. There are no coordinates here — where a widget sits on a grid is the
+dashboard's business, not the connector's.
 
 ### `ConnectorError`
 
@@ -1229,6 +1537,7 @@ camelCase variant name:
 { "authFailed": { "reason": "token rejected" } }
 { "invalidAction": { "actionId": "nope" } }
 { "invalidParams": { "actionId": "restart", "reason": "missing `force`" } }
+{ "invalidConfig": { "reason": "unknown field `wat`" } }
 { "internal": "unexpected response shape" }
 ```
 
@@ -1238,12 +1547,13 @@ camelCase variant name:
 | `authFailed` | object | `reason` (string) | The service was reached but rejected Loom's credentials. The stored connector configuration needs attention. Separate from `unreachable` because the remedy is completely different. |
 | `invalidAction` | object | `actionId` (string) | The requested action id is not one this connector exposes — usually a stale client or an automation naming a removed action. |
 | `invalidParams` | object | `actionId` (string), `reason` (string) | The action exists but the parameters do not satisfy its schema. `reason` names the failed constraint so a client can point at the field. |
-| `internal` | **string** | — | Anything else broke inside the connector: a bug, an unexpected response shape, a failed parse. |
+| `invalidConfig` | object | `reason` (string) | The stored or submitted *connector configuration* is not something this connector can be built from. About the connector itself, not about one action's arguments. |
+| `internal` | **string** | — | Anything else broke inside the connector: a bug, an unexpected response shape, a failed parse. Also used for the synthetic `statusError` on an instance that failed to load. |
 
 **`internal` is the one asymmetry.** It is a newtype variant in Rust
 (`Internal(String)`), so its value is a **bare string**, not an object with a
 field. A client discriminating on the single key must handle that case
-separately from the four struct variants. It is called out here because it is
+separately from the five struct variants. It is called out here because it is
 exactly the kind of detail that produces a runtime type error in a client that
 assumed uniformity.
 
@@ -1253,18 +1563,22 @@ service reporting its own bad state is a successful `ConnectorStatus` with
 `success: false`. Keeping those out of this enum is what lets a client tell
 "Loom is misconfigured" from "your server is unhappy".
 
-### `config_schema()` — present on the trait, exposed by nothing
+### `config_schema()` — exposed by `GET /connector-types`
 
 `Connector::config_schema()` returns the JSON Schema for the configuration a
-connector needs. **No endpoint currently serves it.** It has two intended
-consumers:
+connector needs, and it is served, per registered type, by
+[`GET /connector-types`](#get-connector-types). This is what keeps "add a
+connector" from requiring a matching UI change in three applications — the form
+is derived from the schema, not written per connector.
 
-- **Manifest loading**, which validates a stored configuration before a
-  connector is instantiated, so a bad config fails at load with a pointed
-  message rather than at first use with an `Internal` error.
-- **The clients**, which generate the setup form from it. This is the part that
-  keeps "add a connector" from requiring a matching UI change in three
-  applications — the form is derived, not written.
+The registry calls it through a schema function rather than on a live instance,
+because the form is needed *before* there is any configuration to build an
+instance from.
+
+The schema is for the **client**. The server does not validate against it; it
+hands the submitted value to the connector's factory, which is the only thing
+that knows what the keys mean and is therefore the only thing that can catch a
+value that is the right type and still wrong.
 
 A connector needing no configuration returns an empty schema object rather than
 `null`, matching the `paramsSchema` convention.
@@ -1280,8 +1594,9 @@ one is the important one.
   adding a row to `permissions` alone does not extend the group.
 - **`system.settings` is registered and granted but enforced nowhere**, because
   no settings endpoint exists yet.
-- **`GET /connectors` requires a global view grant** rather than filtering the
-  list per grant. See [Permission enforcement](#permission-enforcement).
+- **`GET /connector-instances` requires a global view grant** rather than
+  filtering the list per grant. See
+  [Permission enforcement](#permission-enforcement).
 - **Permission changes take up to 15 minutes to take effect** for a signed-in
   user, since checks read the access token's claims. Revoking a grant does not
   end a session already holding it; deactivating or deleting the account does,
@@ -1291,12 +1606,23 @@ one is the important one.
   out everywhere".
 - **Expired refresh-token rows are never cleaned up.** They stay in the table
   after expiry. Harmless, but the table only grows.
-- **One connector is registered, and it is `MockConnector`.** It contacts
-  nothing; `restart` and `ping` simulate their effects and echo their
-  parameters. It is a permanent test fixture, not scaffolding — see the module
-  docs in `crates/core/src/connector/mock.rs`.
-- **`config_schema()` is not exposed by any endpoint.** See
-  [above](#config_schema--present-on-the-trait-exposed-by-nothing).
+- **Connector status is fetched live on every request, with no caching and no
+  push.** Listing *n* instances performs *n* sequential `status()` calls, so a
+  slow connector makes the whole list slow, and a client learns about a state
+  change only when it asks again. A polling task that caches readings and
+  pushes updates over a WebSocket is a planned follow-up; it is **not
+  implemented**.
+- **One connector type is registered, and it is the debug fixture.** It contacts
+  nothing; its actions simulate their effects and echo their parameters, and its
+  data points move on a deterministic oscillation so charts have something to
+  draw. It is a permanent development and testing fixture, not scaffolding —
+  see the module docs in `crates/core/src/connector/debug.rs`.
+- **An instance's stored `config` is returned to anyone with
+  `connectors.view`.** Fine while no registered type stores a secret; it needs
+  redaction or a stricter permission before one does.
+- **A connector instance that fails to load is skipped with a warning, not a
+  fatal error.** The row survives, is listed with a `statusError`, and can be
+  fixed with `PATCH` or removed with `DELETE`.
 
 ### Superseded: the `dev-stub-auth` feature
 

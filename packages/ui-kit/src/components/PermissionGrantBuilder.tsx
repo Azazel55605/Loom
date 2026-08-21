@@ -49,9 +49,14 @@ export function PermissionGrantBuilder({
   // Needed only to name the connectors in the scope picker. Allowed to fail:
   // the account editing groups is not guaranteed to hold `connectors.view`, and
   // that should cost the narrow-scope option, not the whole form.
+  //
+  // The scope id is the **instance** id — a UUID — not the connector type's
+  // `metadata.id`. That is what the backend matches a resource-scoped
+  // `connectors.control` grant against, and scoping to a type id would produce
+  // a grant that silently authorizes nothing.
   const connectors = useQuery({
-    queryKey: ["connectors"],
-    queryFn: ({ signal }) => api.getConnectors(signal),
+    queryKey: ["connector-instances"],
+    queryFn: ({ signal }) => api.getConnectorInstances(signal),
     retry: false,
     staleTime: 60_000,
   });
@@ -136,9 +141,9 @@ export function PermissionGrantBuilder({
                         one-of-many either way, and two controls to express one
                         value is two things that can disagree. */}
                     <SelectItem value={ALL_RESOURCES}>All connectors</SelectItem>
-                    {connectors.data?.map((connector) => (
-                      <SelectItem key={connector.metadata.id} value={connector.metadata.id}>
-                        {connector.metadata.name}
+                    {connectors.data?.map((instance) => (
+                      <SelectItem key={instance.id} value={instance.id}>
+                        {instance.name}
                       </SelectItem>
                     ))}
                     {/* A scope that is set but no longer in the list — a
@@ -148,7 +153,7 @@ export function PermissionGrantBuilder({
                         would read as "no scope" for a grant that has one. */}
                     {grant.resourceId !== null &&
                       !(connectors.data ?? []).some(
-                        (connector) => connector.metadata.id === grant.resourceId,
+                        (instance) => instance.id === grant.resourceId,
                       ) && (
                         <SelectItem value={grant.resourceId}>
                           {grant.resourceId} (not listed)

@@ -203,6 +203,17 @@ impl Permission for ConnectorsControl {
     const KEY: &'static str = "connectors.control";
 }
 
+/// May add, reconfigure, and remove connector instances.
+///
+/// Distinct from [`ConnectorsControl`] on purpose: pressing a connector's
+/// buttons and deciding which connectors exist at all are different
+/// capabilities, and the second one cannot be scoped to a connector because the
+/// connector is what is being created or destroyed.
+pub struct ConnectorsManage;
+impl Permission for ConnectorsManage {
+    const KEY: &'static str = "connectors.manage";
+}
+
 /// May create, modify, and deactivate accounts.
 pub struct UsersManage;
 impl Permission for UsersManage {
