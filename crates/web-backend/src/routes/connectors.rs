@@ -44,6 +44,12 @@ use crate::state::AppState;
 /// grant that quietly authorizes nothing.
 pub const CONNECTOR_RESOURCE_TYPE: &str = "connector";
 
+/// Internal route helpers carry ready-made HTTP failures, but an Axum
+/// `Response` is large enough to trip Clippy's `result_large_err` on newer Rust
+/// releases. Keep the success path compact by storing that uncommon value out
+/// of line.
+type RouteResult<T> = Result<T, Box<Response>>;
+
 /* ------------------------------------------------------------------ */
 /* Connector types                                                     */
 /* ------------------------------------------------------------------ */
@@ -231,7 +237,7 @@ pub async fn get_instance(
     let row = match load_row(&state, &id).await {
         Ok(Some(row)) => row,
         Ok(None) => return not_found(&id),
-        Err(response) => return response,
+        Err(response) => return *response,
     };
 
     let (live, snapshot) = match Uuid::parse_str(&row.id) {
@@ -253,7 +259,7 @@ pub async fn get_instance(
 pub(crate) async fn instance_summary(
     state: &AppState,
     id: &str,
-) -> Result<Option<ConnectorInstanceResponse>, Response> {
+) -> RouteResult<Option<ConnectorInstanceResponse>> {
     let Some(row) = load_row(state, id).await? else {
         return Ok(None);
     };
@@ -348,7 +354,7 @@ pub async fn update_instance(
     let row = match load_row(&state, &id).await {
         Ok(Some(row)) => row,
         Ok(None) => return not_found(&id),
-        Err(response) => return response,
+        Err(response) => return *response,
     };
 
     let name = match request.name.as_deref().map(str::trim) {
@@ -497,7 +503,7 @@ pub async fn execute_action(
 
 /// Reads one row, mapping "no such row" to `Ok(None)` and a database failure to
 /// a ready-made 500.
-async fn load_row(state: &AppState, id: &str) -> Result<Option<InstanceRow>, Response> {
+async fn load_row(state: &AppState, id: &str) -> RouteResult<Option<InstanceRow>> {
     sqlx::query_as::<_, InstanceRow>(
         "SELECT id, connector_type, name, config, created_at \
          FROM connector_instances WHERE id = ?",
@@ -505,7 +511,7 @@ async fn load_row(state: &AppState, id: &str) -> Result<Option<InstanceRow>, Res
     .bind(id)
     .fetch_optional(&state.pool)
     .await
-    .map_err(|error| internal_error("loading a connector instance", error))
+    .map_err(|error| Box::new(internal_error("loading a connector instance", error)))
 }
 
 /// The 404 body, phrased identically wherever it comes from.

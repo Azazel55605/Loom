@@ -24,6 +24,11 @@ use crate::state::AppState;
 
 use super::connectors::{self, ConnectorInstanceResponse};
 
+/// Internal helpers return complete HTTP failures. Boxing keeps the uncommon
+/// error path small enough for Clippy's `result_large_err` threshold across
+/// Rust releases without changing any response body or status.
+type RouteResult<T> = Result<T, Box<Response>>;
+
 #[derive(Debug, sqlx::FromRow)]
 struct DashboardRow {
     id: String,
@@ -287,7 +292,7 @@ pub(super) async fn get_dashboard(
 ) -> Response {
     let role = match require_role(&state.pool, caller.id(), &id, DashboardRole::Viewer).await {
         Ok(role) => role,
-        Err(response) => return response,
+        Err(response) => return *response,
     };
     dashboard_detail(&state, &id, role).await
 }
@@ -300,7 +305,7 @@ pub(super) async fn update_dashboard(
     Json(request): Json<UpdateDashboardRequest>,
 ) -> Response {
     if let Err(response) = require_role(&state.pool, caller.id(), &id, DashboardRole::Owner).await {
-        return response;
+        return *response;
     }
     let name = request.name.trim();
     if name.is_empty() {
@@ -326,7 +331,7 @@ pub(super) async fn delete_dashboard(
     Path(id): Path<String>,
 ) -> Response {
     if let Err(response) = require_role(&state.pool, caller.id(), &id, DashboardRole::Owner).await {
-        return response;
+        return *response;
     }
 
     if let Err(error) = sqlx::query("DELETE FROM dashboards WHERE id = ?")
@@ -348,7 +353,7 @@ pub(super) async fn pin_dashboard(
 ) -> Response {
     if let Err(response) = require_role(&state.pool, caller.id(), &id, DashboardRole::Viewer).await
     {
-        return response;
+        return *response;
     }
 
     if let Err(error) = sqlx::query(
@@ -375,7 +380,7 @@ pub(super) async fn unpin_dashboard(
 ) -> Response {
     if let Err(response) = require_role(&state.pool, caller.id(), &id, DashboardRole::Viewer).await
     {
-        return response;
+        return *response;
     }
 
     if let Err(error) =
@@ -398,7 +403,7 @@ pub(super) async fn list_shares(
     Path(id): Path<String>,
 ) -> Response {
     if let Err(response) = require_role(&state.pool, caller.id(), &id, DashboardRole::Owner).await {
-        return response;
+        return *response;
     }
 
     let rows = sqlx::query_as::<_, (String, String, String, String, String, String)>(
@@ -453,7 +458,7 @@ pub(super) async fn create_share(
     Json(request): Json<CreateShareRequest>,
 ) -> Response {
     if let Err(response) = require_role(&state.pool, caller.id(), &id, DashboardRole::Owner).await {
-        return response;
+        return *response;
     }
 
     let Some(target_type) = ShareTargetType::parse(&request.target_type) else {
@@ -520,7 +525,7 @@ pub(super) async fn delete_share(
     Path((id, share_id)): Path<(String, String)>,
 ) -> Response {
     if let Err(response) = require_role(&state.pool, caller.id(), &id, DashboardRole::Owner).await {
-        return response;
+        return *response;
     }
 
     let deleted = sqlx::query("DELETE FROM dashboard_shares WHERE id = ? AND dashboard_id = ?")
@@ -547,7 +552,7 @@ pub(super) async fn create_placement(
 ) -> Response {
     if let Err(response) = require_role(&state.pool, caller.id(), &id, DashboardRole::Editor).await
     {
-        return response;
+        return *response;
     }
 
     let bindings = match validate_placement(
@@ -561,7 +566,7 @@ pub(super) async fn create_placement(
     .await
     {
         Ok(bindings) => bindings,
-        Err(response) => return response,
+        Err(response) => return *response,
     };
     let serialized = match serde_json::to_string(&bindings) {
         Ok(value) => value,
@@ -603,7 +608,7 @@ pub(super) async fn create_placement(
     };
     match placement_response(&state, row).await {
         Ok(response) => (StatusCode::CREATED, Json(response)).into_response(),
-        Err(response) => response,
+        Err(response) => *response,
     }
 }
 
@@ -616,7 +621,7 @@ pub(super) async fn update_placement(
 ) -> Response {
     if let Err(response) = require_role(&state.pool, caller.id(), &id, DashboardRole::Editor).await
     {
-        return response;
+        return *response;
     }
 
     let existing = sqlx::query_as::<_, PlacementRow>(
@@ -657,7 +662,7 @@ pub(super) async fn update_placement(
     .await
     {
         Ok(bindings) => bindings,
-        Err(response) => return response,
+        Err(response) => return *response,
     };
     let serialized = match serde_json::to_string(&bindings) {
         Ok(value) => value,
@@ -694,7 +699,7 @@ pub(super) async fn update_placement(
     };
     match placement_response(&state, row).await {
         Ok(response) => Json(response).into_response(),
-        Err(response) => response,
+        Err(response) => *response,
     }
 }
 
@@ -706,7 +711,7 @@ pub(super) async fn delete_placement(
 ) -> Response {
     if let Err(response) = require_role(&state.pool, caller.id(), &id, DashboardRole::Editor).await
     {
-        return response;
+        return *response;
     }
 
     let deleted = sqlx::query("DELETE FROM dashboard_placements WHERE id = ? AND dashboard_id = ?")
@@ -740,7 +745,7 @@ async fn dashboard_detail(state: &AppState, id: &str, role: DashboardRole) -> Re
 
     let placements = match load_placements(state, id).await {
         Ok(placements) => placements,
-        Err(response) => return response,
+        Err(response) => return *response,
     };
     Json(DashboardDetail {
         id: row.id,
@@ -759,7 +764,7 @@ async fn dashboard_detail(state: &AppState, id: &str, role: DashboardRole) -> Re
 async fn load_placements(
     state: &AppState,
     dashboard_id: &str,
-) -> Result<Vec<PlacementResponse>, Response> {
+) -> RouteResult<Vec<PlacementResponse>> {
     let rows = sqlx::query_as::<_, PlacementRow>(
         "SELECT id, connector_instance_id, position_x, position_y, width, height, \
                 widget_bindings, created_at \
@@ -769,7 +774,7 @@ async fn load_placements(
     .bind(dashboard_id)
     .fetch_all(&state.pool)
     .await
-    .map_err(|error| internal_error("listing dashboard placements", error))?;
+    .map_err(|error| Box::new(internal_error("listing dashboard placements", error)))?;
 
     let mut placements = Vec::with_capacity(rows.len());
     for row in rows {
@@ -778,19 +783,16 @@ async fn load_placements(
     Ok(placements)
 }
 
-async fn placement_response(
-    state: &AppState,
-    row: PlacementRow,
-) -> Result<PlacementResponse, Response> {
+async fn placement_response(state: &AppState, row: PlacementRow) -> RouteResult<PlacementResponse> {
     let bindings = serde_json::from_str(&row.widget_bindings)
-        .map_err(|error| internal_error("reading stored widget bindings", error))?;
+        .map_err(|error| Box::new(internal_error("reading stored widget bindings", error)))?;
     let connector = connectors::instance_summary(state, &row.connector_instance_id)
         .await?
         .ok_or_else(|| {
-            ErrorBody::message(
+            Box::new(ErrorBody::message(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "a dashboard placement references a missing connector",
-            )
+            ))
         })?;
 
     Ok(PlacementResponse {
@@ -812,32 +814,38 @@ async fn validate_placement(
     height: i64,
     requested_bindings: Option<Vec<WidgetBinding>>,
     existing_bindings: Option<Vec<WidgetBinding>>,
-) -> Result<Vec<WidgetBinding>, Response> {
+) -> RouteResult<Vec<WidgetBinding>> {
     let exists = sqlx::query_scalar::<_, bool>(
         "SELECT EXISTS(SELECT 1 FROM connector_instances WHERE id = ?)",
     )
     .bind(connector_id)
     .fetch_one(&state.pool)
     .await
-    .map_err(|error| internal_error("checking a placement connector", error))?;
+    .map_err(|error| Box::new(internal_error("checking a placement connector", error)))?;
     if !exists {
-        return Err(bad_request("the connector instance does not exist"));
+        return Err(Box::new(bad_request(
+            "the connector instance does not exist",
+        )));
     }
 
     let connector = match Uuid::parse_str(connector_id) {
         Ok(id) => state.connectors.get(&id).await,
         Err(_) => None,
     }
-    .ok_or_else(|| bad_request("the connector instance is not currently available"))?;
+    .ok_or_else(|| {
+        Box::new(bad_request(
+            "the connector instance is not currently available",
+        ))
+    })?;
 
     let (minimum_width, minimum_height) = connector.metadata().min_size;
     if width < i64::from(minimum_width) || height < i64::from(minimum_height) {
-        return Err(ErrorBody::message(
+        return Err(Box::new(ErrorBody::message(
             StatusCode::BAD_REQUEST,
             format!(
                 "placement size must be at least {minimum_width}x{minimum_height} for this connector"
             ),
-        ));
+        )));
     }
 
     let bindings = requested_bindings
@@ -856,13 +864,13 @@ async fn validate_placement(
     invalid.sort();
     invalid.dedup();
     if !invalid.is_empty() {
-        return Err(ErrorBody::message(
+        return Err(Box::new(ErrorBody::message(
             StatusCode::BAD_REQUEST,
             format!(
                 "widget bindings reference unknown data points: {}",
                 invalid.join(", ")
             ),
-        ));
+        )));
     }
 
     // Dashboard visibility and connector control are orthogonal. Storing a
@@ -877,11 +885,14 @@ async fn require_role(
     user_id: &str,
     dashboard_id: &str,
     required: DashboardRole,
-) -> Result<DashboardRole, Response> {
+) -> RouteResult<DashboardRole> {
     match get_dashboard_role(pool, user_id, dashboard_id).await {
         Ok(Some(role)) if role.at_least(required) => Ok(role),
-        Ok(_) => Err(forbidden_dashboard(required)),
-        Err(error) => Err(internal_error("resolving dashboard access", error)),
+        Ok(_) => Err(Box::new(forbidden_dashboard(required))),
+        Err(error) => Err(Box::new(internal_error(
+            "resolving dashboard access",
+            error,
+        ))),
     }
 }
 

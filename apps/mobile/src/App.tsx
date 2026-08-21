@@ -16,7 +16,11 @@ import {
   MobilePermissionsRoute,
 } from "@/components/MobilePermissionsRoute";
 import { MobileSettingsRoute } from "@/components/MobileSettingsRoute";
-import { DashboardPage } from "@/pages/DashboardPage";
+import { ConnectorsPage } from "@/pages/ConnectorsPage";
+import {
+  DashboardDetailPage,
+  DashboardsIndexPage,
+} from "@/pages/DashboardsPage";
 import { LoginPage } from "@/pages/LoginPage";
 import { SetupPage } from "@/pages/SetupPage";
 import { ConnectToServer } from "@loom/ui-kit/components/ConnectToServer";
@@ -135,11 +139,28 @@ function MobileRoutes({
       <Routes>
         <Route path="/setup" element={<SetupPage />} />
         <Route path="/login" element={<LoginPage />} />
+        <Route path="/" element={<Navigate to="/dashboards" replace />} />
         <Route
-          path="/"
+          path="/dashboards"
           element={
             <RequireAuth>
-              <DashboardPage />
+              <DashboardsIndexPage />
+            </RequireAuth>
+          }
+        />
+        <Route
+          path="/dashboards/:id"
+          element={
+            <RequireAuth>
+              <DashboardDetailPage />
+            </RequireAuth>
+          }
+        />
+        <Route
+          path="/connectors"
+          element={
+            <RequireAuth>
+              <ConnectorsPage />
             </RequireAuth>
           }
         />
@@ -166,7 +187,7 @@ function MobileRoutes({
           </Route>
           <Route path="*" element={<Navigate to="general" replace />} />
         </Route>
-        <Route path="*" element={<Navigate to="/" replace />} />
+        <Route path="*" element={<Navigate to="/dashboards" replace />} />
       </Routes>
     </RequireSetup>
   );

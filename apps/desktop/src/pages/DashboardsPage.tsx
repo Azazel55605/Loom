@@ -1,18 +1,17 @@
 import { Navigate, useNavigate, useParams } from "react-router-dom";
 
-import { WebAppShell } from "@/components/WebAppShell";
+import { DesktopAppShell } from "@/components/DesktopAppShell";
 import { DashboardsIndexView } from "@loom/ui-kit/components/DashboardsIndexView";
 import { DashboardView } from "@loom/ui-kit/components/DashboardView";
 
 export function DashboardsIndexPage() {
   const navigate = useNavigate();
-
   return (
-    <WebAppShell>
+    <DesktopAppShell>
       <DashboardsIndexView
         onNavigate={(dashboardId) => navigate(`/dashboards/${dashboardId}`, { replace: true })}
       />
-    </WebAppShell>
+    </DesktopAppShell>
   );
 }
 
@@ -22,12 +21,12 @@ export function DashboardDetailPage() {
   if (id === undefined) return <Navigate to="/dashboards" replace />;
 
   return (
-    <WebAppShell>
+    <DesktopAppShell>
       <DashboardView
         key={id}
         dashboardId={id}
         onDeleted={() => navigate("/dashboards", { replace: true })}
       />
-    </WebAppShell>
+    </DesktopAppShell>
   );
 }

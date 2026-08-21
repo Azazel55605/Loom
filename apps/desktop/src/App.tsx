@@ -17,7 +17,11 @@ import {
   DesktopPermissionsRoute,
 } from "@/components/DesktopPermissionsRoute";
 import { DesktopSettingsRoute } from "@/components/DesktopSettingsRoute";
-import { DashboardPage } from "@/pages/DashboardPage";
+import { ConnectorsPage } from "@/pages/ConnectorsPage";
+import {
+  DashboardDetailPage,
+  DashboardsIndexPage,
+} from "@/pages/DashboardsPage";
 import { LoginPage } from "@/pages/LoginPage";
 import { SetupPage } from "@/pages/SetupPage";
 import { Alert, AlertDescription, AlertTitle } from "@loom/ui-kit/components/ui/alert";
@@ -151,11 +155,28 @@ function DesktopRoutes({
       <Routes>
         <Route path="/setup" element={<SetupPage />} />
         <Route path="/login" element={<LoginPage />} />
+        <Route path="/" element={<Navigate to="/dashboards" replace />} />
         <Route
-          path="/"
+          path="/dashboards"
           element={
             <RequireAuth>
-              <DashboardPage />
+              <DashboardsIndexPage />
+            </RequireAuth>
+          }
+        />
+        <Route
+          path="/dashboards/:id"
+          element={
+            <RequireAuth>
+              <DashboardDetailPage />
+            </RequireAuth>
+          }
+        />
+        <Route
+          path="/connectors"
+          element={
+            <RequireAuth>
+              <ConnectorsPage />
             </RequireAuth>
           }
         />
@@ -182,7 +203,7 @@ function DesktopRoutes({
           </Route>
           <Route path="*" element={<Navigate to="general" replace />} />
         </Route>
-        <Route path="*" element={<Navigate to="/" replace />} />
+        <Route path="*" element={<Navigate to="/dashboards" replace />} />
       </Routes>
     </RequireSetup>
   );
