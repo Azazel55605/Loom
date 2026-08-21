@@ -128,11 +128,9 @@ delete every connector on the instance.
   key type and the `fn` pointers both have to widen — to owned strings and boxed
   closures. That is a contained change, and it is the reason the factory is
   behind a type alias.
-- Status is still request/response. Nothing polls, nothing caches, nothing is
-  pushed. `GET /connector-instances` calls `status()` once per instance in
-  sequence, so the list is as slow as the connectors in it. A caching poller
-  with WebSocket push is the intended follow-up and was deliberately left out of
-  this change rather than half-built into it.
+- Status polling, caching, and push were deliberately left to a follow-up. That
+  follow-up is now specified by [ADR 0012](./0012-connector-status-push.md),
+  without changing this ADR's registry/runtime boundary.
 - Deleting an instance cascades to nothing, because nothing references it yet.
   Once dashboards store widget placements against an instance id, that table
   will need an `ON DELETE` decision.

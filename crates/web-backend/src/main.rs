@@ -204,6 +204,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // the live form of what is stored in `connector_instances`.
     let connectors =
         connectors::ConnectorRuntime::load(&pool, connectors::builtin_registry()).await?;
+    connectors.poll_once().await;
+    let _poller = connectors.spawn_poller();
 
     let listener = tokio::net::TcpListener::bind(&bind_addr).await?;
     info!(
@@ -238,6 +240,7 @@ mod tests {
     /// drops, so tests cannot see one another's data.
     struct TestApp {
         router: Router,
+        connectors: connectors::ConnectorRuntime,
         /// Kept so tests can look at the avatar directory on disk — the point
         /// of several of them is that a file is really there, or really gone.
         dir: tempfile::TempDir,
@@ -279,9 +282,11 @@ mod tests {
         let connectors = connectors::ConnectorRuntime::load(&pool, connectors::builtin_registry())
             .await
             .expect("an empty connector table must load");
+        connectors.poll_once().await;
 
         TestApp {
-            router: app(AppState::new(pool, secret, avatars, connectors)),
+            router: app(AppState::new(pool, secret, avatars, connectors.clone())),
+            connectors,
             dir,
         }
     }
@@ -314,6 +319,27 @@ mod tests {
             .uri(uri)
             .body(Body::empty())
             .expect("valid request")
+    }
+
+    fn websocket_upgrade(uri: &str) -> Request<Body> {
+        Request::builder()
+            .uri(uri)
+            .header("connection", "upgrade")
+            .header("upgrade", "websocket")
+            .header("sec-websocket-version", "13")
+            .header("sec-websocket-key", "dGhlIHNhbXBsZSBub25jZQ==")
+            .body(Body::empty())
+            .expect("valid websocket upgrade request")
+    }
+
+    #[tokio::test]
+    async fn connector_websocket_rejects_missing_and_invalid_access_tokens() {
+        let app = test_app().await;
+
+        for uri in ["/ws", "/ws?token=not-a-jwt"] {
+            let (status, _) = send(&app.router, websocket_upgrade(uri)).await;
+            assert_eq!(status, StatusCode::UNAUTHORIZED);
+        }
     }
 
     #[tokio::test]
@@ -1079,6 +1105,11 @@ mod tests {
         .await;
         assert_eq!(status, StatusCode::OK, "action failed: {body:#}");
         assert_eq!(body["success"], true);
+
+        // Actions mutate the connector, while reads intentionally use the last
+        // completed poll. Drive that boundary explicitly instead of relying on
+        // wall-clock timing in the test.
+        app.connectors.poll_once().await;
 
         // Instances are separate live connectors, not one shared fixture.
         let (_, first_detail) = send(

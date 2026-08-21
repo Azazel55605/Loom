@@ -40,6 +40,7 @@ where
 
 pub mod account;
 pub mod auth;
+pub mod connector_socket;
 pub mod connectors;
 pub mod groups;
 pub mod setup;
@@ -89,6 +90,7 @@ pub fn routes() -> Router<AppState> {
             "/connector-instances/{id}/actions/{action_id}",
             post(connectors::execute_action),
         )
+        .route("/ws", get(connector_socket::connector_status_socket))
         .route("/users", get(users::list_users).post(users::create_user))
         .route(
             "/users/{id}",

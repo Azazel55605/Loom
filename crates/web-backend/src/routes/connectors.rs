@@ -11,12 +11,9 @@
 //! connector" form be generated from data rather than written per connector in
 //! three clients. See `docs/adr/0011-connector-instance-registry.md`.
 //!
-//! **Status is read live on every request.** Listing ten instances calls
-//! `status()` ten times, in sequence, and a slow connector makes the list slow.
-//! That is deliberate for now: a cache is only correct once something decides
-//! how stale a reading may be and pushes updates when it changes, and that
-//! poller-plus-WebSocket work is a follow-up rather than something to
-//! half-build here.
+//! **Status comes from the runtime's poll cache.** HTTP reads never wait on an
+//! upstream service. The same cache changes are broadcast over `/ws`, so the
+//! list response and live updates cannot disagree about the latest snapshot.
 
 use axum::body::Bytes;
 use axum::extract::{Path, State};
@@ -36,7 +33,7 @@ use crate::auth::extract::{
     AuthenticatedUser, ConnectorsControl, ConnectorsManage, ConnectorsView, Permission,
     RequirePermission,
 };
-use crate::connectors::runtime::BuildError;
+use crate::connectors::runtime::{BuildError, ConnectorStatusSnapshot};
 use crate::error::{internal_error, ErrorBody};
 use crate::state::AppState;
 
@@ -208,12 +205,15 @@ pub async fn list_instances(
         // — an unregistered type, or configuration the factory refused. It is
         // still listed, because hiding it would leave a user with a connector
         // they cannot see and therefore cannot delete.
-        let live = match Uuid::parse_str(&row.id) {
-            Ok(id) => state.connectors.get(&id).await,
-            Err(_) => None,
+        let (live, snapshot) = match Uuid::parse_str(&row.id) {
+            Ok(id) => (
+                state.connectors.get(&id).await,
+                state.connectors.cached_status(&id).await,
+            ),
+            Err(_) => (None, None),
         };
 
-        entries.push(entry_for(&row, live.as_deref()).await);
+        entries.push(entry_for(&row, live.as_deref(), snapshot.as_ref()));
     }
 
     Json(entries).into_response()
@@ -234,12 +234,15 @@ pub async fn get_instance(
         Err(response) => return response,
     };
 
-    let live = match Uuid::parse_str(&row.id) {
-        Ok(uuid) => state.connectors.get(&uuid).await,
-        Err(_) => None,
+    let (live, snapshot) = match Uuid::parse_str(&row.id) {
+        Ok(uuid) => (
+            state.connectors.get(&uuid).await,
+            state.connectors.cached_status(&uuid).await,
+        ),
+        Err(_) => (None, None),
     };
 
-    detail_for(&row, live.as_deref()).await
+    detail_for(&row, live.as_deref(), snapshot.as_ref()).await
 }
 
 /// `POST /connector-instances`
@@ -293,6 +296,7 @@ pub async fn create_instance(
     // Only after the row is durable: a live connector with no row behind it
     // would vanish on restart, and would not be deletable through the API.
     state.connectors.insert(id, connector.clone()).await;
+    let snapshot = state.connectors.cached_status(&id).await;
 
     let row = InstanceRow {
         id: id.to_string(),
@@ -302,7 +306,7 @@ pub async fn create_instance(
         created_at,
     };
 
-    let body = detail_for(&row, Some(connector.as_ref())).await;
+    let body = detail_for(&row, Some(connector.as_ref()), snapshot.as_ref()).await;
     (StatusCode::CREATED, body).into_response()
 }
 
@@ -365,7 +369,12 @@ pub async fn update_instance(
         ..row
     };
 
-    detail_for(&row, Some(connector.as_ref())).await
+    let snapshot = match Uuid::parse_str(&row.id) {
+        Ok(uuid) => state.connectors.cached_status(&uuid).await,
+        Err(_) => None,
+    };
+
+    detail_for(&row, Some(connector.as_ref()), snapshot.as_ref()).await
 }
 
 /// `DELETE /connector-instances/{id}`
@@ -499,26 +508,32 @@ fn build_failure(error: BuildError) -> Response {
     }
 }
 
-/// Builds a list entry, polling `status()` if there is a live connector.
+/// Builds a list entry from the last completed status poll.
 ///
 /// `live` is `None` for a row that failed to load at startup. Such a row still
 /// appears, with a synthetic metadata block and a `statusError` explaining why
 /// there is nothing behind it — otherwise a broken connector would be invisible
 /// and therefore undeletable.
-async fn entry_for(row: &InstanceRow, live: Option<&dyn Connector>) -> ConnectorInstanceResponse {
+fn entry_for(
+    row: &InstanceRow,
+    live: Option<&dyn Connector>,
+    snapshot: Option<&ConnectorStatusSnapshot>,
+) -> ConnectorInstanceResponse {
     let (metadata, status, status_error, display_fields) = match live {
-        Some(connector) => {
-            let (status, status_error) = match connector.status().await {
-                Ok(status) => (Some(status), None),
-                Err(error) => (None, Some(error)),
-            };
-            (
-                connector.metadata(),
-                status,
-                status_error,
-                connector.display_fields(),
-            )
-        }
+        Some(connector) => (
+            connector.metadata(),
+            snapshot.and_then(|value| value.status.clone()),
+            snapshot
+                .and_then(|value| value.status_error.clone())
+                .or_else(|| {
+                    snapshot.is_none().then(|| {
+                        ConnectorError::Internal(
+                            "this instance has not completed its first status poll".to_owned(),
+                        )
+                    })
+                }),
+            connector.display_fields(),
+        ),
         None => (
             unloaded_metadata(row),
             None,
@@ -544,8 +559,12 @@ async fn entry_for(row: &InstanceRow, live: Option<&dyn Connector>) -> Connector
 }
 
 /// Builds the full detail response for one row.
-async fn detail_for(row: &InstanceRow, live: Option<&dyn Connector>) -> Response {
-    let instance = entry_for(row, live).await;
+async fn detail_for(
+    row: &InstanceRow,
+    live: Option<&dyn Connector>,
+    snapshot: Option<&ConnectorStatusSnapshot>,
+) -> Response {
+    let instance = entry_for(row, live, snapshot);
 
     let (actions, data_points, default_layout) = match live {
         Some(connector) => (

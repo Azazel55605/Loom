@@ -15,14 +15,40 @@
 
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::time::Duration;
 
-use loom_core::connector::{Connector, ConnectorError};
+use loom_core::connector::{Connector, ConnectorError, ConnectorStatus};
+use serde::Serialize;
 use serde_json::Value;
 use sqlx::SqlitePool;
-use tokio::sync::RwLock;
+use tokio::sync::{broadcast, RwLock};
+use tokio::task::{JoinHandle, JoinSet};
+use tokio::time::{self, MissedTickBehavior};
 use uuid::Uuid;
 
 use super::registry::{ConnectorTypeRegistration, ConnectorTypeRegistry};
+
+/// How often every live connector is asked for a fresh status.
+///
+/// Named and public so tests and operator-facing documentation can refer to
+/// the same value rather than duplicating a magic number.
+pub const CONNECTOR_POLL_INTERVAL: Duration = Duration::from_secs(5);
+
+/// One cached poll result. Exactly one of `status` and `status_error` is set.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ConnectorStatusSnapshot {
+    pub status: Option<ConnectorStatus>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub status_error: Option<ConnectorError>,
+}
+
+/// A status cache change, broadcast to interested WebSocket connections.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ConnectorStatusUpdate {
+    pub instance_id: Uuid,
+    pub snapshot: ConnectorStatusSnapshot,
+}
 
 /// Why an instance could not be constructed from a type id and a configuration.
 #[derive(Debug)]
@@ -48,14 +74,19 @@ pub struct ConnectorRuntime {
     /// `Arc` out and releasing the guard is what keeps one slow connector from
     /// blocking every other request.
     instances: Arc<RwLock<HashMap<Uuid, Arc<dyn Connector>>>>,
+    statuses: Arc<RwLock<HashMap<Uuid, ConnectorStatusSnapshot>>>,
+    status_updates: broadcast::Sender<ConnectorStatusUpdate>,
 }
 
 impl ConnectorRuntime {
     /// An empty runtime over `types`.
     pub fn new(types: ConnectorTypeRegistry) -> Self {
+        let (status_updates, _) = broadcast::channel(256);
         Self {
             types,
             instances: Arc::new(RwLock::new(HashMap::new())),
+            statuses: Arc::new(RwLock::new(HashMap::new())),
+            status_updates,
         }
     }
 
@@ -148,14 +179,18 @@ impl ConnectorRuntime {
             .map_err(BuildError::Rejected)
     }
 
-    /// Inserts or replaces the live connector for `id`.
+    /// Inserts or replaces the live connector for `id` and immediately seeds
+    /// its cache. This keeps create/update responses useful without making
+    /// request handlers call `status()` themselves.
     pub async fn insert(&self, id: Uuid, connector: Arc<dyn Connector>) {
         self.instances.write().await.insert(id, connector);
+        self.poll_instance(id).await;
     }
 
     /// Drops the live connector for `id`.
     pub async fn remove(&self, id: &Uuid) {
         self.instances.write().await.remove(id);
+        self.statuses.write().await.remove(id);
     }
 
     /// The live connector for `id`, if there is one.
@@ -172,6 +207,116 @@ impl ConnectorRuntime {
     /// database, which is the ordering authority.
     pub async fn len(&self) -> usize {
         self.instances.read().await.len()
+    }
+
+    /// The last completed poll for `id`, if one has completed.
+    pub async fn cached_status(&self, id: &Uuid) -> Option<ConnectorStatusSnapshot> {
+        self.statuses.read().await.get(id).cloned()
+    }
+
+    /// Subscribe to status changes after the current cache snapshot.
+    pub fn subscribe_statuses(&self) -> broadcast::Receiver<ConnectorStatusUpdate> {
+        self.status_updates.subscribe()
+    }
+
+    /// Poll every live connector once.
+    ///
+    /// Connector calls happen without holding the instance map lock. A failed
+    /// connector becomes an error snapshot and cannot prevent the remaining
+    /// connectors from being polled.
+    pub async fn poll_once(&self) {
+        let instances: Vec<(Uuid, Arc<dyn Connector>)> = self
+            .instances
+            .read()
+            .await
+            .iter()
+            .map(|(id, connector)| (*id, Arc::clone(connector)))
+            .collect();
+
+        let mut polls = JoinSet::new();
+        for (id, connector) in instances {
+            let runtime = self.clone();
+            polls.spawn(async move {
+                runtime.poll_connector(id, connector).await;
+            });
+        }
+
+        while let Some(result) = polls.join_next().await {
+            if let Err(error) = result {
+                tracing::error!(%error, "connector status poll task failed");
+            }
+        }
+    }
+
+    /// Start the process-lifetime polling task.
+    ///
+    /// The first tick is delayed because startup performs an explicit initial
+    /// poll before accepting traffic. Dropping the handle detaches the task;
+    /// the task owns only cheap clones of the runtime's `Arc`s.
+    pub fn spawn_poller(&self) -> JoinHandle<()> {
+        let runtime = self.clone();
+        tokio::spawn(async move {
+            let start = time::Instant::now() + CONNECTOR_POLL_INTERVAL;
+            let mut interval = time::interval_at(start, CONNECTOR_POLL_INTERVAL);
+            interval.set_missed_tick_behavior(MissedTickBehavior::Skip);
+
+            loop {
+                interval.tick().await;
+                runtime.poll_once().await;
+            }
+        })
+    }
+
+    async fn poll_instance(&self, id: Uuid) {
+        if let Some(connector) = self.get(&id).await {
+            self.poll_connector(id, connector).await;
+        }
+    }
+
+    async fn poll_connector(&self, id: Uuid, connector: Arc<dyn Connector>) {
+        let snapshot = match connector.status().await {
+            Ok(status) => ConnectorStatusSnapshot {
+                status: Some(status),
+                status_error: None,
+            },
+            Err(error) => {
+                tracing::warn!(instance = %id, %error, "connector status poll failed");
+                ConnectorStatusSnapshot {
+                    status: None,
+                    status_error: Some(error),
+                }
+            }
+        };
+
+        // An update can replace a connector while its old status call is in
+        // flight. Never let that late result overwrite the replacement's
+        // freshly seeded snapshot.
+        let is_current = self
+            .instances
+            .read()
+            .await
+            .get(&id)
+            .is_some_and(|current| Arc::ptr_eq(current, &connector));
+        if !is_current {
+            return;
+        }
+
+        let changed = {
+            let mut statuses = self.statuses.write().await;
+            if statuses.get(&id) == Some(&snapshot) {
+                false
+            } else {
+                statuses.insert(id, snapshot.clone());
+                true
+            }
+        };
+
+        if changed {
+            let _ = self.status_updates.send(ConnectorStatusUpdate {
+                instance_id: id,
+                snapshot,
+            });
+        }
     }
 }
 
@@ -210,6 +355,7 @@ mod tests {
             .insert(id, runtime.build(DEBUG_TYPE_ID, json!({})).unwrap())
             .await;
         assert!(runtime.get(&id).await.is_some());
+        assert!(runtime.cached_status(&id).await.is_some());
         assert_eq!(runtime.len().await, 1);
 
         // Replacing must not leave the old connector reachable.
@@ -232,6 +378,97 @@ mod tests {
 
         runtime.remove(&id).await;
         assert!(runtime.get(&id).await.is_none());
+        assert!(runtime.cached_status(&id).await.is_none());
         assert_eq!(runtime.len().await, 0);
+    }
+
+    #[tokio::test]
+    async fn polling_updates_the_cache_and_broadcasts_changes() {
+        let runtime = ConnectorRuntime::new(builtin_registry());
+        let id = Uuid::new_v4();
+        let mut updates = runtime.subscribe_statuses();
+        let connector = runtime
+            .build(DEBUG_TYPE_ID, json!({ "label": "before" }))
+            .unwrap();
+
+        runtime.insert(id, Arc::clone(&connector)).await;
+        let initial = updates.recv().await.expect("insert poll must broadcast");
+        assert_eq!(initial.instance_id, id);
+        assert!(initial.snapshot.status.is_some());
+
+        connector
+            .execute_action("set-label", json!({ "label": "after" }))
+            .await
+            .expect("debug action must succeed");
+        runtime.poll_once().await;
+
+        let changed = updates.recv().await.expect("changed poll must broadcast");
+        assert_eq!(changed.instance_id, id);
+        let details = &changed
+            .snapshot
+            .status
+            .as_ref()
+            .expect("successful status")
+            .details;
+        assert_eq!(details.get("label"), Some(&json!("after")));
+        assert_eq!(runtime.cached_status(&id).await, Some(changed.snapshot));
+    }
+
+    #[tokio::test]
+    async fn a_poll_failure_is_cached_instead_of_stopping_the_runtime() {
+        let runtime = ConnectorRuntime::new(builtin_registry());
+        let id = Uuid::new_v4();
+        let connector = runtime
+            .build(DEBUG_TYPE_ID, json!({ "failMode": "unreachable" }))
+            .unwrap();
+
+        runtime.insert(id, connector).await;
+
+        let snapshot = runtime.cached_status(&id).await.expect("poll result");
+        assert!(snapshot.status.is_none());
+        assert!(matches!(
+            snapshot.status_error,
+            Some(ConnectorError::Unreachable { .. })
+        ));
+    }
+
+    #[tokio::test]
+    async fn a_late_poll_from_a_replaced_connector_cannot_overwrite_the_new_cache() {
+        let runtime = ConnectorRuntime::new(builtin_registry());
+        let id = Uuid::new_v4();
+        runtime
+            .insert(
+                id,
+                runtime
+                    .build(
+                        DEBUG_TYPE_ID,
+                        json!({ "simulatedLatencyMs": 50, "label": "old" }),
+                    )
+                    .unwrap(),
+            )
+            .await;
+
+        let polling_runtime = runtime.clone();
+        let old_poll = tokio::spawn(async move { polling_runtime.poll_once().await });
+        tokio::time::sleep(Duration::from_millis(5)).await;
+        runtime
+            .insert(
+                id,
+                runtime
+                    .build(DEBUG_TYPE_ID, json!({ "label": "new" }))
+                    .unwrap(),
+            )
+            .await;
+        old_poll.await.expect("poll task must finish");
+
+        let snapshot = runtime.cached_status(&id).await.expect("new snapshot");
+        assert_eq!(
+            snapshot
+                .status
+                .expect("successful status")
+                .details
+                .get("label"),
+            Some(&json!("new"))
+        );
     }
 }

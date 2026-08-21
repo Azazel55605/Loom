@@ -19,8 +19,13 @@ import { Card, CardContent, CardHeader } from "@loom/ui-kit/components/ui/card";
 import { ConnectorCard } from "@loom/ui-kit/components/ConnectorCard";
 import { ConnectorInstanceDialog } from "@loom/ui-kit/components/ConnectorInstanceDialog";
 import { Skeleton } from "@loom/ui-kit/components/ui/skeleton";
-import { ApiError, SessionExpiredError, type ConnectorInstanceSummary } from "@loom/ui-kit/lib/api";
-import { useApiClient } from "@loom/ui-kit/lib/api-context";
+import {
+  ApiError,
+  SessionExpiredError,
+  type ConnectorInstanceDetail,
+  type ConnectorInstanceSummary,
+} from "@loom/ui-kit/lib/api";
+import { useApiClient, useConnectorStatusSocket } from "@loom/ui-kit/lib/api-context";
 import { useAuth } from "@loom/ui-kit/lib/auth-context";
 import { describeAdminFailure } from "@loom/ui-kit/lib/admin-error";
 import { describeConnectorError } from "@loom/ui-kit/lib/connector-error";
@@ -43,14 +48,13 @@ import { hasPermission, PERMISSION_KEYS } from "@loom/ui-kit/lib/permissions";
  * The component is platform-neutral; the host app supplies its shell.
  */
 
-const REFETCH_INTERVAL_MS = 10_000;
-
 export function ConnectorsView({
   renderShell,
 }: {
   renderShell: (content: React.ReactNode) => React.ReactNode;
 }) {
   const api = useApiClient();
+  const connectorSocket = useConnectorStatusSocket();
   const queryClient = useQueryClient();
   const { isAuthenticated, signOut, user } = useAuth();
 
@@ -63,12 +67,47 @@ export function ConnectorsView({
     queryKey: ["connector-instances"],
     queryFn: ({ signal }) => api.getConnectorInstances(signal),
     enabled: isAuthenticated,
-    refetchInterval: REFETCH_INTERVAL_MS,
     retry: (failureCount, error) =>
       !(error instanceof ApiError && error.isUnauthorized) &&
       !(error instanceof SessionExpiredError) &&
       failureCount < 2,
   });
+
+  const instanceIds = React.useMemo(
+    () => instances.data?.map((instance) => instance.id) ?? [],
+    [instances.data],
+  );
+
+  React.useEffect(() => {
+    if (!isAuthenticated || instanceIds.length === 0) return;
+
+    return connectorSocket.subscribe(instanceIds, (update) => {
+      queryClient.setQueryData<ConnectorInstanceSummary[]>(
+        ["connector-instances"],
+        (current) =>
+          current?.map((instance) =>
+            instance.id === update.instanceId
+              ? {
+                  ...instance,
+                  status: update.status,
+                  statusError: update.statusError,
+                }
+              : instance,
+          ),
+      );
+      queryClient.setQueryData<ConnectorInstanceDetail>(
+        ["connector-instance", update.instanceId],
+        (current) =>
+          current === undefined
+            ? undefined
+            : {
+                ...current,
+                status: update.status,
+                statusError: update.statusError,
+              },
+      );
+    });
+  }, [connectorSocket, instanceIds, isAuthenticated, queryClient]);
 
   const [createOpen, setCreateOpen] = React.useState(false);
   const [editing, setEditing] = React.useState<ConnectorInstanceSummary | null>(null);
@@ -117,7 +156,7 @@ export function ConnectorsView({
         <div>
           <h1 className="text-2xl font-semibold tracking-tight">Connectors</h1>
           <p className="text-sm text-muted-foreground">
-            Services Loom is managing, refreshed every {REFETCH_INTERVAL_MS / 1000} seconds.
+            Services Loom is managing, with live status updates.
           </p>
         </div>
 
@@ -151,7 +190,6 @@ export function ConnectorsView({
             <ConnectorCard
               key={instance.id}
               instance={instance}
-              onActionComplete={() => void instances.refetch()}
               onEdit={canManage ? setEditing : undefined}
               onDelete={canManage ? setDeleting : undefined}
             />

@@ -437,7 +437,7 @@ and where.
 
 ### Permission enforcement
 
-Every route except `/health`, `/setup/status`, `/setup`, `/auth/login`,
+Every HTTP route except `/health`, `/setup/status`, `/setup`, `/auth/login`,
 `/auth/refresh`, `/auth/logout`, and the `/avatars/*` static files requires a
 valid access token.
 
@@ -580,11 +580,76 @@ type is an ordinary `POST`, with the form generated from the type's published
 UI change in three clients. See
 [ADR 0011](./adr/0011-connector-instance-registry.md).
 
-**Status is read live on every request.** `GET /connector-instances` calls
-`status()` once per instance, in sequence, so the list is as slow as the
-connectors in it. Nothing is cached and nothing is pushed. A polling task that
-caches readings and pushes updates over a WebSocket is a planned follow-up; it
-is not implemented, and no endpoint here should be read as if it were.
+**Status is polled and cached.** The backend performs an initial poll before it
+accepts traffic, then currently polls every live connector every five seconds
+(an implementation detail that may change). HTTP list and detail reads return
+the latest completed snapshot immediately; they never wait for an upstream
+service. A connector failure becomes that instance's `statusError` and does not
+stop the poller or hide the other instances.
+
+### `GET /ws` — connector status WebSocket
+
+The backend path is `/ws`. In the browser's normal same-origin deployment the
+proxy exposes it as `/api/ws`, matching the HTTP API prefix it strips before
+forwarding.
+
+Browsers cannot attach an `Authorization` header to a WebSocket handshake, so
+the client supplies the **short-lived access token only** as a percent-encoded
+query parameter:
+
+```text
+wss://loom.example.com/api/ws?token=<access-token>
+```
+
+Never send a refresh token. TLS (`wss`) protects the query in transit, but
+operators should still avoid logging WebSocket query strings because request
+targets can otherwise copy the access token into proxy logs. The trade-off is
+recorded in [ADR 0012](./adr/0012-connector-status-push.md).
+
+The token must be valid and carry a **global** `connectors.view` grant. A
+missing, invalid, or expired token rejects the handshake with 401; a valid
+caller without that grant receives 403.
+
+After connecting, the client subscribes and unsubscribes by instance id. Both
+operations are idempotent set operations:
+
+```json
+{ "type": "subscribe", "instanceIds": ["5aa2574d-9ba0-4af8-b7ae-74671fb48777"] }
+```
+
+```json
+{ "type": "unsubscribe", "instanceIds": ["5aa2574d-9ba0-4af8-b7ae-74671fb48777"] }
+```
+
+When a subscribed instance's cached snapshot changes, the server pushes one of
+these shapes:
+
+```json
+{
+  "type": "status",
+  "instanceId": "5aa2574d-9ba0-4af8-b7ae-74671fb48777",
+  "status": {
+    "health": "healthy",
+    "details": { "version": "1.2.3" },
+    "lastChecked": "2026-08-21T12:00:00Z"
+  }
+}
+```
+
+```json
+{
+  "type": "status",
+  "instanceId": "5aa2574d-9ba0-4af8-b7ae-74671fb48777",
+  "status": null,
+  "statusError": { "unreachable": { "reason": "connection timed out" } }
+}
+```
+
+`statusError` is omitted after a successful poll. Updates for ids not currently
+subscribed on that connection are not sent. Disconnecting drops the connection's
+subscription set; reconnecting clients must subscribe again. The shared client
+does that automatically and reconnects with bounded exponential backoff,
+including after an access-token refresh.
 
 ### `GET /connector-types`
 
@@ -692,7 +757,7 @@ Requires a **global** `connectors.view` grant.
 | `connectorType` | string | Which registered type it is. | Always present. |
 | `createdAt` | string | RFC 3339 timestamp, in the stored spelling — numeric offset, sub-second digits. See [Conventions](#conventions). | Always present. |
 | `metadata` | object | [`ConnectorMetadata`](#connectormetadata) from the live connector. | Always present. |
-| `status` | object | [`ConnectorStatus`](#connectorstatus) from a successful live `status()` call. | **`null`** when the check itself failed. |
+| `status` | object | [`ConnectorStatus`](#connectorstatus) from the latest successful poll. | **`null`** when the latest check itself failed. |
 | `statusError` | object | The [`ConnectorError`](#connectorerror) that made `status` null. | **Omitted** (not null) on the healthy path. |
 | `displayFields` | array | [`DisplayField`](#displayfield) values the connector agreed may be shown. | Always present; may be empty. |
 

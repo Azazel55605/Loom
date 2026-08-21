@@ -1258,6 +1258,10 @@ export function createApiClient(options: {
   return {
     tokenStore: runtime.tokenStore,
     initialize: () => initializeRuntime(runtime),
+    getBaseUrl: async () => {
+      await initializeRuntime(runtime);
+      return runtime.baseUrl ?? "";
+    },
     refreshSession: () => refreshSession(runtime),
     getHealth: (signal?: AbortSignal) => getHealth(runtime, signal),
     getSetupStatus: (signal?: AbortSignal) => getSetupStatus(runtime, signal),

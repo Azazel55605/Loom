@@ -9,6 +9,7 @@ import {
   type PermissionGrant,
 } from "@loom/ui-kit/lib/api";
 import { ApiClientProvider } from "@loom/ui-kit/lib/api-context";
+import { ConnectorStatusSocket } from "@loom/ui-kit/lib/connector-socket";
 import type { StoredTokens, TokenStorageAdapter } from "@loom/ui-kit/lib/token-store";
 
 const PROACTIVE_REFRESH_BUFFER_MS = 60_000;
@@ -48,6 +49,7 @@ export function AuthProvider({
   const [client] = React.useState(() =>
     createApiClient({ baseUrlProvider, httpTransport, tokenStorage }),
   );
+  const [connectorSocket] = React.useState(() => new ConnectorStatusSocket(client));
   const [runtimeReady, setRuntimeReady] = React.useState(false);
   const session = React.useSyncExternalStore<StoredTokens | null>(
     client.tokenStore.subscribe,
@@ -66,6 +68,8 @@ export function AuthProvider({
       cancelled = true;
     };
   }, [client]);
+
+  React.useEffect(() => () => connectorSocket.dispose(), [connectorSocket]);
 
   React.useEffect(() => {
     if (!runtimeReady) return;
@@ -152,7 +156,7 @@ export function AuthProvider({
   );
 
   return (
-    <ApiClientProvider client={client}>
+    <ApiClientProvider client={client} connectorSocket={connectorSocket}>
       <AuthContext.Provider value={value}>{children}</AuthContext.Provider>
     </ApiClientProvider>
   );

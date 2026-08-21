@@ -102,14 +102,11 @@ function takesParameters(action: ConnectorAction): boolean {
 
 export function ConnectorCard({
   instance,
-  onActionComplete,
   onEdit,
   onDelete,
 }: {
   /** The list-summary object. Rendered immediately; detail is fetched here. */
   instance: ConnectorInstanceSummary;
-  /** Called after any action resolves, so the list can refetch its status. */
-  onActionComplete?: () => void;
   /** Supplied only when the viewer may manage instances; the control is not
    *  rendered otherwise. */
   onEdit?: (instance: ConnectorInstanceSummary) => void;
@@ -166,10 +163,9 @@ export function ConnectorCard({
     },
     onSettled: () => {
       setPendingActionId(null);
-      onActionComplete?.();
-      // The debug connector's actions change what its next status reports, and
-      // a real one's will too. Detail carries the action list, which can also
-      // shift with state, so it is refetched rather than assumed stable.
+      // Detail carries the action list, which can shift with state, so it is
+      // still refetched. Status itself arrives from the backend poller's
+      // WebSocket update rather than starting a second ad-hoc list request.
       void detail.refetch();
     },
   });
