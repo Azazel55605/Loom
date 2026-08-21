@@ -518,8 +518,8 @@ which is a way to enumerate what is configured.
 
 ### Safeguards
 
-Two rules protect an instance from being administered into a state nobody can
-administer it out of. Both return **409 Conflict** and change nothing.
+Four rules protect an instance from irreversible administrative mistakes. They
+return **409 Conflict** and change nothing.
 
 **The last active administrator cannot be removed.** Deactivating, deleting, or
 removing from the protected group the only remaining active member of it is
@@ -538,9 +538,14 @@ against the literal string `Administrators` would stop protecting the group the
 moment someone renamed it. The flag guards deletion only: the group may still be
 renamed and re-granted, which are legitimate administrative acts.
 
-Neither user safeguard is a security control. An administrator can still grant
-someone else the Administrators group and have them do it. They guard against
-mistakes, which is the failure mode that actually happens.
+**A user who owns dashboards cannot be deleted.** Dashboard ownership is not
+silently cascaded through account deletion. The owner must delete their
+dashboards first, or the account can be deactivated while its content is
+retained.
+
+These safeguards are not substitutes for authorization. They guard against
+irreversible mistakes after a caller has already passed the relevant permission
+check.
 
 ### Access token claims
 
@@ -920,9 +925,9 @@ connector.
 | 403 | The caller lacks a global `connectors.manage` grant. |
 | 404 | No instance with that id. |
 
-Nothing cascades yet. Once dashboards exist, widget placements will reference an
-instance id and deleting one will have to remove or orphan them; that table does
-not exist, so there is nothing to cascade to.
+Dashboard placements reference connector instances with `ON DELETE CASCADE`, so
+deleting an instance also removes every placement that embeds it. Dashboards
+themselves remain; only the now-invalid placements disappear.
 
 ### `POST /connector-instances/{id}/actions/{actionId}`
 
@@ -973,6 +978,265 @@ to enumerate what is configured.
 | 404 | `ConnectorError::InvalidAction` — the connector exists, the action id does not. |
 | 502 | `ConnectorError::Unreachable` or `ConnectorError::AuthFailed`. |
 | 500 | `ConnectorError::Internal`. |
+
+## Dashboards
+
+Dashboards use a dedicated per-object ACL: **owner**, **editor**, and
+**viewer**. This is intentionally separate from the group/permission RBAC
+described above. A dashboard share is an end-user decision about one dashboard;
+`connectors.*`, `users.*`, and `groups.*` grants are administrator-managed
+system capabilities.
+
+The two systems are orthogonal:
+
+- Sharing a dashboard does not grant `connectors.view` or
+  `connectors.control`.
+- A connector grant does not reveal or make editable a dashboard that was not
+  shared with the caller.
+- A placement may display the cached connector summary embedded in the shared
+  dashboard. Any action invoked from it still calls the existing connector
+  action endpoint, which checks the viewer's own `connectors.control` grant.
+
+Every dashboard endpoint requires a valid access token, but none requires an
+RBAC permission key. A dashboard-role failure and an RBAC permission failure
+both use HTTP 403 because both mean "authenticated, but not authorized"; their
+authorization sources and error messages are different. A missing dashboard is
+also returned as 403 when role resolution finds no access, so callers cannot
+use dashboard detail paths to enumerate private dashboard ids.
+
+Role ordering is `owner > editor > viewer`:
+
+| Role | View | Pin for self | Add/edit/remove placements | Rename/delete/share |
+| --- | --- | --- | --- | --- |
+| owner | yes | yes | yes | yes |
+| editor | yes | yes | yes | no |
+| viewer | yes | yes | no | no |
+
+### `GET /dashboards`
+
+Lists dashboards the caller owns, receives directly, or receives through any
+group membership. Pinned dashboards sort first, then by name.
+
+```json
+[
+  {
+    "id": "be676fe1-a863-48d0-b8e9-86d83a671d6a",
+    "name": "Operations",
+    "role": "editor",
+    "pinned": true
+  }
+]
+```
+
+An empty accessible set is `200 []`.
+
+### `POST /dashboards`
+
+Creates a dashboard owned by the caller.
+
+```json
+{ "name": "Operations" }
+```
+
+**Response 201** is the dashboard summary with `role: "owner"` and
+`pinned: false`.
+
+| Status | Meaning |
+| --- | --- |
+| 201 | Dashboard created. |
+| 400 | `name` is empty or whitespace. |
+
+### `GET /dashboards/{id}`
+
+Requires Viewer or better. Returns the resolved owner, caller's effective role,
+and every placement:
+
+```json
+{
+  "id": "be676fe1-a863-48d0-b8e9-86d83a671d6a",
+  "name": "Operations",
+  "owner": {
+    "id": "48ae87dc-fc35-42db-a3de-467677ff8061",
+    "username": "owner"
+  },
+  "role": "viewer",
+  "createdAt": "2026-08-21T18:00:00+00:00",
+  "placements": [
+    {
+      "id": "cab30488-a7b8-4746-95b3-4a5fbfbb0e94",
+      "connector": {
+        "id": "5aa2574d-9ba0-4af8-b7ae-74671fb48777",
+        "name": "Media server",
+        "connectorType": "debug",
+        "createdAt": "2026-08-21T17:00:00+00:00",
+        "metadata": {
+          "id": "debug",
+          "name": "Debug fixture",
+          "icon": null,
+          "version": "1.0.0",
+          "minSize": [2, 2]
+        },
+        "status": {
+          "health": "healthy",
+          "details": {},
+          "lastChecked": "2026-08-21T18:00:05Z"
+        },
+        "displayFields": []
+      },
+      "positionX": 0,
+      "positionY": 0,
+      "width": 2,
+      "height": 2,
+      "widgetBindings": [],
+      "createdAt": "2026-08-21T18:00:00+00:00"
+    }
+  ]
+}
+```
+
+`connector` is exactly the cached summary builder used by
+`GET /connector-instances`; failed and unloaded connectors therefore keep the
+same `status: null` plus `statusError` behavior.
+
+| Status | Meaning |
+| --- | --- |
+| 200 | Dashboard returned. |
+| 403 | Caller has no dashboard role. |
+
+### `PATCH /dashboards/{id}`
+
+Owner only. Editors deliberately cannot rename.
+
+```json
+{ "name": "Renamed operations" }
+```
+
+**Response 200** is the full dashboard detail.
+
+| Status | Meaning |
+| --- | --- |
+| 200 | Renamed. |
+| 400 | `name` is empty or whitespace. |
+| 403 | Caller is not the owner. |
+
+### `DELETE /dashboards/{id}`
+
+Owner only. Returns 204 and cascade-deletes the dashboard's shares, pins, and
+placements.
+
+| Status | Meaning |
+| --- | --- |
+| 204 | Dashboard and dependent rows deleted. |
+| 403 | Caller is not the owner. |
+
+### `POST /dashboards/{id}/pin`
+
+### `DELETE /dashboards/{id}/pin`
+
+Viewer or better. These idempotently add or remove only the caller's pin and
+return 204. Pins never affect another user's list. A caller without dashboard
+access receives 403.
+
+### `GET /dashboards/{id}/shares`
+
+Owner only. The display name is resolved at read time from `users.username` or
+`groups.name`:
+
+```json
+[
+  {
+    "id": "a0764c1c-72de-435b-b099-335fc7189d88",
+    "targetType": "group",
+    "targetId": "b4817a8c-e18c-42c4-b5e8-e9f1343514b8",
+    "role": "view",
+    "resolvedName": "Household",
+    "createdAt": "2026-08-21T18:00:00+00:00"
+  }
+]
+```
+
+### `POST /dashboards/{id}/shares`
+
+Owner only.
+
+```json
+{
+  "targetType": "user",
+  "targetId": "48ae87dc-fc35-42db-a3de-467677ff8061",
+  "role": "edit"
+}
+```
+
+`targetType` is `user` or `group`; `role` is `view` or `edit`. The target must
+exist in the corresponding table before the share is inserted.
+
+| Status | Meaning |
+| --- | --- |
+| 201 | Share created; response is one share object. |
+| 400 | Invalid type/role or target does not exist. |
+| 403 | Caller is not the dashboard owner. |
+| 409 | That dashboard already has a share for this target. |
+
+When direct and group shares overlap, the highest applicable role wins.
+Ownership always wins over every share.
+
+### `DELETE /dashboards/{id}/shares/{shareId}`
+
+Owner only. Returns 204 after revocation, which takes effect immediately rather
+than waiting for access-token refresh. Returns 404 when that share id does not
+belong to the dashboard, and 403 when the caller is not the owner.
+
+### `POST /dashboards/{id}/placements`
+
+Editor or Owner.
+
+```json
+{
+  "connectorInstanceId": "5aa2574d-9ba0-4af8-b7ae-74671fb48777",
+  "positionX": 0,
+  "positionY": 0,
+  "width": 3,
+  "height": 2,
+  "widgetBindings": [
+    { "dataPointId": "load", "widgetType": "gauge", "config": {} }
+  ]
+}
+```
+
+`widgetBindings` may be omitted, in which case the connector's
+`defaultLayout.bindings` are stored. Width and height must each meet the live
+connector's `metadata.minSize`. Every supplied binding's `dataPointId` must be
+declared by that connector's `dataPoints`; a 400 lists all invalid ids.
+
+The connector row must exist and its live connector must be available so the
+metadata contract can be validated. No connector ownership or
+`connectors.control` grant is inferred or created.
+
+| Status | Meaning |
+| --- | --- |
+| 201 | Placement created; response is the placement shape from dashboard detail. |
+| 400 | Connector missing/unavailable, size below minimum, or invalid binding. |
+| 403 | Caller is not an Editor or Owner. |
+
+### `PATCH /dashboards/{id}/placements/{placementId}`
+
+Editor or Owner. Any omitted field remains unchanged:
+
+```json
+{ "positionX": 2, "positionY": 1, "width": 4, "height": 3 }
+```
+
+`positionX`, `positionY`, `width`, `height`, and `widgetBindings` are mutable;
+the connector instance is fixed. Size and binding validation is identical to
+create. Returns the updated placement on 200, 403 for insufficient role, 404
+when the placement does not belong to this dashboard, and 400 for validation
+failure.
+
+### `DELETE /dashboards/{id}/placements/{placementId}`
+
+Editor or Owner. Returns 204, 403 for insufficient role, or 404 when the
+placement does not belong to this dashboard.
+
 ## Account
 
 Self-service routes: a signed-in user managing their **own** account. Every one
@@ -1248,21 +1512,18 @@ on what it believed the previous state to be.
 
 Requires `users.manage`. **Response 204**, no body.
 
-A hard delete: the row goes, and `ON DELETE CASCADE` takes the user's group
-memberships and refresh tokens with it — which also ends their sessions, since a
-refresh token that no longer exists cannot be redeemed.
-
-Hard rather than soft because nothing yet references a user row historically —
-no audit log, no "created by", no ownership. **That should be revisited the
-moment one exists**, at which point deleting a user either orphans history or
-silently rewrites it, and deactivation becomes the right default. Deactivation
-is already available through `PATCH`.
+A hard delete when the user owns no dashboards: `ON DELETE CASCADE` takes group
+memberships and refresh tokens with it, ending their sessions. Dashboard
+ownership is a restricting foreign key. An owner must delete their dashboards
+first; Loom does not silently erase user-authored dashboards as a side effect of
+account administration. Deactivation remains available when content must be
+retained.
 
 | Status | Meaning |
 | --- | --- |
 | 204 | Deleted. |
 | 404 | No such user. |
-| 409 | [A safeguard refused it](#safeguards). |
+| 409 | [A safeguard refused it](#safeguards): this is the caller, it would remove the last administrator, or the user still owns dashboards. |
 
 ### `GET /groups`
 
@@ -1671,12 +1932,6 @@ one is the important one.
   out everywhere".
 - **Expired refresh-token rows are never cleaned up.** They stay in the table
   after expiry. Harmless, but the table only grows.
-- **Connector status is fetched live on every request, with no caching and no
-  push.** Listing *n* instances performs *n* sequential `status()` calls, so a
-  slow connector makes the whole list slow, and a client learns about a state
-  change only when it asks again. A polling task that caches readings and
-  pushes updates over a WebSocket is a planned follow-up; it is **not
-  implemented**.
 - **One connector type is registered, and it is the debug fixture.** It contacts
   nothing; its actions simulate their effects and echo their parameters, and its
   data points move on a deterministic oscillation so charts have something to

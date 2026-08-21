@@ -309,16 +309,12 @@ pub async fn update_user(
 
 /// `DELETE /users/{id}`
 ///
-/// A hard delete: the row goes, and `ON DELETE CASCADE` takes the user's group
-/// memberships and refresh tokens with it — which also ends their sessions,
-/// since a refresh token that no longer exists cannot be redeemed.
-///
-/// Hard rather than soft because nothing yet references a user row historically:
-/// there is no audit log, no "created by" on any record, no ownership anywhere.
-/// **Revisit this the moment one exists** — at that point deleting a user
-/// either orphans history or silently rewrites it, and deactivation becomes the
-/// right default with deletion reserved for genuine erasure requests.
-/// Deactivation is already available through `PATCH`.
+/// A hard delete when the account owns no dashboards: memberships and refresh
+/// tokens cascade, ending its sessions. Dashboard ownership is deliberately a
+/// restricting foreign key instead. Silently deleting user-authored dashboards
+/// as a side effect of account administration would be data loss, so an owner
+/// must delete their dashboards first; deactivation remains available when the
+/// content must be retained.
 pub async fn delete_user(
     caller: RequirePermission<UsersManage>,
     State(state): State<AppState>,
@@ -329,6 +325,23 @@ pub async fn delete_user(
             StatusCode::CONFLICT,
             "you cannot delete your own account; ask another administrator".to_owned(),
         );
+    }
+
+    let owns_dashboards = sqlx::query_scalar::<_, bool>(
+        "SELECT EXISTS(SELECT 1 FROM dashboards WHERE owner_user_id = ?)",
+    )
+    .bind(&id)
+    .fetch_one(&state.pool)
+    .await;
+    match owns_dashboards {
+        Ok(true) => {
+            return ErrorBody::message(
+                StatusCode::CONFLICT,
+                "this user owns dashboards; delete those dashboards before deleting the account",
+            )
+        }
+        Ok(false) => {}
+        Err(error) => return internal_error("checking dashboard ownership", error),
     }
 
     let mut tx = match state.pool.begin().await {

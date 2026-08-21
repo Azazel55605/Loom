@@ -252,6 +252,69 @@ export type ConnectorInstanceDetail = ConnectorInstanceSummary & {
   defaultLayout: WidgetLayout;
 };
 
+/** The caller's effective role for one dashboard. */
+export type DashboardRole = "owner" | "editor" | "viewer";
+
+/** One dashboard visible in `GET /dashboards`. */
+export type DashboardSummary = {
+  id: string;
+  name: string;
+  role: DashboardRole;
+  /** Whether this dashboard is pinned for the current user. */
+  pinned: boolean;
+};
+
+/** The account that owns a dashboard. */
+export type DashboardOwner = {
+  id: string;
+  username: string;
+};
+
+/** One connector placement returned as part of dashboard detail. */
+export type DashboardPlacement = {
+  id: string;
+  connector: ConnectorInstanceSummary;
+  positionX: number;
+  positionY: number;
+  width: number;
+  height: number;
+  widgetBindings: WidgetBinding[];
+  /** RFC 3339. */
+  createdAt: string;
+};
+
+/** `GET /dashboards/{id}`. */
+export type DashboardDetail = {
+  id: string;
+  name: string;
+  owner: DashboardOwner;
+  role: DashboardRole;
+  /** RFC 3339. */
+  createdAt: string;
+  placements: DashboardPlacement[];
+};
+
+export type DashboardShareTargetType = "user" | "group";
+export type DashboardShareRole = "view" | "edit";
+
+/** One owner-managed dashboard share. */
+export type DashboardShare = {
+  id: string;
+  targetType: DashboardShareTargetType;
+  targetId: string;
+  role: DashboardShareRole;
+  resolvedName: string;
+  /** RFC 3339. */
+  createdAt: string;
+};
+
+/** `POST /dashboards/{id}/shares` body. */
+export type CreateDashboardShareRequest = {
+  targetType: DashboardShareTargetType;
+  targetId: string;
+  role: DashboardShareRole;
+};
+
 /** `POST /connector-instances` body. */
 export type CreateConnectorInstanceRequest = {
   /** A `typeId` from `GET /connector-types`. */
@@ -912,6 +975,133 @@ function executeConnectorAction(
 }
 
 /* -------------------------------------------------------------------------- */
+/* Dashboards                                                                  */
+/* -------------------------------------------------------------------------- */
+
+/** `GET /dashboards` — every dashboard the current user can access. */
+function getDashboards(
+  runtime: ApiRuntime,
+  signal?: AbortSignal,
+): Promise<DashboardSummary[]> {
+  return authorizedRequest<DashboardSummary[]>(runtime, "/dashboards", { signal });
+}
+
+/** `POST /dashboards` — creates a dashboard owned by the current user. */
+function createDashboard(
+  runtime: ApiRuntime,
+  name: string,
+  signal?: AbortSignal,
+): Promise<DashboardSummary> {
+  return authorizedRequest<DashboardSummary>(runtime, "/dashboards", {
+    method: "POST",
+    body: { name },
+    signal,
+  });
+}
+
+/** `GET /dashboards/{id}` — requires Viewer or better. */
+function getDashboard(
+  runtime: ApiRuntime,
+  id: string,
+  signal?: AbortSignal,
+): Promise<DashboardDetail> {
+  return authorizedRequest<DashboardDetail>(
+    runtime,
+    `/dashboards/${encodeURIComponent(id)}`,
+    { signal },
+  );
+}
+
+/** `PATCH /dashboards/{id}` — owner only. */
+function renameDashboard(
+  runtime: ApiRuntime,
+  id: string,
+  name: string,
+  signal?: AbortSignal,
+): Promise<DashboardDetail> {
+  return authorizedRequest<DashboardDetail>(
+    runtime,
+    `/dashboards/${encodeURIComponent(id)}`,
+    { method: "PATCH", body: { name }, signal },
+  );
+}
+
+/** `DELETE /dashboards/{id}` — owner only. */
+function deleteDashboard(
+  runtime: ApiRuntime,
+  id: string,
+  signal?: AbortSignal,
+): Promise<void> {
+  return authorizedRequest<void>(runtime, `/dashboards/${encodeURIComponent(id)}`, {
+    method: "DELETE",
+    signal,
+  });
+}
+
+/** `POST /dashboards/{id}/pin` — pins only for the current user. */
+function pinDashboard(runtime: ApiRuntime, id: string, signal?: AbortSignal): Promise<void> {
+  return authorizedRequest<void>(
+    runtime,
+    `/dashboards/${encodeURIComponent(id)}/pin`,
+    { method: "POST", signal },
+  );
+}
+
+/** `DELETE /dashboards/{id}/pin` — unpins only for the current user. */
+function unpinDashboard(
+  runtime: ApiRuntime,
+  id: string,
+  signal?: AbortSignal,
+): Promise<void> {
+  return authorizedRequest<void>(
+    runtime,
+    `/dashboards/${encodeURIComponent(id)}/pin`,
+    { method: "DELETE", signal },
+  );
+}
+
+/** `GET /dashboards/{id}/shares` — owner only. */
+function getDashboardShares(
+  runtime: ApiRuntime,
+  id: string,
+  signal?: AbortSignal,
+): Promise<DashboardShare[]> {
+  return authorizedRequest<DashboardShare[]>(
+    runtime,
+    `/dashboards/${encodeURIComponent(id)}/shares`,
+    { signal },
+  );
+}
+
+/** `POST /dashboards/{id}/shares` — owner only. */
+function addDashboardShare(
+  runtime: ApiRuntime,
+  id: string,
+  data: CreateDashboardShareRequest,
+  signal?: AbortSignal,
+): Promise<DashboardShare> {
+  return authorizedRequest<DashboardShare>(
+    runtime,
+    `/dashboards/${encodeURIComponent(id)}/shares`,
+    { method: "POST", body: data, signal },
+  );
+}
+
+/** `DELETE /dashboards/{id}/shares/{shareId}` — owner only. */
+function removeDashboardShare(
+  runtime: ApiRuntime,
+  id: string,
+  shareId: string,
+  signal?: AbortSignal,
+): Promise<void> {
+  return authorizedRequest<void>(
+    runtime,
+    `/dashboards/${encodeURIComponent(id)}/shares/${encodeURIComponent(shareId)}`,
+    { method: "DELETE", signal },
+  );
+}
+
+/* -------------------------------------------------------------------------- */
 /* Administration                                                              */
 /* -------------------------------------------------------------------------- */
 
@@ -1293,6 +1483,26 @@ export function createApiClient(options: {
       params?: unknown,
       signal?: AbortSignal,
     ) => executeConnectorAction(runtime, instanceId, actionId, params, signal),
+    getDashboards: (signal?: AbortSignal) => getDashboards(runtime, signal),
+    createDashboard: (name: string, signal?: AbortSignal) =>
+      createDashboard(runtime, name, signal),
+    getDashboard: (id: string, signal?: AbortSignal) => getDashboard(runtime, id, signal),
+    renameDashboard: (id: string, name: string, signal?: AbortSignal) =>
+      renameDashboard(runtime, id, name, signal),
+    deleteDashboard: (id: string, signal?: AbortSignal) =>
+      deleteDashboard(runtime, id, signal),
+    pinDashboard: (id: string, signal?: AbortSignal) => pinDashboard(runtime, id, signal),
+    unpinDashboard: (id: string, signal?: AbortSignal) =>
+      unpinDashboard(runtime, id, signal),
+    getDashboardShares: (id: string, signal?: AbortSignal) =>
+      getDashboardShares(runtime, id, signal),
+    addDashboardShare: (
+      id: string,
+      data: CreateDashboardShareRequest,
+      signal?: AbortSignal,
+    ) => addDashboardShare(runtime, id, data, signal),
+    removeDashboardShare: (id: string, shareId: string, signal?: AbortSignal) =>
+      removeDashboardShare(runtime, id, shareId, signal),
     getUsers: (signal?: AbortSignal) => getUsers(runtime, signal),
     createUser: (data: CreateUserRequest, signal?: AbortSignal) =>
       createUser(runtime, data, signal),

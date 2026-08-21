@@ -30,6 +30,7 @@ use tracing_subscriber::EnvFilter;
 mod auth;
 mod config;
 mod connectors;
+mod dashboard_access;
 mod error;
 mod routes;
 mod state;
@@ -241,6 +242,7 @@ mod tests {
     struct TestApp {
         router: Router,
         connectors: connectors::ConnectorRuntime,
+        pool: SqlitePool,
         /// Kept so tests can look at the avatar directory on disk — the point
         /// of several of them is that a file is really there, or really gone.
         dir: tempfile::TempDir,
@@ -285,8 +287,14 @@ mod tests {
         connectors.poll_once().await;
 
         TestApp {
-            router: app(AppState::new(pool, secret, avatars, connectors.clone())),
+            router: app(AppState::new(
+                pool.clone(),
+                secret,
+                avatars,
+                connectors.clone(),
+            )),
             connectors,
+            pool,
             dir,
         }
     }
@@ -506,6 +514,64 @@ mod tests {
             .as_str()
             .expect("accessToken")
             .to_owned()
+    }
+
+    async fn current_user_id(app: &Router, token: &str) -> String {
+        let (status, session) = send(app, get_with_auth("/auth/session", &bearer(token))).await;
+        assert_eq!(status, StatusCode::OK, "session failed: {session:#}");
+        session["userId"].as_str().expect("user id").to_owned()
+    }
+
+    async fn group_id_named(app: &Router, admin: &str, name: &str) -> String {
+        let (status, groups) = send(app, get_with_auth("/groups", &bearer(admin))).await;
+        assert_eq!(status, StatusCode::OK, "group list failed: {groups:#}");
+        groups
+            .as_array()
+            .expect("groups")
+            .iter()
+            .find(|group| group["name"] == name)
+            .and_then(|group| group["id"].as_str())
+            .expect("named group")
+            .to_owned()
+    }
+
+    async fn create_user_in_group(
+        app: &Router,
+        admin: &str,
+        username: &str,
+        group_id: &str,
+    ) -> (String, String) {
+        let (status, user) = send(
+            app,
+            post_json_auth(
+                "/users",
+                admin,
+                serde_json::json!({
+                    "username": username,
+                    "password": "a-good-password",
+                    "groupIds": [group_id],
+                }),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED, "user create failed: {user:#}");
+
+        let (status, tokens) = send(
+            app,
+            post_json(
+                "/auth/login",
+                serde_json::json!({ "username": username, "password": "a-good-password" }),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "login failed: {tokens:#}");
+        (
+            user["id"].as_str().expect("user id").to_owned(),
+            tokens["accessToken"]
+                .as_str()
+                .expect("access token")
+                .to_owned(),
+        )
     }
 
     fn setup_body() -> serde_json::Value {
@@ -1273,6 +1339,402 @@ mod tests {
         )
         .await;
         assert_eq!(status, StatusCode::FORBIDDEN);
+    }
+
+    /* ---------------------------------------------------------------- */
+    /* Dashboard ownership and sharing                                   */
+    /* ---------------------------------------------------------------- */
+
+    #[tokio::test]
+    async fn dashboard_roles_sharing_placements_and_cascades_are_enforced() {
+        let app = test_app().await;
+        let (owner, _) = setup_and_login(&app.router).await;
+        let connector_id = create_debug_instance(&app.router, &owner, "Dashboard fixture").await;
+
+        let (status, created) = send(
+            &app.router,
+            post_json_auth(
+                "/dashboards",
+                &owner,
+                serde_json::json!({ "name": "Operations" }),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED, "{created:#}");
+        assert_eq!(created["role"], "owner");
+        let dashboard_id = created["id"].as_str().expect("dashboard id").to_owned();
+
+        // Ownership is sufficient even though dashboards have no RBAC key.
+        let (status, renamed) = send(
+            &app.router,
+            patch_json_auth(
+                &format!("/dashboards/{dashboard_id}"),
+                &owner,
+                serde_json::json!({ "name": "Renamed operations" }),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{renamed:#}");
+        assert_eq!(renamed["name"], "Renamed operations");
+
+        let editor = user_with_grants(&app.router, &owner, "editor", serde_json::json!([])).await;
+        let editor_id = current_user_id(&app.router, &editor).await;
+        let viewer = user_with_grants(&app.router, &owner, "viewer", serde_json::json!([])).await;
+        let viewer_id = current_user_id(&app.router, &viewer).await;
+        let outsider =
+            user_with_grants(&app.router, &owner, "outsider", serde_json::json!([])).await;
+
+        for (target_id, role) in [(&editor_id, "edit"), (&viewer_id, "view")] {
+            let (status, share) = send(
+                &app.router,
+                post_json_auth(
+                    &format!("/dashboards/{dashboard_id}/shares"),
+                    &owner,
+                    serde_json::json!({
+                        "targetType": "user",
+                        "targetId": target_id,
+                        "role": role,
+                    }),
+                ),
+            )
+            .await;
+            assert_eq!(status, StatusCode::CREATED, "{share:#}");
+        }
+
+        // A weaker group share does not downgrade the editor's stronger direct
+        // share; role resolution must take the highest applicable role.
+        let editor_group_id = group_id_named(&app.router, &owner, "editor-group").await;
+        let (status, weaker_share) = send(
+            &app.router,
+            post_json_auth(
+                &format!("/dashboards/{dashboard_id}/shares"),
+                &owner,
+                serde_json::json!({
+                    "targetType": "group",
+                    "targetId": editor_group_id,
+                    "role": "view",
+                }),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED, "{weaker_share:#}");
+
+        let (status, duplicate) = send(
+            &app.router,
+            post_json_auth(
+                &format!("/dashboards/{dashboard_id}/shares"),
+                &owner,
+                serde_json::json!({
+                    "targetType": "user",
+                    "targetId": editor_id,
+                    "role": "view",
+                }),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CONFLICT, "{duplicate:#}");
+
+        let (status, invalid_target) = send(
+            &app.router,
+            post_json_auth(
+                &format!("/dashboards/{dashboard_id}/shares"),
+                &owner,
+                serde_json::json!({
+                    "targetType": "user",
+                    "targetId": "00000000-0000-4000-8000-00000000ffff",
+                    "role": "view",
+                }),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{invalid_target:#}");
+
+        // An editor can place despite having no connector RBAC grants. The
+        // dashboard ACL authorizes the layout mutation; it does not authorize
+        // connector actions.
+        let (status, placement) = send(
+            &app.router,
+            post_json_auth(
+                &format!("/dashboards/{dashboard_id}/placements"),
+                &editor,
+                serde_json::json!({
+                    "connectorInstanceId": connector_id,
+                    "positionX": 1,
+                    "positionY": 2,
+                    "width": 2,
+                    "height": 2,
+                }),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED, "{placement:#}");
+        assert_eq!(placement["connector"]["id"], connector_id);
+        assert!(placement["widgetBindings"]
+            .as_array()
+            .is_some_and(|bindings| !bindings.is_empty()));
+        let placement_id = placement["id"].as_str().expect("placement id").to_owned();
+
+        let (status, updated_placement) = send(
+            &app.router,
+            patch_json_auth(
+                &format!("/dashboards/{dashboard_id}/placements/{placement_id}"),
+                &editor,
+                serde_json::json!({ "positionX": 4, "width": 3 }),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{updated_placement:#}");
+        assert_eq!(updated_placement["positionX"], 4);
+        assert_eq!(updated_placement["width"], 3);
+
+        // Editors mutate placements but cannot rename, delete, or share.
+        for request in [
+            patch_json_auth(
+                &format!("/dashboards/{dashboard_id}"),
+                &editor,
+                serde_json::json!({ "name": "Not allowed" }),
+            ),
+            delete_auth(&format!("/dashboards/{dashboard_id}"), &editor),
+            post_json_auth(
+                &format!("/dashboards/{dashboard_id}/shares"),
+                &editor,
+                serde_json::json!({
+                    "targetType": "user",
+                    "targetId": viewer_id,
+                    "role": "edit",
+                }),
+            ),
+        ] {
+            let (status, _) = send(&app.router, request).await;
+            assert_eq!(status, StatusCode::FORBIDDEN);
+        }
+
+        let (status, viewer_detail) = send(
+            &app.router,
+            get_with_auth(&format!("/dashboards/{dashboard_id}"), &bearer(&viewer)),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{viewer_detail:#}");
+        assert_eq!(viewer_detail["role"], "viewer");
+        assert_eq!(
+            viewer_detail["placements"][0]["connector"]["id"],
+            connector_id
+        );
+
+        let (status, _) = send(
+            &app.router,
+            post_json_auth(
+                &format!("/dashboards/{dashboard_id}/pin"),
+                &viewer,
+                serde_json::Value::Null,
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::NO_CONTENT);
+        let (status, viewer_dashboards) =
+            send(&app.router, get_with_auth("/dashboards", &bearer(&viewer))).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(viewer_dashboards[0]["pinned"], true);
+
+        let (status, _) = send(
+            &app.router,
+            delete_auth(&format!("/dashboards/{dashboard_id}/pin"), &viewer),
+        )
+        .await;
+        assert_eq!(status, StatusCode::NO_CONTENT);
+        let (_, viewer_dashboards) =
+            send(&app.router, get_with_auth("/dashboards", &bearer(&viewer))).await;
+        assert_eq!(viewer_dashboards[0]["pinned"], false);
+
+        // Re-pin so dashboard deletion has a real pin row to cascade.
+        let (status, _) = send(
+            &app.router,
+            post_json_auth(
+                &format!("/dashboards/{dashboard_id}/pin"),
+                &viewer,
+                serde_json::Value::Null,
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::NO_CONTENT);
+
+        let (status, owner_dashboards) =
+            send(&app.router, get_with_auth("/dashboards", &bearer(&owner))).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(owner_dashboards[0]["pinned"], false);
+
+        let (status, _) = send(
+            &app.router,
+            post_json_auth(
+                &format!("/dashboards/{dashboard_id}/placements"),
+                &viewer,
+                serde_json::json!({
+                    "connectorInstanceId": connector_id,
+                    "positionX": 0,
+                    "positionY": 0,
+                    "width": 2,
+                    "height": 2,
+                }),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+
+        // The owner can grant and revoke an individual share. Revocation takes
+        // effect immediately because roles are read from the dashboard ACL,
+        // not cached in the access token.
+        let outsider_id = current_user_id(&app.router, &outsider).await;
+        let (status, outsider_dashboard) = send(
+            &app.router,
+            post_json_auth(
+                "/dashboards",
+                &outsider,
+                serde_json::json!({ "name": "Owned content" }),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED, "{outsider_dashboard:#}");
+        let (status, ownership_conflict) = send(
+            &app.router,
+            delete_auth(&format!("/users/{outsider_id}"), &owner),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CONFLICT, "{ownership_conflict:#}");
+
+        let (status, temporary_share) = send(
+            &app.router,
+            post_json_auth(
+                &format!("/dashboards/{dashboard_id}/shares"),
+                &owner,
+                serde_json::json!({
+                    "targetType": "user",
+                    "targetId": outsider_id,
+                    "role": "view",
+                }),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED, "{temporary_share:#}");
+        let temporary_share_id = temporary_share["id"].as_str().expect("share id");
+        let (status, _) = send(
+            &app.router,
+            delete_auth(
+                &format!("/dashboards/{dashboard_id}/shares/{temporary_share_id}"),
+                &owner,
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::NO_CONTENT);
+        let (status, _) = send(
+            &app.router,
+            get_with_auth(&format!("/dashboards/{dashboard_id}"), &bearer(&outsider)),
+        )
+        .await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+
+        // The live connector declares a 2x2 minimum.
+        let (status, too_small) = send(
+            &app.router,
+            post_json_auth(
+                &format!("/dashboards/{dashboard_id}/placements"),
+                &owner,
+                serde_json::json!({
+                    "connectorInstanceId": connector_id,
+                    "positionX": 0,
+                    "positionY": 0,
+                    "width": 1,
+                    "height": 2,
+                }),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{too_small:#}");
+
+        let (status, bad_binding) = send(
+            &app.router,
+            post_json_auth(
+                &format!("/dashboards/{dashboard_id}/placements"),
+                &owner,
+                serde_json::json!({
+                    "connectorInstanceId": connector_id,
+                    "positionX": 0,
+                    "positionY": 0,
+                    "width": 2,
+                    "height": 2,
+                    "widgetBindings": [{
+                        "dataPointId": "does-not-exist",
+                        "widgetType": "statTile",
+                        "config": {},
+                    }],
+                }),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{bad_binding:#}");
+        assert!(bad_binding["error"]
+            .as_str()
+            .is_some_and(|error| error.contains("does-not-exist")));
+
+        // A group share applies to every current member, not only the user who
+        // happened to identify the group for the test.
+        let group_member =
+            user_with_grants(&app.router, &owner, "group-member", serde_json::json!([])).await;
+        let group_id = group_id_named(&app.router, &owner, "group-member-group").await;
+        let (_second_member_id, second_member) =
+            create_user_in_group(&app.router, &owner, "second-member", &group_id).await;
+        let (status, group_share) = send(
+            &app.router,
+            post_json_auth(
+                &format!("/dashboards/{dashboard_id}/shares"),
+                &owner,
+                serde_json::json!({
+                    "targetType": "group",
+                    "targetId": group_id,
+                    "role": "view",
+                }),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED, "{group_share:#}");
+        assert_eq!(group_share["resolvedName"], "group-member-group");
+        for member in [&group_member, &second_member] {
+            let (status, detail) = send(
+                &app.router,
+                get_with_auth(&format!("/dashboards/{dashboard_id}"), &bearer(member)),
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK, "{detail:#}");
+            assert_eq!(detail["role"], "viewer");
+        }
+
+        let (status, shares) = send(
+            &app.router,
+            get_with_auth(
+                &format!("/dashboards/{dashboard_id}/shares"),
+                &bearer(&owner),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{shares:#}");
+        assert_eq!(shares.as_array().expect("shares").len(), 4);
+
+        // The owner can delete, and every dependent row must go with it.
+        let (status, _) = send(
+            &app.router,
+            delete_auth(&format!("/dashboards/{dashboard_id}"), &owner),
+        )
+        .await;
+        assert_eq!(status, StatusCode::NO_CONTENT);
+
+        for table in ["dashboard_shares", "dashboard_pins", "dashboard_placements"] {
+            let query = format!("SELECT COUNT(*) FROM {table} WHERE dashboard_id = ?");
+            let (count,): (i64,) = sqlx::query_as(&query)
+                .bind(&dashboard_id)
+                .fetch_one(&app.pool)
+                .await
+                .expect("cascade count");
+            assert_eq!(count, 0, "{table} rows did not cascade");
+        }
     }
 
     /* ---------------------------------------------------------------- */

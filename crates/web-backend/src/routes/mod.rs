@@ -42,6 +42,7 @@ pub mod account;
 pub mod auth;
 pub mod connector_socket;
 pub mod connectors;
+pub mod dashboards;
 pub mod groups;
 pub mod setup;
 pub mod users;
@@ -91,6 +92,36 @@ pub fn routes() -> Router<AppState> {
             post(connectors::execute_action),
         )
         .route("/ws", get(connector_socket::connector_status_socket))
+        .route(
+            "/dashboards",
+            get(dashboards::list_dashboards).post(dashboards::create_dashboard),
+        )
+        .route(
+            "/dashboards/{id}",
+            get(dashboards::get_dashboard)
+                .patch(dashboards::update_dashboard)
+                .delete(dashboards::delete_dashboard),
+        )
+        .route(
+            "/dashboards/{id}/pin",
+            post(dashboards::pin_dashboard).delete(dashboards::unpin_dashboard),
+        )
+        .route(
+            "/dashboards/{id}/shares",
+            get(dashboards::list_shares).post(dashboards::create_share),
+        )
+        .route(
+            "/dashboards/{id}/shares/{share_id}",
+            axum::routing::delete(dashboards::delete_share),
+        )
+        .route(
+            "/dashboards/{id}/placements",
+            post(dashboards::create_placement),
+        )
+        .route(
+            "/dashboards/{id}/placements/{placement_id}",
+            patch(dashboards::update_placement).delete(dashboards::delete_placement),
+        )
         .route("/users", get(users::list_users).post(users::create_user))
         .route(
             "/users/{id}",

@@ -245,6 +245,30 @@ pub async fn get_instance(
     detail_for(&row, live.as_deref(), snapshot.as_ref()).await
 }
 
+/// Load the same cached connector summary used by the public list endpoint.
+///
+/// Dashboard placements embed this value. Keeping construction here prevents
+/// their API from growing a subtly different interpretation of unloaded
+/// connectors or cached poll failures.
+pub(crate) async fn instance_summary(
+    state: &AppState,
+    id: &str,
+) -> Result<Option<ConnectorInstanceResponse>, Response> {
+    let Some(row) = load_row(state, id).await? else {
+        return Ok(None);
+    };
+
+    let (live, snapshot) = match Uuid::parse_str(&row.id) {
+        Ok(uuid) => (
+            state.connectors.get(&uuid).await,
+            state.connectors.cached_status(&uuid).await,
+        ),
+        Err(_) => (None, None),
+    };
+
+    Ok(Some(entry_for(&row, live.as_deref(), snapshot.as_ref())))
+}
+
 /// `POST /connector-instances`
 ///
 /// Requires a global `connectors.manage` grant.
@@ -381,10 +405,8 @@ pub async fn update_instance(
 ///
 /// Requires a global `connectors.manage` grant.
 ///
-/// Nothing cascades yet. **Forward reference:** once dashboards exist, a
-/// placement table will hold rows pointing at this id, and deleting an instance
-/// will have to remove or orphan them. That table does not exist, so there is
-/// nothing to cascade to and no `ON DELETE` clause to write.
+/// Dashboard placements reference the instance with `ON DELETE CASCADE`, so
+/// they are removed with it. The dashboards themselves remain intact.
 pub async fn delete_instance(
     _caller: RequirePermission<ConnectorsManage>,
     State(state): State<AppState>,

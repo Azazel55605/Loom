@@ -1,7 +1,8 @@
 import * as React from "react";
 import { Navigate, Route, Routes, useLocation } from "react-router-dom";
 
-import { DashboardPage } from "@/pages/DashboardPage";
+import { ConnectorsPage } from "@/pages/ConnectorsPage";
+import { DashboardDetailPage, DashboardsIndexPage } from "@/pages/DashboardsPage";
 import { LoginPage } from "@/pages/LoginPage";
 import { useAuth } from "@loom/ui-kit/lib/auth-context";
 import { useSetupStatus } from "@loom/ui-kit/lib/use-setup-status";
@@ -9,7 +10,7 @@ import { useSetupStatus } from "@loom/ui-kit/lib/use-setup-status";
 /**
  * Routes that are not on the way in, loaded on demand.
  *
- * The dashboard and the login screen stay in the main bundle — one of them is
+ * The dashboards and the login screen stay in the main bundle — one of them is
  * the first thing every visit renders, so deferring them would only add a round
  * trip to the critical path. The rest are genuinely occasional:
  *
@@ -86,9 +87,29 @@ export default function App() {
           <Route path="/login" element={<LoginPage />} />
           <Route
             path="/"
+            element={<Navigate to="/dashboards" replace />}
+          />
+          <Route
+            path="/dashboards"
             element={
               <RequireAuth>
-                <DashboardPage />
+                <DashboardsIndexPage />
+              </RequireAuth>
+            }
+          />
+          <Route
+            path="/dashboards/:id"
+            element={
+              <RequireAuth>
+                <DashboardDetailPage />
+              </RequireAuth>
+            }
+          />
+          <Route
+            path="/connectors"
+            element={
+              <RequireAuth>
+                <ConnectorsPage />
               </RequireAuth>
             }
           />
@@ -120,10 +141,10 @@ export default function App() {
             <Route path="*" element={<Navigate to="/settings/general" replace />} />
           </Route>
 
-          {/* Unknown paths go to the dashboard, which bounces to login when
+          {/* Unknown paths go to dashboards, which bounces to login when
               signed out. A dedicated 404 is worth having once there is more than
               one real page to be lost between. */}
-          <Route path="*" element={<Navigate to="/" replace />} />
+          <Route path="*" element={<Navigate to="/dashboards" replace />} />
         </Routes>
       </React.Suspense>
     </RequireSetup>
