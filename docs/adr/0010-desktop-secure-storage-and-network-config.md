@@ -1,4 +1,4 @@
-# 0010 — Desktop secure storage and runtime network configuration
+# 0010 — Installed-client secure storage and runtime network configuration
 
 - Status: accepted
 - Date: 2026-08-20
@@ -6,10 +6,10 @@
 
 ## Context
 
-One Desktop binary must connect to a server chosen after installation. Unlike
-web-frontend, it cannot compile a deployment-specific API origin into its
-bundle. Its refresh token also outlives a process and must not be written to
-localStorage or a plaintext settings file.
+One Desktop or Mobile binary must connect to a server chosen after
+installation. Unlike web-frontend, it cannot compile a deployment-specific API
+origin into its bundle. Its refresh token also outlives a process and must not
+be written to localStorage or a plaintext settings file.
 
 Tauri 2 has an official Store plugin for non-sensitive JSON settings and an
 official Stronghold plugin for encrypted vault files. Stronghold requires a
@@ -51,6 +51,24 @@ ceases to be maintained or loses a required desktop backend; it is not used
 today because an encrypted file whose key lifecycle is unresolved is weaker
 operationally than the available native credential stores.
 
+Mobile uses the same `ConnectToServer`, auth provider, API client, and settings
+panels from `@loom/ui-kit`. Its adapter persists the non-sensitive server URL
+with `tauri-plugin-store` and stores the token pair only in an encrypted
+Stronghold snapshot. A random per-install vault password is kept in the app's
+private Store data, while Stronghold's Argon2 setup uses an app-local salt.
+This prevents tokens appearing as plaintext settings and protects backups or
+copies of the vault by itself. It is not equivalent to Desktop's OS credential
+store against a compromise that can read all of the app's private data;
+wrapping the vault password with Android Keystore is a possible future
+hardening step.
+
+Android applies a tracked Network Security Configuration to its generated
+project. It permits cleartext HTTP for explicitly selected private-network
+servers and trusts both system CAs and user-installed CAs. The latter supports
+homelab certificate authorities without disabling TLS or hostname validation.
+Because `src-tauri/gen` is intentionally ignored, a repository script reapplies
+the policy after `tauri android init` in both local builds and CI.
+
 The Tauri CSP allows `connect-src` for both `http:` and `https:` in addition to
 the IPC endpoints Tauri needs. This is intentionally broader than a typical
 fixed-service app: the destination is user-configured, so a build-time hostname
@@ -59,7 +77,8 @@ remain narrow; remote images are allowed because account avatar URLs come from
 the chosen Loom server.
 
 The backend CORS policy explicitly allows Tauri's known webview origins:
-`tauri://localhost`, `https://tauri.localhost`, and `http://tauri.localhost`.
+`tauri://localhost`, `https://tauri.localhost`, and `http://tauri.localhost`
+(Android's default mapped origin).
 The normal web deployment stays same-origin through its proxy; localhost web
 development and operator-configured browser origins are also allowed. There is
 no wildcard. Requests authenticate with explicit Bearer tokens rather than
@@ -68,7 +87,8 @@ explicit list still limits which browser contexts may read API responses.
 
 ## Consequences
 
-- Tokens are stored by the OS credential service, not in Desktop's JSON store.
+- Desktop tokens are stored by the OS credential service, not in its JSON
+  store. Mobile tokens are stored in Stronghold, not in its JSON settings.
 - Certificate verification remains enabled unless the user opts out for the
   selected HTTPS server. The exception accepts more than self-signed roots (for
   example, an expired certificate), so the UI warns that it is appropriate only
@@ -89,3 +109,7 @@ explicit list still limits which browser contexts may read API responses.
 - Production browser deployments using a cross-origin API must list their
   frontend origin in `LOOM_CORS_ALLOWED_ORIGINS`; same-origin deployments need
   no setting.
+- Android HTTP support accepts the confidentiality risk of a user-selected
+  cleartext server. Trusting a user-installed CA grants that CA the same trust
+  the device owner assigned it; Loom still rejects untrusted, expired, or
+  hostname-mismatched certificates.

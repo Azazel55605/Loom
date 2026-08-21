@@ -95,6 +95,9 @@ jobs:
       - name: Initialise Android project
         run: pnpm --filter mobile tauri android init
 
+      - name: Apply Android network policy
+        run: pnpm --filter mobile android:configure
+
       # DEBUG BUILD ONLY — the APK is unsigned (debug-keystore signed by Gradle)
       # and is not installable as a Play Store artifact.
       #

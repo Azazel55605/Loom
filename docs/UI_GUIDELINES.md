@@ -42,11 +42,10 @@ as inputs to the design, not decisions inside it. Any new component must respond
 to all three without extra wiring — if a component only looks right at one
 accent color or one blur level, it is not finished.
 
-> **Status: implemented in web-frontend and Desktop.** All three now have real controls,
+> **Status: implemented in web-frontend, Desktop, and Mobile.** All three now have real controls,
 > under Settings → Appearance, driven by `AccentThemeProvider`, alongside a
-> light/dark/system palette choice. What follows
-> describes working behavior, not intent. Mobile still carries the older
-> accent-only provider and gains the rest when it consumes `@loom/ui-kit`.
+> light/dark/system palette choice. What follows describes working behavior,
+> not intent. All clients consume the same provider from `@loom/ui-kit`.
 
 ### Persistence is per device
 

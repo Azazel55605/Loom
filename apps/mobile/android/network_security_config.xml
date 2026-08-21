@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="utf-8"?>
+<network-security-config>
+    <!--
+      Loom connects to an operator-selected homelab server. Permit HTTP for
+      private-network deployments, while allowing HTTPS servers whose CA the
+      device owner has explicitly installed. HTTPS remains the recommended
+      choice; this does not disable certificate or hostname verification.
+    -->
+    <base-config cleartextTrafficPermitted="true">
+        <trust-anchors>
+            <certificates src="system" />
+            <certificates src="user" />
+        </trust-anchors>
+    </base-config>
+</network-security-config>

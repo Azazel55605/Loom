@@ -212,7 +212,7 @@ macOS builds are unsigned; see
 **Android only — iOS is out of scope.**
 
 ```sh
-pnpm build:mobile      # === pnpm --filter mobile tauri android build
+pnpm build:mobile      # configure Android policy + build unsigned debug APK
 ```
 
 Output lands in `apps/mobile/src-tauri/gen/android/app/build/outputs/`:
@@ -231,9 +231,12 @@ Beyond the shared Tauri dependencies, mobile needs:
       i686-linux-android x86_64-linux-android
   ```
 
-- `ANDROID_HOME`, `NDK_HOME` and `JAVA_HOME` exported. Point them at your own
-  SDK install — paths are machine-specific and intentionally not committed
-  anywhere in this repo.
+- `ANDROID_HOME` and `NDK_HOME` exported. Point them at your own SDK install —
+  paths are machine-specific and intentionally not committed anywhere in this
+  repo. `pnpm build:mobile` automatically selects an installed JDK 21 and sets
+  `JAVA_HOME` plus `PATH` for the Tauri build subprocess. An already-correct
+  `JAVA_HOME` takes precedence; otherwise standard OS Java locations are
+  searched. Set `JAVA_HOME` yourself only when the JDK is installed elsewhere.
 
 Without an Android SDK/NDK, `pnpm build:mobile` cannot run at all; nothing else
 in the repo needs it.
@@ -252,6 +255,32 @@ This derives `applicationId`, `versionCode` and `versionName` from
 generated Gradle files must never be hand-edited. See
 [`VERSIONING.md`](./VERSIONING.md). CI runs the same `init` step for the same
 reason.
+
+The generated manifest also needs Loom's runtime network policy. Its canonical
+source is `apps/mobile/android/network_security_config.xml`; apply it after
+every init (the standard build and CI do this automatically):
+
+```sh
+pnpm --filter mobile android:configure
+```
+
+The policy permits HTTP because a user-selected homelab server may not have
+TLS, and trusts both system CAs and CAs the device owner explicitly installed.
+It does not bypass certificate or hostname verification. Prefer HTTPS whenever
+the server supports it.
+
+### Emulator and device testing
+
+An Android emulator reaches a backend running on its host through
+`http://10.0.2.2:8080`; `localhost` inside the emulator is the emulator itself.
+A physical device needs an address it can reach on the same network. Complete
+setup, login, dashboard, and Settings flows against that server, then restart
+the app and confirm the server selection and login survive.
+
+For a debug install, inspect the app-private data with `adb shell run-as
+dev.loom.mobile`. The settings file may contain the server URL and Stronghold
+bootstrap material, but must not contain `accessToken` or `refreshToken`.
+Those values belong only in the encrypted `loom-mobile.hold` snapshot.
 
 ### Signing
 

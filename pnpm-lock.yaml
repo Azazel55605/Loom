@@ -92,12 +92,21 @@ importers:
 
   apps/mobile:
     dependencies:
-      class-variance-authority:
-        specifier: ^0.7.1
-        version: 0.7.1
-      clsx:
-        specifier: ^2.1.1
-        version: 2.1.1
+      '@loom/ui-kit':
+        specifier: workspace:*
+        version: link:../../packages/ui-kit
+      '@tanstack/react-query':
+        specifier: ^5.101.4
+        version: 5.101.4(react@18.3.1)
+      '@tauri-apps/api':
+        specifier: ^2.11.1
+        version: 2.11.1
+      '@tauri-apps/plugin-store':
+        specifier: ^2.4.4
+        version: 2.4.4
+      '@tauri-apps/plugin-stronghold':
+        specifier: ^2.3.1
+        version: 2.3.1
       lucide-react:
         specifier: ^0.469.0
         version: 0.469.0(react@18.3.1)
@@ -107,9 +116,9 @@ importers:
       react-dom:
         specifier: ^18.3.1
         version: 18.3.1(react@18.3.1)
-      tailwind-merge:
-        specifier: ^2.6.0
-        version: 2.6.1
+      react-router-dom:
+        specifier: ^7.18.2
+        version: 7.18.2(react-dom@18.3.1(react@18.3.1))(react@18.3.1)
     devDependencies:
       '@eslint/js':
         specifier: ^9.17.0
@@ -1367,6 +1376,9 @@ packages:
 
   '@tauri-apps/plugin-store@2.4.4':
     resolution: {integrity: sha512-oxSMaj/QpVfJcBMYX5aOQV94fWvga0MwQMfD6TLlbK2dh+ShPWAzefd8HWXhvOKjPRJdGVAkW7ZGO76JzzjaDA==}
+
+  '@tauri-apps/plugin-stronghold@2.3.1':
+    resolution: {integrity: sha512-zFbD1Apk/VFdWaoGaoKcouRrZnzLFiNY9b1KDeBaN47sMaMHRYIa+ZDhvbzMOyH314+OHCQBXfe8I/ph59Lp9g==}
 
   '@types/babel__core@7.20.5':
     resolution: {integrity: sha512-qoQprZvz5wQFJwMDqeseRXWv3rqMvhgpbXFfVyWhbx9X47POIA6i/+dXefEmZKoAgOaTdaIgNSMqMIU61yRyzA==}
@@ -3158,6 +3170,10 @@ snapshots:
       '@tauri-apps/api': 2.11.1
 
   '@tauri-apps/plugin-store@2.4.4':
+    dependencies:
+      '@tauri-apps/api': 2.11.1
+
+  '@tauri-apps/plugin-stronghold@2.3.1':
     dependencies:
       '@tauri-apps/api': 2.11.1
 

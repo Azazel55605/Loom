@@ -1,11 +1,7 @@
 import { Outlet, useLocation, useNavigate } from "react-router-dom";
 
-import { DesktopAppShell } from "@/components/DesktopAppShell";
-import { createDesktopHttpTransport } from "@/adapters/desktopHttpTransport";
-import {
-  ConnectToServer,
-  type ServerConnection,
-} from "@loom/ui-kit/components/ConnectToServer";
+import { MobileAppShell } from "@/components/MobileAppShell";
+import { ConnectToServer } from "@loom/ui-kit/components/ConnectToServer";
 import { SettingsLayout } from "@loom/ui-kit/components/SettingsLayout";
 import {
   Card,
@@ -16,12 +12,12 @@ import {
 } from "@loom/ui-kit/components/ui/card";
 import { GeneralPanel } from "@loom/ui-kit/pages/settings/GeneralPanel";
 
-export function DesktopSettingsRoute({
-  connection,
+export function MobileSettingsRoute({
+  baseUrl,
   onServerChanged,
 }: {
-  connection: ServerConnection;
-  onServerChanged: (connection: ServerConnection) => Promise<void>;
+  baseUrl: string;
+  onServerChanged: (baseUrl: string) => Promise<void>;
 }) {
   const navigate = useNavigate();
   const location = useLocation();
@@ -31,7 +27,7 @@ export function DesktopSettingsRoute({
     <SettingsLayout
       activeSection={section}
       onSectionChange={(value) => navigate(`/settings/${value}`)}
-      renderShell={(content) => <DesktopAppShell>{content}</DesktopAppShell>}
+      renderShell={(content) => <MobileAppShell>{content}</MobileAppShell>}
     >
       {section === "general" ? (
         <div className="flex flex-col gap-4">
@@ -47,13 +43,10 @@ export function DesktopSettingsRoute({
             <CardContent>
               <ConnectToServer
                 embedded
-                supportsInvalidCertificates
-                getHttpTransport={createDesktopHttpTransport}
-                initialUrl={connection.baseUrl}
-                initialAllowInvalidCertificates={
-                  connection.allowInvalidCertificates
+                initialUrl={baseUrl}
+                onConnected={({ baseUrl: nextBaseUrl }) =>
+                  onServerChanged(nextBaseUrl)
                 }
-                onConnected={onServerChanged}
               />
             </CardContent>
           </Card>

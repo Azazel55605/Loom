@@ -9,13 +9,9 @@ import {
   useLocation,
 } from "react-router-dom";
 
-import {
-  desktopBaseUrlProvider,
-  type DesktopServerConnection,
-} from "@/adapters/desktopBaseUrlProvider";
+import { desktopBaseUrlProvider } from "@/adapters/desktopBaseUrlProvider";
 import { createDesktopHttpTransport } from "@/adapters/desktopHttpTransport";
 import { desktopTokenStorage } from "@/adapters/desktopTokenStorage";
-import { ConnectToServer } from "@/components/ConnectToServer";
 import {
   DesktopPermissionsIndexRedirect,
   DesktopPermissionsRoute,
@@ -26,6 +22,10 @@ import { LoginPage } from "@/pages/LoginPage";
 import { SetupPage } from "@/pages/SetupPage";
 import { Alert, AlertDescription, AlertTitle } from "@loom/ui-kit/components/ui/alert";
 import { Button } from "@loom/ui-kit/components/ui/button";
+import {
+  ConnectToServer,
+  type ServerConnection,
+} from "@loom/ui-kit/components/ConnectToServer";
 import { Toaster } from "@loom/ui-kit/components/ui/sonner";
 import { AuthProvider, useAuth } from "@loom/ui-kit/lib/auth-context";
 import { useSetupStatus } from "@loom/ui-kit/lib/use-setup-status";
@@ -46,7 +46,7 @@ const GroupsPanel = React.lazy(async () => ({
 type ServerState =
   | { kind: "loading" }
   | { kind: "error"; message: string }
-  | { kind: "ready"; connection: DesktopServerConnection };
+  | { kind: "ready"; connection: ServerConnection };
 
 export default function App({ queryClient }: { queryClient: QueryClient }) {
   const [server, setServer] = React.useState<ServerState>({ kind: "loading" });
@@ -89,12 +89,17 @@ export default function App({ queryClient }: { queryClient: QueryClient }) {
   if (server.connection.baseUrl === "") {
     return (
       <ConnectToServer
-        onConnected={(connection) => setServer({ kind: "ready", connection })}
+        supportsInvalidCertificates
+        getHttpTransport={createDesktopHttpTransport}
+        onConnected={async (connection) => {
+          await desktopBaseUrlProvider.setConnection(connection);
+          setServer({ kind: "ready", connection });
+        }}
       />
     );
   }
 
-  const changeServer = async (connection: DesktopServerConnection) => {
+  const changeServer = async (connection: ServerConnection) => {
     if (
       connection.baseUrl === server.connection.baseUrl &&
       connection.allowInvalidCertificates ===
@@ -105,6 +110,7 @@ export default function App({ queryClient }: { queryClient: QueryClient }) {
     if (connection.baseUrl !== server.connection.baseUrl) {
       await desktopTokenStorage.clearTokens();
     }
+    await desktopBaseUrlProvider.setConnection(connection);
     queryClient.clear();
     setServer({ kind: "ready", connection });
   };
@@ -137,8 +143,8 @@ function DesktopRoutes({
   connection,
   onServerChanged,
 }: {
-  connection: DesktopServerConnection;
-  onServerChanged: (connection: DesktopServerConnection) => Promise<void>;
+  connection: ServerConnection;
+  onServerChanged: (connection: ServerConnection) => Promise<void>;
 }) {
   return (
     <RequireSetup>

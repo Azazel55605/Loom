@@ -1,12 +1,6 @@
 import * as React from "react";
 import { AlertCircle, TriangleAlert } from "lucide-react";
 
-import {
-  desktopBaseUrlProvider,
-  type DesktopServerConnection,
-} from "@/adapters/desktopBaseUrlProvider";
-import { createDesktopHttpTransport } from "@/adapters/desktopHttpTransport";
-import { normalizeServerUrl } from "@/lib/server-url";
 import { Alert, AlertDescription, AlertTitle } from "@loom/ui-kit/components/ui/alert";
 import { Button } from "@loom/ui-kit/components/ui/button";
 import {
@@ -19,13 +13,34 @@ import {
 import { Input } from "@loom/ui-kit/components/ui/input";
 import { Label } from "@loom/ui-kit/components/ui/label";
 import { Switch } from "@loom/ui-kit/components/ui/switch";
+import type { HttpTransport } from "@loom/ui-kit/lib/api";
 
 type Health = { status: string; core_version: string };
+
+export type ServerConnection = {
+  baseUrl: string;
+  allowInvalidCertificates: boolean;
+};
+
+function normalizeServerUrl(value: string): string {
+  const url = new URL(value.trim());
+  if (url.protocol !== "http:" && url.protocol !== "https:") {
+    throw new Error("Use an http:// or https:// server URL.");
+  }
+  if (url.username !== "" || url.password !== "") {
+    throw new Error("The server URL must not contain credentials.");
+  }
+  if (url.search !== "" || url.hash !== "") {
+    throw new Error("The server URL must not contain a query or fragment.");
+  }
+  return url.toString().replace(/\/+$/, "");
+}
 
 function connectionErrorMessage(
   error: unknown,
   baseUrl: string,
   allowInvalidCertificates: boolean,
+  supportsInvalidCertificates: boolean,
 ): string {
   if (error instanceof DOMException && error.name === "AbortError") {
     return "The server did not respond in time.";
@@ -38,6 +53,7 @@ function connectionErrorMessage(
         ? error
         : "The server could not be reached.";
   if (
+    supportsInvalidCertificates &&
     baseUrl.startsWith("https://") &&
     !allowInvalidCertificates &&
     /load failed|certificate|tls|ssl/i.test(message)
@@ -47,16 +63,26 @@ function connectionErrorMessage(
   return message;
 }
 
+/**
+ * Runtime server selection shared by installed clients. Persistence stays in
+ * the platform's `onConnected` callback, and native clients may inject a
+ * transport factory when their TLS policy cannot be expressed by webview
+ * `fetch`.
+ */
 export function ConnectToServer({
   initialUrl = "",
   initialAllowInvalidCertificates = false,
   embedded = false,
+  supportsInvalidCertificates = false,
+  getHttpTransport,
   onConnected,
 }: {
   initialUrl?: string;
   initialAllowInvalidCertificates?: boolean;
   embedded?: boolean;
-  onConnected: (connection: DesktopServerConnection) => void | Promise<void>;
+  supportsInvalidCertificates?: boolean;
+  getHttpTransport?: (allowInvalidCertificates: boolean) => HttpTransport;
+  onConnected: (connection: ServerConnection) => void | Promise<void>;
 }) {
   const [draft, setDraft] = React.useState(initialUrl);
   const [allowInvalidCertificates, setAllowInvalidCertificates] = React.useState(
@@ -95,16 +121,18 @@ export function ConnectToServer({
         const connection = {
           baseUrl,
           allowInvalidCertificates:
-            baseUrl.startsWith("https://") && allowInvalidCertificates,
+            supportsInvalidCertificates &&
+            baseUrl.startsWith("https://") &&
+            allowInvalidCertificates,
         };
 
         setIsConnecting(true);
         const controller = new AbortController();
         const timeout = window.setTimeout(() => controller.abort(), 8_000);
         try {
-          const transport = createDesktopHttpTransport(
+          const transport = getHttpTransport?.(
             connection.allowInvalidCertificates,
-          );
+          ) ?? { fetch: globalThis.fetch.bind(globalThis) };
           const response = await transport.fetch(`${baseUrl}/health`, {
             signal: controller.signal,
           });
@@ -115,7 +143,6 @@ export function ConnectToServer({
           if (health.status !== "ok" || typeof health.core_version !== "string") {
             throw new Error("The address did not return a Loom health response.");
           }
-          await desktopBaseUrlProvider.setConnection(connection);
           await onConnected(connection);
         } catch (connectionError) {
           setError(
@@ -123,6 +150,7 @@ export function ConnectToServer({
               connectionError,
               baseUrl,
               connection.allowInvalidCertificates,
+              supportsInvalidCertificates,
             ),
           );
         } finally {
@@ -154,40 +182,50 @@ export function ConnectToServer({
         />
       </div>
 
-      <div className="flex items-start justify-between gap-4 rounded-md border p-3">
-        <div className="flex flex-col gap-1">
-          <Label htmlFor={embedded ? "settings-invalid-certs" : "invalid-certs"}>
-            Allow invalid TLS certificates
-          </Label>
-          <p
-            id={embedded ? "settings-invalid-certs-description" : "invalid-certs-description"}
-            className="text-sm text-muted-foreground"
-          >
-            For HTTPS homelab servers using a self-signed certificate. Disabled by
-            default.
-          </p>
-        </div>
-        <Switch
-          id={embedded ? "settings-invalid-certs" : "invalid-certs"}
-          checked={isHttpsDraft && allowInvalidCertificates}
-          disabled={!isHttpsDraft || isConnecting}
-          aria-describedby={
-            embedded ? "settings-invalid-certs-description" : "invalid-certs-description"
-          }
-          onCheckedChange={setAllowInvalidCertificates}
-        />
-      </div>
+      {supportsInvalidCertificates ? (
+        <>
+          <div className="flex items-start justify-between gap-4 rounded-md border p-3">
+            <div className="flex flex-col gap-1">
+              <Label htmlFor={embedded ? "settings-invalid-certs" : "invalid-certs"}>
+                Allow invalid TLS certificates
+              </Label>
+              <p
+                id={
+                  embedded
+                    ? "settings-invalid-certs-description"
+                    : "invalid-certs-description"
+                }
+                className="text-sm text-muted-foreground"
+              >
+                For HTTPS homelab servers using a self-signed certificate. Disabled
+                by default.
+              </p>
+            </div>
+            <Switch
+              id={embedded ? "settings-invalid-certs" : "invalid-certs"}
+              checked={isHttpsDraft && allowInvalidCertificates}
+              disabled={!isHttpsDraft || isConnecting}
+              aria-describedby={
+                embedded
+                  ? "settings-invalid-certs-description"
+                  : "invalid-certs-description"
+              }
+              onCheckedChange={setAllowInvalidCertificates}
+            />
+          </div>
 
-      {isHttpsDraft && allowInvalidCertificates ? (
-        <Alert>
-          <TriangleAlert aria-hidden="true" />
-          <AlertTitle>Certificate verification reduced</AlertTitle>
-          <AlertDescription>
-            Loom will not verify this server&apos;s certificate chain or expiry.
-            Hostname verification remains enabled. Use this only for a server you
-            trust.
-          </AlertDescription>
-        </Alert>
+          {isHttpsDraft && allowInvalidCertificates ? (
+            <Alert>
+              <TriangleAlert aria-hidden="true" />
+              <AlertTitle>Certificate verification reduced</AlertTitle>
+              <AlertDescription>
+                Loom will not verify this server&apos;s certificate chain or expiry.
+                Hostname verification remains enabled. Use this only for a server you
+                trust.
+              </AlertDescription>
+            </Alert>
+          ) : null}
+        </>
       ) : null}
 
       {error !== null ? (
@@ -212,7 +250,7 @@ export function ConnectToServer({
         <CardHeader>
           <CardTitle>Connect to Loom</CardTitle>
           <CardDescription>
-            Enter the address of the Loom server this desktop app should manage.
+            Enter the address of the Loom server this app should manage.
           </CardDescription>
         </CardHeader>
         <CardContent>{form}</CardContent>

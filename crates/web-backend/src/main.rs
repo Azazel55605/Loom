@@ -42,10 +42,11 @@ const DEFAULT_BIND_ADDR: &str = "127.0.0.1:8080";
 ///
 /// Every client is a *different origin* from the backend: the web frontend is
 /// served on its own port (and in production usually its own host, since it
-/// deploys independently), and the Tauri clients load from `tauri://localhost`
-/// or `http://tauri.localhost`. Without these headers a browser refuses to let
-/// any of them read a response, which surfaces as an opaque "NetworkError"
-/// rather than anything resembling the real cause.
+/// deploys independently), Desktop loads from `tauri://localhost` or a mapped
+/// localhost scheme, and Android's default mapped origin is
+/// `http://tauri.localhost`. Without these headers a webview refuses to let any
+/// of them read a response, which surfaces as an opaque "NetworkError" rather
+/// than anything resembling the real cause.
 ///
 /// The browser frontend is same-origin in the normal proxy deployment. The
 /// explicit localhost origin supports direct development, and operators may
@@ -303,7 +304,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn cors_allows_known_tauri_origins_and_configured_browser_origins() {
+    async fn cors_allows_known_webview_origins_and_configured_browser_origins() {
         let allowed = [
             "tauri://localhost",
             "https://tauri.localhost",

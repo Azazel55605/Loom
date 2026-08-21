@@ -80,7 +80,10 @@ without weakening the webview globally. See ADR 0010.
 ## Mobile
 
 A **Tauri mobile** client. Same relationship as Desktop: shared UI/client logic
-from `@loom/ui-kit`, all privileged operations over the Web/backend API.
+from `@loom/ui-kit`, all privileged operations over the Web/backend API. The
+Android shell supplies Store-backed runtime server configuration and a
+Stronghold-backed token adapter; it does not duplicate authentication or
+permission logic.
 
 ## The invariant
 

@@ -1,15 +1,11 @@
 import { load, type Store } from "@tauri-apps/plugin-store";
 
+import type { ServerConnection } from "@loom/ui-kit/components/ConnectToServer";
 import type { BaseUrlProvider } from "@loom/ui-kit/lib/api";
 
 const STORE_PATH = "desktop-settings.json";
 const SERVER_URL_KEY = "serverUrl";
 const ALLOW_INVALID_CERTIFICATES_KEY = "allowInvalidCertificates";
-
-export type DesktopServerConnection = {
-  baseUrl: string;
-  allowInvalidCertificates: boolean;
-};
 
 let storePromise: Promise<Store> | null = null;
 
@@ -24,7 +20,7 @@ class DesktopBaseUrlProvider implements BaseUrlProvider {
     return (await this.getConnection()).baseUrl;
   }
 
-  async getConnection(): Promise<DesktopServerConnection> {
+  async getConnection(): Promise<ServerConnection> {
     const store = await settingsStore();
     const [baseUrl, allowInvalidCertificates] = await Promise.all([
       store.get<unknown>(SERVER_URL_KEY),
@@ -36,7 +32,7 @@ class DesktopBaseUrlProvider implements BaseUrlProvider {
     };
   }
 
-  async setConnection(connection: DesktopServerConnection): Promise<void> {
+  async setConnection(connection: ServerConnection): Promise<void> {
     const store = await settingsStore();
     await Promise.all([
       store.set(SERVER_URL_KEY, connection.baseUrl),
