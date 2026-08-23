@@ -256,6 +256,8 @@ function SchemaFields({
         const kind = kindOf(property);
         const label = property.title ?? key;
         const error = errors[dotted];
+        const descriptionId = property.description !== undefined ? `${id}-description` : undefined;
+        const errorId = error !== undefined ? `${id}-error` : undefined;
 
         if (kind === "unsupported") {
           return (
@@ -299,12 +301,15 @@ function SchemaFields({
               <div className="space-y-0.5">
                 <Label htmlFor={id}>{label}</Label>
                 {property.description !== undefined && (
-                  <p className="text-xs text-muted-foreground">{property.description}</p>
+                  <p id={descriptionId} className="text-xs text-muted-foreground">
+                    {property.description}
+                  </p>
                 )}
               </div>
               <Switch
                 id={id}
                 disabled={disabled}
+                aria-describedby={descriptionId}
                 checked={current === true}
                 onCheckedChange={(checked) => set(checked)}
               />
@@ -326,7 +331,7 @@ function SchemaFields({
               min={property.minimum}
               max={property.maximum}
               aria-invalid={error !== undefined}
-              aria-describedby={error !== undefined ? `${id}-error` : undefined}
+              aria-describedby={[descriptionId, errorId].filter(Boolean).join(" ") || undefined}
               value={current === undefined || current === null ? "" : String(current)}
               onChange={(event) => {
                 const raw = event.target.value;
@@ -348,8 +353,10 @@ function SchemaFields({
                 set(Number.isFinite(parsed) ? parsed : undefined);
               }}
             />
-            {property.description !== undefined && error === undefined && (
-              <p className="text-xs text-muted-foreground">{property.description}</p>
+            {property.description !== undefined && (
+              <p id={descriptionId} className="text-xs text-muted-foreground">
+                {property.description}
+              </p>
             )}
             {error !== undefined && (
               <p id={`${id}-error`} className={cn("text-xs font-medium text-destructive")}>

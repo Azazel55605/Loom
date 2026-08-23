@@ -1008,7 +1008,7 @@ mod tests {
             .is_some_and(|description| description.contains("test fixture")));
         assert!(types[0]["setupGuide"]["template"]
             .as_str()
-            .is_some_and(|template| template.contains("{{simulatedHealth}}")));
+            .is_some_and(|template| template.contains("{{label}}")));
     }
 
     #[tokio::test]

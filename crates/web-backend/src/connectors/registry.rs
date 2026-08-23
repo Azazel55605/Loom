@@ -145,7 +145,7 @@ mod tests {
             Some(DEBUG_TYPE_ID)
         );
         let guide = registration.setup_guide.as_ref().expect("setup guide");
-        assert!(guide.template.contains("{{simulatedHealth}}"));
+        assert!(guide.template.contains("{{label}}"));
     }
 
     #[test]

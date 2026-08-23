@@ -39,7 +39,7 @@ type-level descriptors together without duplicating documents as constants.
 
 DebugConnector proves the complete path before a real integration exists. Its
 self-referential discovery returns valid `debug` configurations, and its setup
-guide references the real `simulatedHealth` schema property.
+guide references the real, editable `label` schema property.
 
 ## Consequences
 

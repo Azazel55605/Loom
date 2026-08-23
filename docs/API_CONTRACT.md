@@ -697,7 +697,7 @@ the instances they may see are on `/connector-instances`, which asks only for
     },
     "setupGuide": {
       "description": "No real setup required — this is an internal test fixture.",
-      "template": "# Debug connector\nSimulated health: {{simulatedHealth}}"
+      "template": "# Debug connector\nFixture label: {{label}}"
     },
     "discoverableType": "debug"
   }
@@ -880,8 +880,8 @@ name from that type's `configSchema.properties`. Clients substitute the current
 form value when rendering the guide. Substitution is entirely client-side:
 Core and the backend neither interpret templates nor persist rendered output.
 
-For example, `{{simulatedHealth}}` refers to the debug schema's
-`simulatedHealth` property. A client that does not recognise a placeholder must
+For example, `{{label}}` refers to the debug schema's editable `label`
+property. A client that does not recognise a placeholder must
 leave it visibly unchanged rather than silently remove content.
 
 ### `POST /connector-instances/{id}/discover`

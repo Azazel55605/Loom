@@ -778,7 +778,7 @@ impl Connector for DebugConnector {
     fn setup_guide(&self) -> Option<SetupGuide> {
         Some(SetupGuide {
             description: "No real setup required — this is an internal test fixture.".to_owned(),
-            template: "# Debug connector\nSimulated health: {{simulatedHealth}}".to_owned(),
+            template: "# Debug connector\nFixture label: {{label}}".to_owned(),
         })
     }
 
@@ -933,9 +933,9 @@ mod tests {
         );
         assert_eq!(
             guide.template,
-            "# Debug connector\nSimulated health: {{simulatedHealth}}"
+            "# Debug connector\nFixture label: {{label}}"
         );
-        assert!(connector.config_schema()["properties"]["simulatedHealth"].is_object());
+        assert!(connector.config_schema()["properties"]["label"].is_object());
     }
 
     #[test]

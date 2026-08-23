@@ -24,6 +24,7 @@ import {
 } from "@loom/ui-kit/components/ui/select";
 import { ConnectorIcon } from "@loom/ui-kit/components/ConnectorIcon";
 import { ConnectorIconPicker } from "@loom/ui-kit/components/ConnectorIconPicker";
+import { SetupGuidePanel } from "@loom/ui-kit/components/SetupGuidePanel";
 import {
   defaultsForSchema,
   SchemaForm,
@@ -33,6 +34,7 @@ import { Skeleton } from "@loom/ui-kit/components/ui/skeleton";
 import type { ConnectorInstanceSummary } from "@loom/ui-kit/lib/api";
 import { useApiClient } from "@loom/ui-kit/lib/api-context";
 import { describeAdminFailure } from "@loom/ui-kit/lib/admin-error";
+import { cn } from "@loom/ui-kit/lib/utils";
 
 /**
  * Add or reconfigure a connector instance.
@@ -98,6 +100,7 @@ export function ConnectorInstanceDialog({
   const [isSubmitting, setIsSubmitting] = React.useState(false);
 
   const selectedType = types.data?.find((candidate) => candidate.typeId === typeId) ?? null;
+  const setupGuide = !isEditing ? (selectedType?.setupGuide ?? null) : null;
 
   // Seed the config form once the schema is known: on create from the schema's
   // own defaults, on edit from what is actually stored. Keyed on the schema and
@@ -200,7 +203,12 @@ export function ConnectorInstanceDialog({
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="max-h-[85vh] overflow-y-auto">
+      <DialogContent
+        className={cn(
+          "max-h-[85vh] overflow-y-auto",
+          setupGuide !== null && "sm:max-w-3xl",
+        )}
+      >
         <DialogHeader>
           <DialogTitle>
             {isEditing ? `Edit ${instance.name}` : "Add connector"}
@@ -316,14 +324,24 @@ export function ConnectorInstanceDialog({
           {selectedType !== null && !isLoading && (
             <div className="space-y-2 border-t border-border pt-4">
               <p className="text-sm font-medium">{selectedType.displayName} configuration</p>
-              <SchemaForm
-                schema={selectedType.configSchema}
-                value={config}
-                onChange={setConfig}
-                errors={errors}
-                disabled={isSubmitting}
-                idPrefix={`config-${selectedType.typeId}`}
-              />
+              <div
+                className={cn(
+                  "grid gap-4",
+                  setupGuide !== null && "lg:grid-cols-2 lg:items-start",
+                )}
+              >
+                <SchemaForm
+                  schema={selectedType.configSchema}
+                  value={config}
+                  onChange={setConfig}
+                  errors={errors}
+                  disabled={isSubmitting}
+                  idPrefix={`config-${selectedType.typeId}`}
+                />
+                {setupGuide !== null ? (
+                  <SetupGuidePanel guide={setupGuide} formValues={config} />
+                ) : null}
+              </div>
             </div>
           )}
 

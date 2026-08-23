@@ -17,6 +17,7 @@ import { Alert, AlertDescription, AlertTitle } from "@loom/ui-kit/components/ui/
 import { Button } from "@loom/ui-kit/components/ui/button";
 import { Card, CardContent, CardHeader } from "@loom/ui-kit/components/ui/card";
 import { ConnectorCard } from "@loom/ui-kit/components/ConnectorCard";
+import { DiscoverResourcesDialog } from "@loom/ui-kit/components/DiscoverResourcesDialog";
 import { ConnectorInstanceDialog } from "@loom/ui-kit/components/ConnectorInstanceDialog";
 import { Skeleton } from "@loom/ui-kit/components/ui/skeleton";
 import {
@@ -112,6 +113,7 @@ export function ConnectorsView({
   const [createOpen, setCreateOpen] = React.useState(false);
   const [editing, setEditing] = React.useState<ConnectorInstanceSummary | null>(null);
   const [deleting, setDeleting] = React.useState<ConnectorInstanceSummary | null>(null);
+  const [discovering, setDiscovering] = React.useState<ConnectorInstanceSummary | null>(null);
 
   const invalidate = React.useCallback(async () => {
     await queryClient.invalidateQueries({ queryKey: ["connector-instances"] });
@@ -190,6 +192,7 @@ export function ConnectorsView({
             <ConnectorCard
               key={instance.id}
               instance={instance}
+              onDiscover={canManage ? setDiscovering : undefined}
               onEdit={canManage ? setEditing : undefined}
               onDelete={canManage ? setDeleting : undefined}
             />
@@ -211,6 +214,18 @@ export function ConnectorsView({
         }}
         onSaved={invalidate}
       />
+
+      {discovering !== null ? (
+        <DiscoverResourcesDialog
+          open
+          instanceId={discovering.id}
+          instanceName={discovering.name}
+          onOpenChange={(open) => {
+            if (!open) setDiscovering(null);
+          }}
+          onCreated={invalidate}
+        />
+      ) : null}
 
       <AlertDialog
         open={deleting !== null}

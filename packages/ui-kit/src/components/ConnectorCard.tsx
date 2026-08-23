@@ -1,6 +1,6 @@
 import * as React from "react";
 import { useMutation, useQuery } from "@tanstack/react-query";
-import { Loader2, Pencil, Trash2 } from "lucide-react";
+import { Loader2, Pencil, ScanSearch, Trash2 } from "lucide-react";
 import { toast } from "sonner";
 
 import { Alert, AlertDescription, AlertTitle } from "@loom/ui-kit/components/ui/alert";
@@ -86,6 +86,7 @@ function formatChecked(iso: string): string {
 
 export function ConnectorCard({
   instance,
+  onDiscover,
   onEdit,
   onDelete,
 }: {
@@ -93,6 +94,7 @@ export function ConnectorCard({
   instance: ConnectorInstanceSummary;
   /** Supplied only when the viewer may manage instances; the control is not
    *  rendered otherwise. */
+  onDiscover?: (instance: ConnectorInstanceSummary) => void;
   onEdit?: (instance: ConnectorInstanceSummary) => void;
   onDelete?: (instance: ConnectorInstanceSummary) => void;
 }) {
@@ -165,7 +167,11 @@ export function ConnectorCard({
 
   const actions = detail.data?.actions ?? [];
   const showActionRow = canControl && (detail.isPending || actions.length > 0);
-  const hasManageControls = onEdit !== undefined || onDelete !== undefined;
+  const canDiscover =
+    onDiscover !== undefined &&
+    detail.data?.discoverableType !== null &&
+    detail.data?.discoverableType !== undefined;
+  const hasManageControls = canDiscover || onEdit !== undefined || onDelete !== undefined;
 
   return (
     <Card className="surface-elevated">
@@ -202,6 +208,17 @@ export function ConnectorCard({
 
             {hasManageControls && (
               <>
+                {canDiscover ? (
+                  <Button
+                    variant="ghost"
+                    size="icon"
+                    onClick={() => onDiscover(instance)}
+                    title={`Discover resources through ${name}`}
+                  >
+                    <ScanSearch aria-hidden="true" />
+                    <span className="sr-only">Discover resources through {name}</span>
+                  </Button>
+                ) : null}
                 {onEdit !== undefined && (
                   <Button
                     variant="ghost"

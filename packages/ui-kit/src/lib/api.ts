@@ -1091,7 +1091,7 @@ function getConnectorInstance(
 }
 
 /** Run discovery through one configured connector instance. */
-function discoverConnectorInstance(
+function discoverConnectorResources(
   runtime: ApiRuntime,
   id: string,
   signal?: AbortSignal,
@@ -1793,8 +1793,8 @@ export function createApiClient(options: {
     getConnectorInstances: (signal?: AbortSignal) => getConnectorInstances(runtime, signal),
     getConnectorInstance: (id: string, signal?: AbortSignal) =>
       getConnectorInstance(runtime, id, signal),
-    discoverConnectorInstance: (id: string, signal?: AbortSignal) =>
-      discoverConnectorInstance(runtime, id, signal),
+    discoverConnectorResources: (id: string, signal?: AbortSignal) =>
+      discoverConnectorResources(runtime, id, signal),
     createConnectorInstance: (data: CreateConnectorInstanceRequest, signal?: AbortSignal) =>
       createConnectorInstance(runtime, data, signal),
     updateConnectorInstance: (
