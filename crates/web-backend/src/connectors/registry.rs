@@ -41,6 +41,15 @@ pub struct ConnectorTypeRegistration {
     pub type_id: &'static str,
     /// Human-facing name for the type picker.
     pub display_name: &'static str,
+    /// The type's icon reference, in the `ConnectorMetadata::icon` convention
+    /// (`"brand:<key>"` or `"lucide:<name>"`).
+    ///
+    /// Duplicated from the connector's own `metadata()` rather than read
+    /// through it, because the type picker draws an icon *before* any instance
+    /// exists and `metadata()` is an instance method — the same chicken-and-egg
+    /// [`ConnectorSchemaFn`] exists to solve. `every_registration_declares_its_
+    /// connector_s_own_icon` below is what keeps the copy honest.
+    pub icon: Option<&'static str>,
     /// Turns stored configuration into a live connector.
     pub factory: ConnectorFactory,
     /// The configuration this type accepts, as JSON Schema.
@@ -66,6 +75,7 @@ pub fn builtin_registry() -> ConnectorTypeRegistry {
         ConnectorTypeRegistration {
             type_id: loom_core::connector::debug::TYPE_ID,
             display_name: "Debug Connector",
+            icon: Some("lucide:bug"),
             factory: |config| {
                 DebugConnector::from_config_value(config)
                     .map(|connector| Box::new(connector) as Box<dyn Connector>)
@@ -103,6 +113,28 @@ mod tests {
             schema["properties"].is_object(),
             "the add-connector form is generated from this"
         );
+    }
+
+    #[test]
+    fn every_registration_declares_its_connector_s_own_icon() {
+        // The registration copies the icon so the type picker can draw one
+        // without an instance. A copy that disagrees with the connector would
+        // show one icon in the picker and a different one on the card that the
+        // picker just created, which reads as a bug in the icon system rather
+        // than as the transcription error it is.
+        for registration in builtin_registry().values() {
+            let Ok(built) = (registration.factory)(Value::Object(Default::default())) else {
+                // A type whose default configuration is not buildable cannot be
+                // checked this way. None exist today; skipping is honest.
+                continue;
+            };
+            assert_eq!(
+                built.metadata().icon.as_deref(),
+                registration.icon,
+                "{} registers an icon its connector does not declare",
+                registration.type_id
+            );
+        }
     }
 
     #[test]

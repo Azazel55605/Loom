@@ -22,6 +22,8 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@loom/ui-kit/components/ui/select";
+import { ConnectorIcon } from "@loom/ui-kit/components/ConnectorIcon";
+import { ConnectorIconPicker } from "@loom/ui-kit/components/ConnectorIconPicker";
 import {
   defaultsForSchema,
   SchemaForm,
@@ -85,6 +87,11 @@ export function ConnectorInstanceDialog({
   const [typeId, setTypeId] = React.useState<string>(instance?.connectorType ?? "");
   const [name, setName] = React.useState<string>(instance?.name ?? "");
   const [config, setConfig] = React.useState<Record<string, unknown>>({});
+  // `null` is "no override", which is a real value here rather than "unset" —
+  // see `ConnectorIconPicker`.
+  const [iconOverride, setIconOverride] = React.useState<string | null>(
+    instance?.iconOverride ?? null,
+  );
   const [errors, setErrors] = React.useState<Record<string, string>>({});
   const [nameError, setNameError] = React.useState<string | null>(null);
   const [failure, setFailure] = React.useState<string | null>(null);
@@ -121,8 +128,13 @@ export function ConnectorInstanceDialog({
     if (open) {
       setFailure(null);
       setNameError(null);
+      // Re-seeded on open rather than only at mount: this dialog is kept
+      // mounted and handed a different `instance` each time, so state
+      // initialised from props once would show the previously edited
+      // connector's icon.
+      setIconOverride(instance?.iconOverride ?? null);
     }
-  }, [open]);
+  }, [open, instance]);
 
   // With exactly one registered type there is nothing to choose, so choosing it
   // for the user removes a pointless step. Still driven by the list, never by a
@@ -158,7 +170,13 @@ export function ConnectorInstanceDialog({
     setIsSubmitting(true);
     try {
       if (isEditing) {
-        await api.updateConnectorInstance(instance.id, { name: trimmed, config });
+        // Always sent when editing, `null` included: omitting the key means
+        // "leave it alone", which would make clearing an override impossible.
+        await api.updateConnectorInstance(instance.id, {
+          name: trimmed,
+          config,
+          iconOverride,
+        });
       } else {
         await api.createConnectorInstance({
           connectorType: selectedType.typeId,
@@ -242,7 +260,10 @@ export function ConnectorInstanceDialog({
                 <SelectContent>
                   {types.data?.map((candidate) => (
                     <SelectItem key={candidate.typeId} value={candidate.typeId}>
-                      {candidate.displayName}
+                      <span className="flex items-center gap-2">
+                        <ConnectorIcon typeIcon={candidate.icon} iconOverride={null} size={16} />
+                        {candidate.displayName}
+                      </span>
                     </SelectItem>
                   ))}
                 </SelectContent>
@@ -268,6 +289,29 @@ export function ConnectorInstanceDialog({
               <p className="text-xs font-medium text-destructive">{nameError}</p>
             )}
           </div>
+
+          {/* Editing only. A brand-new instance has nothing to be told apart
+              from yet, and `POST /connector-instances` deliberately takes no
+              `iconOverride` — one field with one place to set it is one fewer
+              way for the two to disagree. */}
+          {isEditing && !isLoading && (
+            <div className="space-y-2 border-t border-border pt-4">
+              {/* Visual heading only — no `htmlFor`, because the control it
+                  labels is a radio group of sixteen tiles rather than one
+                  focusable input. The group carries its own `aria-label`. */}
+              <p className="text-sm font-medium">Icon</p>
+              <p className="text-xs text-muted-foreground">
+                Overrides the icon this connector type ships with — useful when
+                you run more than one of the same thing.
+              </p>
+              <ConnectorIconPicker
+                value={iconOverride}
+                typeIcon={instance.metadata.icon}
+                onChange={setIconOverride}
+                disabled={isSubmitting}
+              />
+            </div>
+          )}
 
           {selectedType !== null && !isLoading && (
             <div className="space-y-2 border-t border-border pt-4">

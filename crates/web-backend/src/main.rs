@@ -984,6 +984,10 @@ mod tests {
         assert_eq!(created["connectorType"], "debug");
         assert_eq!(created["metadata"]["id"], "debug");
         assert_eq!(created["metadata"]["minSize"], serde_json::json!([2, 2]));
+        assert_eq!(created["metadata"]["icon"], "lucide:bug");
+        // A fresh instance inherits its type's icon; the override only exists
+        // once someone sets one.
+        assert_eq!(created["iconOverride"], serde_json::Value::Null);
         assert_eq!(created["status"]["health"], "healthy");
         assert!(!created["displayFields"]
             .as_array()
@@ -1126,6 +1130,89 @@ mod tests {
         )
         .await;
         assert_eq!(list.as_array().expect("array").len(), 0);
+    }
+
+    /// `iconOverride` has three request states, and the one that is easy to get
+    /// wrong is the difference between "leave it alone" and "clear it" — a flat
+    /// `Option` collapses them and quietly makes a chosen icon permanent.
+    #[tokio::test]
+    async fn an_icon_override_can_be_set_left_alone_and_cleared() {
+        let app = test_app().await;
+        let (access, _) = setup_and_login(&app.router).await;
+        let id = create_debug_instance(&app.router, &access, "Fixture").await;
+
+        let (status, set) = send(
+            &app.router,
+            patch_json_auth(
+                &format!("/connector-instances/{id}"),
+                &access,
+                serde_json::json!({ "iconOverride": "lucide:hard-drive" }),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "setting failed: {set:#}");
+        assert_eq!(set["iconOverride"], "lucide:hard-drive");
+        // The type's own icon is untouched: an override sits beside it rather
+        // than replacing it, so "use default" has something to go back to.
+        assert_eq!(set["metadata"]["icon"], "lucide:bug");
+
+        // An unrelated PATCH must not disturb it.
+        let (status, renamed) = send(
+            &app.router,
+            patch_json_auth(
+                &format!("/connector-instances/{id}"),
+                &access,
+                serde_json::json!({ "name": "Renamed" }),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "rename failed: {renamed:#}");
+        assert_eq!(renamed["iconOverride"], "lucide:hard-drive");
+
+        // And it survives a round trip through the database, not just the
+        // response this request happened to build.
+        let (status, listed) = send(
+            &app.router,
+            get_with_auth("/connector-instances", &bearer(&access)),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(listed[0]["iconOverride"], "lucide:hard-drive");
+
+        // Explicit null clears it.
+        let (status, cleared) = send(
+            &app.router,
+            patch_json_auth(
+                &format!("/connector-instances/{id}"),
+                &access,
+                serde_json::json!({ "iconOverride": null }),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "clearing failed: {cleared:#}");
+        assert_eq!(cleared["iconOverride"], serde_json::Value::Null);
+    }
+
+    /// The type picker draws an icon before any instance exists, so the catalog
+    /// has to carry one.
+    #[tokio::test]
+    async fn the_type_catalog_carries_each_type_s_icon() {
+        let app = test_app().await;
+        let (access, _) = setup_and_login(&app.router).await;
+
+        let (status, types) = send(
+            &app.router,
+            get_with_auth("/connector-types", &bearer(&access)),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let debug = types
+            .as_array()
+            .expect("array")
+            .iter()
+            .find(|entry| entry["typeId"] == "debug")
+            .expect("the debug type is always registered");
+        assert_eq!(debug["icon"], "lucide:bug");
     }
 
     #[tokio::test]

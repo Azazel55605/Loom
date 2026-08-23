@@ -277,6 +277,30 @@ one thing native controls do genuinely better — platform-standard accessibilit
 — is exactly what Radix primitives are built to reproduce, which is why they are
 mandatory in step (c).
 
+## Icons
+
+Two sources, and the distinction is not cosmetic:
+
+- **Generic icons** come from `lucide-react`, through the curated
+  `GENERIC_ICONS` set in `packages/ui-kit/src/lib/generic-icons.ts`. They are
+  line drawings that inherit `currentColor`, so they follow the accent and the
+  theme like everything else. Use these unless you are identifying a specific
+  product.
+- **Brand icons** are SVGs vendored per connector type under
+  `packages/ui-kit/src/assets/icons/brand/`. They are **not tinted** — a logo
+  rendered in the user's accent colour is no longer that logo. The accent
+  colours our surfaces; it does not recolour someone else's mark.
+
+Both are reached through one component, `ConnectorIcon`, which resolves the
+`brand:<key>` / `lucide:<name>` reference convention and falls back rather than
+failing. Never import a brand SVG directly, and never add one without reading
+[`THIRD_PARTY_ICONS.md`](./THIRD_PARTY_ICONS.md) first — the vendored set is
+Apache-2.0 and carries attribution obligations that a casual copy-paste breaks.
+
+Do not add icons to `GENERIC_ICONS` casually either. It is small on purpose: it
+is the set a connector author can rely on and the set the icon picker offers,
+and a catalog with a thousand members is a set with no contract.
+
 ## Keeping the registry current
 
 Adding or modifying a component means updating

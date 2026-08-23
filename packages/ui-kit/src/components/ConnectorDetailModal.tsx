@@ -12,6 +12,7 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@loom/ui-kit/components/ui/dialog";
+import { ConnectorIcon } from "@loom/ui-kit/components/ConnectorIcon";
 import { Skeleton } from "@loom/ui-kit/components/ui/skeleton";
 import { ActionButtonWidget } from "@loom/ui-kit/widgets/ActionButton";
 import { renderWidget } from "@loom/ui-kit/widgets/renderWidget";
@@ -92,6 +93,11 @@ export function ConnectorDetailModal({
       <DialogContent className="h-[calc(100dvh-1rem)] w-[calc(100vw-1rem)] max-w-5xl grid-rows-[auto_minmax(0,1fr)] overflow-hidden p-0 sm:h-auto sm:max-h-[90dvh] sm:w-[calc(100vw-3rem)]">
         <DialogHeader className="border-b px-5 py-4 pr-12 text-left">
           <div className="flex flex-wrap items-center gap-2">
+            <ConnectorIcon
+              typeIcon={instance.metadata.icon}
+              iconOverride={instance.iconOverride}
+              size={22}
+            />
             <DialogTitle>{instance.name}</DialogTitle>
             <Badge variant={reading.status?.health ?? "unknown"} className="capitalize">
               {reading.status?.health ?? "No reading"}

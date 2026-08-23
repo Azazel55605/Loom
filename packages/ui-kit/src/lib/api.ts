@@ -104,7 +104,17 @@ export type ConnectorMetadata = {
    */
   id: string;
   name: string;
-  /** Icon identifier, not a URL. `null` when the connector declares none. */
+  /**
+   * Icon *reference*, not a URL or image data. `null` when the connector
+   * declares none.
+   *
+   * One of two prefixed forms: `"brand:<key>"`, resolving to an SVG vendored
+   * under `packages/ui-kit/src/assets/icons/brand` (see
+   * `docs/THIRD_PARTY_ICONS.md`), or `"lucide:<name>"`, resolving to a
+   * kebab-case member of `GENERIC_ICONS`. Resolution and fallback are entirely
+   * client-side and live in `ConnectorIcon` — the backend never validates this
+   * string, because only a client knows which icons it has.
+   */
   icon: string | null;
   version: string;
   /** `[width, height]` in dashboard grid units: the smallest footprint at which
@@ -233,6 +243,9 @@ export type ConnectorError =
 export type ConnectorTypeSummary = {
   typeId: string;
   displayName: string;
+  /** The type's icon reference, so a type picker can draw one before any
+   *  instance exists. Same convention as `ConnectorMetadata.icon`. */
+  icon: string | null;
   /**
    * JSON Schema for this type's configuration.
    *
@@ -254,6 +267,10 @@ export type ConnectorInstanceSummary = {
   /** RFC 3339. */
   createdAt: string;
   metadata: ConnectorMetadata;
+  /** The user's per-instance icon choice, in the same reference convention as
+   *  `metadata.icon`. `null` means "no override" — fall back to the connector
+   *  type's own icon, then to the generic default. */
+  iconOverride: string | null;
   /** `null` when the connector's own status check failed. */
   status: ConnectorStatus | null;
   /** Present only when `status` is null; absent otherwise. */
@@ -403,6 +420,14 @@ export type CreateConnectorInstanceRequest = {
 export type UpdateConnectorInstanceRequest = {
   name?: string;
   config?: unknown;
+  /**
+   * Three states, and the distinction matters: **omit** the key to leave the
+   * override alone, send **`null`** to clear it back to the connector type's
+   * own icon, and send a **string** to set it. Because `undefined` is dropped
+   * when the body is serialized, "leave it alone" and "clear it" are exactly
+   * the difference between not setting the property and setting it to `null`.
+   */
+  iconOverride?: string | null;
 };
 
 /** `GET /setup/status` and `POST /setup` response. */

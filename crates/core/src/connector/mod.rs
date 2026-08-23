@@ -333,9 +333,30 @@ pub struct ConnectorMetadata {
     pub id: String,
     /// Display name shown in the UI.
     pub name: String,
-    /// Icon *identifier*, not image data — a name the clients resolve against
-    /// their own icon set, so core never ships assets or assumes a renderer.
-    /// `None` means "use the generic fallback".
+    /// Icon *reference*, not image data — a prefixed name the clients resolve
+    /// against their own icon sets, so core never ships assets or assumes a
+    /// renderer.
+    ///
+    /// The string, when present, takes one of exactly two forms:
+    ///
+    /// | Form | Resolves to | Example |
+    /// | --- | --- | --- |
+    /// | `"brand:<key>"` | A vendored brand SVG, `<key>` matching the vendored file's name without its extension. | `"brand:docker"` |
+    /// | `"lucide:<name>"` | One icon from the client's curated generic set, `<name>` matching a `lucide-react` component in **kebab-case**. | `"lucide:hard-drive"` |
+    ///
+    /// Kebab-case for the `lucide:` form because that is the name lucide's own
+    /// catalog and its `dynamicIconImports` map use; PascalCase is a detail of
+    /// one binding's component export, and a wire format should not encode
+    /// that.
+    ///
+    /// `None` means "no icon declared" and the client picks its own fallback.
+    /// This is not a validated field: an unresolvable reference is a rendering
+    /// concern, and a client that cannot find `"brand:whatever"` falls back
+    /// rather than failing. Core deliberately does not police it, because core
+    /// does not know what any client has vendored.
+    ///
+    /// See `docs/THIRD_PARTY_ICONS.md` for what is vendored and under which
+    /// license.
     pub icon: Option<String>,
     /// Version of the connector implementation itself, independent of the Loom
     /// release, so a connector can be revised without a platform bump.
@@ -959,7 +980,7 @@ mod tests {
         let metadata = ConnectorMetadata {
             id: "debug".to_string(),
             name: "Debug Connector".to_string(),
-            icon: Some("beaker".to_string()),
+            icon: Some("lucide:beaker".to_string()),
             version: "1.0.0".to_string(),
             min_size: (2, 2),
         };
@@ -970,7 +991,7 @@ mod tests {
             json!({
                 "id": "debug",
                 "name": "Debug Connector",
-                "icon": "beaker",
+                "icon": "lucide:beaker",
                 "version": "1.0.0",
                 "minSize": [2, 2]
             })
@@ -1140,7 +1161,7 @@ mod tests {
             serde_json::to_string_pretty(&ConnectorMetadata {
                 id: "debug".to_string(),
                 name: "Debug Connector".to_string(),
-                icon: Some("beaker".to_string()),
+                icon: Some("lucide:beaker".to_string()),
                 version: "1.0.0".to_string(),
                 min_size: (2, 2),
             })

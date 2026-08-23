@@ -18,6 +18,7 @@ import {
   ActionParamsDialog,
   takesParameters,
 } from "@loom/ui-kit/components/ActionParamsDialog";
+import { ConnectorIcon } from "@loom/ui-kit/components/ConnectorIcon";
 import { ActionButtonSkeleton } from "@loom/ui-kit/widgets/ActionButton";
 import {
   ApiError,
@@ -97,7 +98,8 @@ export function ConnectorCard({
 }) {
   const api = useApiClient();
   const { user } = useAuth();
-  const { id, name, connectorType, metadata, status, statusError, displayFields } = instance;
+  const { id, name, connectorType, metadata, iconOverride, status, statusError, displayFields } =
+    instance;
 
   // Visibility only. **Not a security boundary**: the backend checks
   // `connectors.control` on every action request, scoped to this instance id,
@@ -169,17 +171,26 @@ export function ConnectorCard({
     <Card className="surface-elevated">
       <CardHeader>
         <div className="flex items-start justify-between gap-3">
-          <div className="space-y-1">
-            <CardTitle>{name}</CardTitle>
-            <CardDescription>
-              {/* The connector *type*, not the instance id — the instance id is
-                  a UUID and means nothing to a reader. The icon is an
-                  identifier rather than a URL and there is no icon set wired up
-                  yet, so showing the id keeps it visible and honest instead of
-                  rendering a broken image. */}
-              {connectorType}
-              {metadata.icon !== null && ` · ${metadata.icon}`} · v{metadata.version}
-            </CardDescription>
+          <div className="flex min-w-0 items-start gap-3">
+            {/* Larger here than on a dashboard card: this is the connector
+                *administration* list, where a person is scanning a flat list of
+                every instance and the icon is the fastest way to find one. */}
+            <ConnectorIcon
+              typeIcon={metadata.icon}
+              iconOverride={iconOverride}
+              size={28}
+              className="mt-0.5"
+            />
+            <div className="min-w-0 space-y-1">
+              <CardTitle>{name}</CardTitle>
+              <CardDescription>
+                {/* The connector *type*, not the instance id — the instance id
+                    is a UUID and means nothing to a reader. The icon reference
+                    itself is no longer printed here: it is drawn to the left,
+                    which is what it was always for. */}
+                {connectorType} · v{metadata.version}
+              </CardDescription>
+            </div>
           </div>
 
           <div className="flex items-center gap-1">

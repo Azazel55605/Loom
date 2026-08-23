@@ -673,6 +673,7 @@ the instances they may see are on `/connector-instances`, which asks only for
   {
     "typeId": "debug",
     "displayName": "Debug Connector",
+    "icon": "lucide:bug",
     "configSchema": {
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "title": "Debug connector configuration",
@@ -702,6 +703,7 @@ the instances they may see are on `/connector-instances`, which asks only for
 | --- | --- | --- | --- |
 | `typeId` | string | Stable machine identifier, sent back as `connectorType` when creating an instance. | Always present. |
 | `displayName` | string | Human-facing name for the type picker. | Always present. |
+| `icon` | string | The type's icon reference, in the same convention as [`ConnectorMetadata.icon`](#connectormetadata). Carried here so the type picker can draw an icon *before* any instance of the type exists. | **`null`** when the type declares none. |
 | `configSchema` | object | JSON Schema for this type's configuration, published by the connector itself. | Always present; an object, never `null`. A type needing no configuration returns an empty schema object. |
 
 **The schema is advisory for the client and not the server's validator.** The
@@ -733,10 +735,11 @@ Requires a **global** `connectors.view` grant.
     "metadata": {
       "id": "debug",
       "name": "Debug Connector",
-      "icon": "beaker",
+      "icon": "lucide:bug",
       "version": "0.1.0",
       "minSize": [2, 2]
     },
+    "iconOverride": "lucide:hard-drive",
     "status": {
       "health": "healthy",
       "details": {
@@ -767,6 +770,7 @@ Requires a **global** `connectors.view` grant.
 | `connectorType` | string | Which registered type it is. | Always present. |
 | `createdAt` | string | RFC 3339 timestamp, in the stored spelling — numeric offset, sub-second digits. See [Conventions](#conventions). | Always present. |
 | `metadata` | object | [`ConnectorMetadata`](#connectormetadata) from the live connector. | Always present. |
+| `iconOverride` | string | The user's icon for *this instance*, overriding `metadata.icon`. Same [reference convention](#icon-references). Set through `PATCH /connector-instances/{id}`. | **`null`** when no override is set — fall back to `metadata.icon`, then to the client's own default. |
 | `status` | object | [`ConnectorStatus`](#connectorstatus) from the latest successful poll. | **`null`** when the latest check itself failed. |
 | `statusError` | object | The [`ConnectorError`](#connectorerror) that made `status` null. | **Omitted** (not null) on the healthy path. |
 | `displayFields` | array | [`DisplayField`](#displayfield) values the connector agreed may be shown. | Always present; may be empty. |
@@ -806,7 +810,8 @@ carries, plus what a dashboard placement UI needs.
   "name": "Fixture",
   "connectorType": "debug",
   "createdAt": "2026-08-21T09:14:03.914238771+00:00",
-  "metadata": { "id": "debug", "name": "Debug Connector", "icon": "beaker", "version": "0.1.0", "minSize": [2, 2] },
+  "metadata": { "id": "debug", "name": "Debug Connector", "icon": "lucide:bug", "version": "0.1.0", "minSize": [2, 2] },
+  "iconOverride": null,
   "status": { "health": "healthy", "details": {}, "lastChecked": "2026-08-21T09:20:11Z" },
   "displayFields": [{ "label": "Host", "value": "debug.invalid" }],
   "config": { "baseLoad": 10 },
@@ -896,15 +901,34 @@ malformed, and a 404 would suggest the *instance* was not found.
 
 Requires a global `connectors.manage` grant.
 
-**Request** — both fields optional; an absent field is left alone:
+**Request** — every field optional; an absent field is left alone:
 
 ```json
-{ "name": "Renamed", "config": { "label": "after-update" } }
+{ "name": "Renamed", "config": { "label": "after-update" }, "iconOverride": "lucide:hard-drive" }
 ```
+
+| Field | JSON type | Meaning |
+| --- | --- | --- |
+| `name` | string | New display name. Must not be empty or whitespace. |
+| `config` | object | New configuration, **replacing** the stored one. |
+| `iconOverride` | string or `null` | This instance's icon, overriding its type's. See below. |
 
 **`config` replaces the whole configuration**; it is not merged. A connector is
 rebuilt from its configuration wholesale, so there is no coherent meaning for a
 partial one.
+
+**`iconOverride` has three request states, not two.** Omitting the key leaves
+the stored override alone; sending `null` **clears** it back to the connector
+type's own icon; sending a string sets it. The distinction is why the field is
+nullable rather than merely optional — collapsing "leave it" and "clear it" into
+one request would make a chosen icon impossible to undo. The value follows the
+[icon reference convention](#icon-references) and is **not validated**: an
+empty or whitespace-only string is stored as `null`, and anything else is stored
+as sent, because only a client knows which icons it has.
+
+There is no `iconOverride` on `POST /connector-instances`. A new instance has
+nothing to be distinguished from yet, and one field with one place to set it is
+one fewer way for the two to disagree.
 
 The live connector is rebuilt and replaced on every successful update, whether
 or not `config` changed. That is also how an instance that failed to load at
@@ -918,6 +942,7 @@ startup gets a second chance once its configuration is fixed.
 | 400 | `name` was present and empty, or the connector refused the new `config`. Nothing is changed. |
 | 403 | The caller lacks a global `connectors.manage` grant. |
 | 404 | No instance with that id. |
+| 422 | `iconOverride` was present and was neither a string nor `null`. |
 
 ### `DELETE /connector-instances/{id}`
 
@@ -1796,7 +1821,7 @@ first is the user's service to look at; the second is Loom's setup.
 {
   "id": "debug",
   "name": "Debug Connector",
-  "icon": "beaker",
+  "icon": "lucide:bug",
   "version": "1.0.0",
   "minSize": [2, 2]
 }
@@ -1806,7 +1831,7 @@ first is the user's service to look at; the second is Loom's setup.
 | --- | --- | --- | --- |
 | `id` | string | The connector **type**'s identifier, not the instance's. Lowercase kebab-case by convention (`"debug"`, `"reverse-proxy"`). The instance's own id is the sibling `id` on the response envelope. | Always present. |
 | `name` | string | Display name shown in the UI. | Always present. |
-| `icon` | string | Icon *identifier*, not image data — a name each client resolves against its own icon set. | Serialized as **`null`** when absent, meaning "use the generic fallback". |
+| `icon` | string | Icon *reference*, not image data — a prefixed name each client resolves against its own icon set. See the two forms below. | Serialized as **`null`** when absent, meaning "the client picks its own fallback". |
 | `version` | string | Version of the connector implementation, independent of the Loom release. | Always present. |
 | `minSize` | array | `[width, height]` in dashboard grid units: the smallest footprint at which this connector is still readable. A floor the placement UI enforces, not a preferred size. | Always present; a two-element array of integers. |
 
@@ -1814,6 +1839,27 @@ first is the user's service to look at; the second is Loom's setup.
 and assumes no renderer — the web, desktop, and mobile clients each map the name
 onto their own icon set. `version` is the connector's own, so a connector can be
 revised without a platform bump.
+
+#### Icon references
+
+An icon string, wherever one appears in this document, takes exactly one of two
+prefixed forms:
+
+| Form | Resolves to | Example |
+| --- | --- | --- |
+| `brand:<key>` | An SVG vendored by the client, `<key>` matching the vendored file's name without its extension. See [`THIRD_PARTY_ICONS.md`](./THIRD_PARTY_ICONS.md) for what the web client has vendored and under which license. | `"brand:docker"` |
+| `lucide:<name>` | One member of the client's curated generic icon set, `<name>` in **kebab-case**. | `"lucide:hard-drive"` |
+
+Kebab-case because that is what lucide's own catalog uses; PascalCase is a
+detail of one client library's component exports, and a wire format does not get
+to depend on it.
+
+**The backend never validates an icon reference.** It stores and returns the
+string. Resolution *and fallback* are entirely client-side, because only a
+client knows which icons it actually has: a reference naming something a given
+client lacks falls through to the next candidate rather than failing the
+request or rendering nothing. Nothing about a connector is broken because its
+icon is missing.
 
 ### `DisplayField`
 

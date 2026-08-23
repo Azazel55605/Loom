@@ -1,0 +1,20 @@
+-- Per-instance icon override.
+--
+-- A connector *type* declares an icon in its `ConnectorMetadata`, which is code
+-- and therefore identical for every instance of that type. Two Docker hosts
+-- would be two identical whale icons on the same dashboard, which is precisely
+-- when a person most needs to tell them apart. This column is the user's answer
+-- to that, stored per instance.
+--
+-- NULL means "no override" — fall back to the connector type's own icon, and
+-- then to the client's generic default. That is a different thing from an empty
+-- string, so the column is nullable rather than NOT NULL DEFAULT ''.
+--
+-- The value follows the same reference convention as `ConnectorMetadata::icon`
+-- (`"brand:<key>"` or `"lucide:<name>"`, see crates/core/src/connector/mod.rs).
+-- It is deliberately **not** constrained here, and the backend does not
+-- validate it beyond being a string: resolution and fallback are entirely
+-- client-side, because only a client knows which icons it has. A CHECK
+-- constraint would encode one client's icon set into the schema and need a
+-- migration every time an icon was added.
+ALTER TABLE connector_instances ADD COLUMN icon_override TEXT NULL;

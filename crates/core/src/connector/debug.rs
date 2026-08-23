@@ -733,7 +733,10 @@ impl Connector for DebugConnector {
         ConnectorMetadata {
             id: TYPE_ID.to_string(),
             name: "Debug Connector".to_string(),
-            icon: Some("beaker".to_string()),
+            // `lucide:` rather than `brand:` — the fixture is not a product
+            // and has no logo to vendor. A bug is what a debug connector is.
+            // See `ConnectorMetadata::icon` for the two reference forms.
+            icon: Some("lucide:bug".to_string()),
             version: env!("CARGO_PKG_VERSION").to_string(),
             // Two by two: enough for the stat tile and the status dot beside a
             // chart that is still readable. Small, because the fixture should
@@ -847,6 +850,32 @@ mod tests {
         assert_eq!(connector.metadata().id, TYPE_ID);
         assert_eq!(connector.metadata().min_size, (2, 2));
         assert!(connector.config_schema().is_object());
+    }
+
+    #[test]
+    fn the_icon_uses_a_prefixed_reference_a_client_can_resolve() {
+        // Core cannot check that the *target* exists — only a client knows what
+        // it has vendored. What it can check is that the reference is one of
+        // the two documented forms, because an unprefixed name like `"bug"` is
+        // silently unresolvable everywhere rather than loudly wrong anywhere.
+        let icon = DebugConnector::default()
+            .metadata()
+            .icon
+            .expect("the fixture declares an icon, as the convention's example");
+
+        let (scheme, name) = icon
+            .split_once(':')
+            .unwrap_or_else(|| panic!("{icon} is not a prefixed icon reference"));
+        assert!(
+            matches!(scheme, "brand" | "lucide"),
+            "{scheme} is not one of the two documented icon schemes"
+        );
+        assert!(!name.is_empty(), "{icon} names nothing after its prefix");
+        assert_eq!(
+            name,
+            name.to_lowercase(),
+            "icon references are kebab-case, never PascalCase"
+        );
     }
 
     #[tokio::test]

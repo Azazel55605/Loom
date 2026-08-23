@@ -25,7 +25,7 @@ use loom_core::connector::{
     Connector, ConnectorAction, ConnectorError, ConnectorMetadata, ConnectorStatus,
     DataPointDescriptor, DisplayField, WidgetLayout,
 };
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::Value;
 use uuid::Uuid;
 
@@ -60,6 +60,9 @@ type RouteResult<T> = Result<T, Box<Response>>;
 pub struct ConnectorTypeResponse {
     type_id: String,
     display_name: String,
+    /// The type's icon reference, so the type picker can draw one before any
+    /// instance of it exists. Same convention as `ConnectorMetadata::icon`.
+    icon: Option<String>,
     /// JSON Schema for this type's configuration, as published by the
     /// connector itself. The add-connector form is generated from it, so
     /// registering a new connector type needs no frontend change.
@@ -83,6 +86,7 @@ pub async fn list_connector_types(
         .map(|registration| ConnectorTypeResponse {
             type_id: registration.type_id.to_owned(),
             display_name: registration.display_name.to_owned(),
+            icon: registration.icon.map(str::to_owned),
             config_schema: (registration.schema)(),
         })
         .collect();
@@ -111,6 +115,13 @@ pub struct ConnectorInstanceResponse {
     connector_type: String,
     created_at: String,
     metadata: ConnectorMetadata,
+    /// The user's per-instance icon choice, overriding `metadata.icon`.
+    ///
+    /// `null` means "no override": the client falls back to `metadata.icon`,
+    /// and then to its own generic default. Same reference convention as
+    /// `metadata.icon`, and equally unvalidated here — resolution is entirely
+    /// client-side, so the backend stores the string and nothing more.
+    icon_override: Option<String>,
     /// `null` when the status check itself failed — see `statusError`.
     status: Option<ConnectorStatus>,
     /// Present only when `status` is `null`. One unreachable connector must not
@@ -166,6 +177,27 @@ pub struct UpdateInstanceRequest {
     /// a connector is rebuilt from its config wholesale, so there is no
     /// coherent meaning for a partial one.
     config: Option<Value>,
+    /// Three states, which is why it is a nested `Option`: **absent** leaves the
+    /// override alone, **`null`** clears it back to the connector type's own
+    /// icon, and a **string** sets it. A flat `Option<String>` would make
+    /// "clear it" and "do not touch it" the same request, leaving no way to
+    /// undo a choice.
+    #[serde(default, deserialize_with = "present_or_absent")]
+    icon_override: Option<Option<String>>,
+}
+
+/// Distinguishes an absent JSON field from one explicitly set to `null`.
+///
+/// `#[serde(default)]` alone cannot: `Option<Option<T>>` collapses `null` to
+/// the outer `None`, which is the same value an absent field produces. Running
+/// the inner `Option` through its own deserializer and wrapping the result in
+/// `Some` keeps the two apart, because this function is only *called* when the
+/// field is present.
+fn present_or_absent<'de, D>(deserializer: D) -> Result<Option<Option<String>>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    Option::<String>::deserialize(deserializer).map(Some)
 }
 
 /// The stored columns of one instance.
@@ -176,6 +208,7 @@ struct InstanceRow {
     name: String,
     config: String,
     created_at: String,
+    icon_override: Option<String>,
 }
 
 /// `GET /connector-instances`
@@ -194,7 +227,7 @@ pub async fn list_instances(
     State(state): State<AppState>,
 ) -> Response {
     let rows = sqlx::query_as::<_, InstanceRow>(
-        "SELECT id, connector_type, name, config, created_at \
+        "SELECT id, connector_type, name, config, created_at, icon_override \
          FROM connector_instances ORDER BY name",
     )
     .fetch_all(&state.pool)
@@ -334,6 +367,12 @@ pub async fn create_instance(
         name: name.to_owned(),
         config,
         created_at,
+        // A new instance has no override; it inherits its type's icon until
+        // someone chooses otherwise. Create deliberately takes no `iconOverride`
+        // — an instance has to exist before there is anything to distinguish it
+        // from, and one field with one place to set it is one fewer way to
+        // disagree with itself.
+        icon_override: None,
     };
 
     let body = detail_for(&row, Some(connector.as_ref()), snapshot.as_ref()).await;
@@ -377,13 +416,25 @@ pub async fn update_instance(
         Err(error) => return build_failure(error),
     };
 
+    // Absent leaves the stored value; `null` clears it; a string sets it. See
+    // `UpdateInstanceRequest::icon_override` for why that needs three states.
+    let icon_override = match request.icon_override {
+        Some(next) => next
+            .map(|value| value.trim().to_owned())
+            .filter(|value| !value.is_empty()),
+        None => row.icon_override.clone(),
+    };
+
     let serialized = config.to_string();
-    let updated = sqlx::query("UPDATE connector_instances SET name = ?, config = ? WHERE id = ?")
-        .bind(&name)
-        .bind(&serialized)
-        .bind(&row.id)
-        .execute(&state.pool)
-        .await;
+    let updated = sqlx::query(
+        "UPDATE connector_instances SET name = ?, config = ?, icon_override = ? WHERE id = ?",
+    )
+    .bind(&name)
+    .bind(&serialized)
+    .bind(&icon_override)
+    .bind(&row.id)
+    .execute(&state.pool)
+    .await;
 
     if let Err(error) = updated {
         return internal_error("updating a connector instance", error);
@@ -396,6 +447,7 @@ pub async fn update_instance(
     let row = InstanceRow {
         name,
         config: serialized,
+        icon_override,
         ..row
     };
 
@@ -505,7 +557,7 @@ pub async fn execute_action(
 /// a ready-made 500.
 async fn load_row(state: &AppState, id: &str) -> RouteResult<Option<InstanceRow>> {
     sqlx::query_as::<_, InstanceRow>(
-        "SELECT id, connector_type, name, config, created_at \
+        "SELECT id, connector_type, name, config, created_at, icon_override \
          FROM connector_instances WHERE id = ?",
     )
     .bind(id)
@@ -580,6 +632,7 @@ fn entry_for(
         connector_type: row.connector_type.clone(),
         created_at: row.created_at.clone(),
         metadata,
+        icon_override: row.icon_override.clone(),
         status,
         status_error,
         display_fields,

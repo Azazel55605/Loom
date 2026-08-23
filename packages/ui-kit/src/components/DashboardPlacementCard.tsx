@@ -18,6 +18,7 @@ import {
 } from "@loom/ui-kit/lib/api";
 import { useApiClient } from "@loom/ui-kit/lib/api-context";
 import { useAuth } from "@loom/ui-kit/lib/auth-context";
+import { ConnectorIcon } from "@loom/ui-kit/components/ConnectorIcon";
 import { cn } from "@loom/ui-kit/lib/utils";
 import { describeConnectorError } from "@loom/ui-kit/lib/connector-error";
 import { hasPermission, PERMISSION_KEYS } from "@loom/ui-kit/lib/permissions";
@@ -163,6 +164,11 @@ export function DashboardPlacementCard({
               aria-hidden="true"
             />
           ) : null}
+          <ConnectorIcon
+            typeIcon={instance.metadata.icon}
+            iconOverride={instance.iconOverride}
+            size={20}
+          />
           <div className="min-w-0">
             <p className="truncate text-sm font-semibold leading-none" title={instance.name}>
               {instance.name}
