@@ -33,7 +33,7 @@ dependencies are fetched by Cargo on first build; no separate step.
 | web-backend | `pnpm build:web-backend` | `target/release/loom-web-backend` binary |
 | web-frontend | `pnpm build:web-frontend` | `apps/web-frontend/dist/` static site |
 | desktop | `pnpm build:desktop` | Platform installers in `apps/desktop/src-tauri/target/release/bundle/` |
-| mobile | `pnpm build:mobile` | Unsigned APK + AAB via Gradle, under `apps/mobile/src-tauri/gen/android/app/build/outputs/` |
+| mobile | `pnpm build:mobile` | Unsigned arm64 debug APK under `apps/mobile/src-tauri/gen/android/app/build/outputs/` |
 
 The Cargo packages are named `loom-core` and `loom-web-backend` — a crate named
 `core` would collide with Rust's built-in `core`. The `pnpm build:*` scripts
@@ -213,11 +213,28 @@ macOS builds are unsigned; see
 **Android only — iOS is out of scope.**
 
 ```sh
-pnpm build:mobile      # configure Android policy + build unsigned debug APK
+pnpm build:mobile      # arm64 phone/tablet APK
 ```
 
 Output lands in `apps/mobile/src-tauri/gen/android/app/build/outputs/`:
-`apk/universal/<variant>/*.apk` and `bundle/universal<Variant>/*.aab`.
+the APK is under `apk/universal/debug/` (Tauri's variant name), but contains
+only the `arm64-v8a` native library. Debug builds deliberately do not also
+generate an AAB.
+
+The default does not build a universal APK. A universal debug APK duplicated
+the Rust shared library for several ABIs and could exceed 500 MB. Loom supports
+arm64 Android phones and tablets only; Chromebook and x86 emulator APKs are out
+of scope. The Cargo dev profile also strips native DWARF from the packaged
+library while retaining debug assertions, overflow checks, and the unoptimised
+debug profile. For the uncommon case where source-level Rust debugging is
+required, restore full symbols for that invocation:
+
+```sh
+CARGO_PROFILE_DEV_STRIP=none pnpm build:mobile
+```
+
+That symbol-bearing APK is expected to be much larger. JavaScript/WebView
+debugging and ordinary `adb logcat` use do not require the removed DWARF data.
 
 ### Extra prerequisites
 
@@ -225,11 +242,10 @@ Beyond the shared Tauri dependencies, mobile needs:
 
 - **JDK 21** (Gradle / Android Gradle Plugin).
 - **Android SDK** with a platform and build-tools, plus the **NDK**.
-- The four Rust Android targets:
+- The arm64 Rust Android target:
 
   ```sh
-  rustup target add aarch64-linux-android armv7-linux-androideabi \
-      i686-linux-android x86_64-linux-android
+  rustup target add aarch64-linux-android
   ```
 
 - `ANDROID_HOME` and `NDK_HOME` exported. Point them at your own SDK install —
@@ -257,9 +273,10 @@ generated Gradle files must never be hand-edited. See
 [`VERSIONING.md`](./VERSIONING.md). CI runs the same `init` step for the same
 reason.
 
-The generated manifest also needs Loom's runtime network policy. Its canonical
-source is `apps/mobile/android/network_security_config.xml`; apply it after
-every init (the standard build and CI do this automatically):
+The generated project also needs Loom's runtime network policy and launcher
+icons. Their canonical sources are `apps/mobile/android/network_security_config.xml`
+and `apps/mobile/src-tauri/icons/android/`; apply them after every init (the
+standard build and CI do this automatically):
 
 ```sh
 pnpm --filter mobile android:configure
@@ -289,7 +306,8 @@ Debug builds are signed with Gradle's debug keystore and are **not** release
 artifacts. **Release signing is not implemented** — no keystore, no Play Store
 publishing. It is a deliberate follow-up, mirroring how desktop code-signing was
 deferred, and needs a keystore in GitHub Secrets plus a Gradle signing config.
-`.github/workflows/release-mobile.yml` therefore builds a debug APK only.
+`.github/workflows/release-mobile.yml` therefore builds the same arm64 debug
+APK only, avoiding an oversized multi-ABI artifact.
 
 ## Desktop local testing
 

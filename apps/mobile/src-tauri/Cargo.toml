@@ -23,6 +23,7 @@ tauri-build = { version = "2", features = [] }
 
 [dependencies]
 tauri = { version = "2", features = [] }
+tauri-plugin-http = { version = "2", features = ["dangerous-settings"] }
 tauri-plugin-store = "2"
 tauri-plugin-stronghold = "2"
 serde = { version = "1", features = ["derive"] }
@@ -32,3 +33,11 @@ serde_json = "1"
 # this dependency keeps debug Android startup practical without weakening it.
 [profile.dev.package.scrypt]
 opt-level = 3
+
+# Android's universal debug APK previously embedded full DWARF data in four
+# copies of this cdylib, producing a roughly 500 MB artifact. Debug assertions,
+# overflow checks, and the unoptimised profile remain enabled; only native Rust
+# symbols are removed from the packaged library. Override with
+# `CARGO_PROFILE_DEV_STRIP=none` when source-level native debugging is needed.
+[profile.dev]
+strip = "debuginfo"

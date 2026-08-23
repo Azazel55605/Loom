@@ -70,15 +70,18 @@ today because an encrypted file whose key lifecycle is unresolved is weaker
 operationally than the available native credential stores.
 
 Mobile uses the same `ConnectToServer`, auth provider, API client, and settings
-panels from `@loom/ui-kit`. Its adapter persists the non-sensitive server URL
-with `tauri-plugin-store` and stores the token pair only in an encrypted
-Stronghold snapshot. A random per-install vault password is kept in the app's
-private Store data, while Stronghold's Argon2 setup uses an app-local salt.
-This prevents tokens appearing as plaintext settings and protects backups or
-copies of the vault by itself. It is not equivalent to Desktop's OS credential
-store against a compromise that can read all of the app's private data;
-wrapping the vault password with Android Keystore is a possible future
-hardening step.
+panels from `@loom/ui-kit`. Its native Tauri HTTP adapter supports the same
+off-by-default invalid-certificate option as Desktop and persists that
+non-sensitive per-server choice with `tauri-plugin-store`. Mobile's Android
+WebView WebSocket still requires a normally trusted WSS certificate, so the UI
+states that the exception covers API requests but not live status push. The
+token pair is stored only in an encrypted Stronghold snapshot. A random
+per-install vault password is kept in the app's private Store data, while
+Stronghold's Argon2 setup uses an app-local salt. This prevents tokens appearing
+as plaintext settings and protects backups or copies of the vault by itself. It
+is not equivalent to Desktop's OS credential store against a compromise that
+can read all of the app's private data; wrapping the vault password with Android
+Keystore is a possible future hardening step.
 
 Android applies a tracked Network Security Configuration to its generated
 project. It permits cleartext HTTP for explicitly selected private-network
@@ -131,5 +134,7 @@ explicit list still limits which browser contexts may read API responses.
   no setting.
 - Android HTTP support accepts the confidentiality risk of a user-selected
   cleartext server. Trusting a user-installed CA grants that CA the same trust
-  the device owner assigned it; Loom still rejects untrusted, expired, or
-  hostname-mismatched certificates.
+  the device owner assigned it. When Mobile's explicit certificate exception is
+  disabled, Loom rejects untrusted, expired, or hostname-mismatched
+  certificates; when enabled, it accepts chain/expiry failures for native HTTP
+  while continuing to reject hostname mismatches.

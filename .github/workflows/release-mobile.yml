@@ -79,7 +79,7 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
         with:
-          targets: aarch64-linux-android,armv7-linux-androideabi,i686-linux-android,x86_64-linux-android
+          targets: aarch64-linux-android
 
       - name: Cache Rust build
         uses: Swatinem/rust-cache@v2
@@ -106,8 +106,10 @@ jobs:
       # in GitHub Secrets, the signing config wired into the Gradle project, and
       # a decision about Play Store publishing. Not attempted here: proving the
       # pipeline comes first.
+      # Mobile targets arm64 phones and tablets only. The Cargo dev profile
+      # strips DWARF while retaining debug assertions.
       - name: Build unsigned debug APK
-        run: pnpm --filter mobile tauri android build --debug
+        run: pnpm --filter mobile tauri android build --debug --target aarch64 --apk
 
       - name: Upload APK
         uses: actions/upload-artifact@v4

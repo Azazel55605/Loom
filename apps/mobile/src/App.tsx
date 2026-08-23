@@ -10,6 +10,10 @@ import {
 } from "react-router-dom";
 
 import { mobileBaseUrlProvider } from "@/adapters/mobileBaseUrlProvider";
+import {
+  createMobileHttpTransport,
+  mobileInvalidCertificateWebSocketNote,
+} from "@/adapters/mobileHttpTransport";
 import { mobileTokenStorage } from "@/adapters/mobileTokenStorage";
 import { mobileWebSocketTransport } from "@/adapters/mobileWebSocketTransport";
 import {
@@ -24,7 +28,10 @@ import {
 } from "@/pages/DashboardsPage";
 import { LoginPage } from "@/pages/LoginPage";
 import { SetupPage } from "@/pages/SetupPage";
-import { ConnectToServer } from "@loom/ui-kit/components/ConnectToServer";
+import {
+  ConnectToServer,
+  type ServerConnection,
+} from "@loom/ui-kit/components/ConnectToServer";
 import { Alert, AlertDescription, AlertTitle } from "@loom/ui-kit/components/ui/alert";
 import { Button } from "@loom/ui-kit/components/ui/button";
 import { Toaster } from "@loom/ui-kit/components/ui/sonner";
@@ -48,7 +55,7 @@ const GroupsPanel = React.lazy(async () => ({
 type ServerState =
   | { kind: "loading" }
   | { kind: "error"; message: string }
-  | { kind: "ready"; baseUrl: string };
+  | { kind: "ready"; connection: ServerConnection };
 
 export default function App({ queryClient }: { queryClient: QueryClient }) {
   const [server, setServer] = React.useState<ServerState>({ kind: "loading" });
@@ -56,8 +63,8 @@ export default function App({ queryClient }: { queryClient: QueryClient }) {
   const loadServer = React.useCallback(() => {
     setServer({ kind: "loading" });
     void mobileBaseUrlProvider
-      .getBaseUrl()
-      .then((baseUrl) => setServer({ kind: "ready", baseUrl }))
+      .getConnection()
+      .then((connection) => setServer({ kind: "ready", connection }))
       .catch((error: unknown) =>
         setServer({
           kind: "error",
@@ -90,36 +97,52 @@ export default function App({ queryClient }: { queryClient: QueryClient }) {
     );
   }
 
-  if (server.baseUrl === "") {
+  if (server.connection.baseUrl === "") {
     return (
       <ConnectToServer
-        onConnected={async ({ baseUrl }) => {
-          await mobileBaseUrlProvider.setBaseUrl(baseUrl);
-          setServer({ kind: "ready", baseUrl });
+        supportsInvalidCertificates
+        invalidCertificateNote={mobileInvalidCertificateWebSocketNote}
+        getHttpTransport={createMobileHttpTransport}
+        onConnected={async (connection) => {
+          await mobileBaseUrlProvider.setConnection(connection);
+          setServer({ kind: "ready", connection });
         }}
       />
     );
   }
 
-  const changeServer = async (baseUrl: string) => {
-    if (baseUrl === server.baseUrl) return;
-    await mobileTokenStorage.clearTokens();
-    await mobileBaseUrlProvider.setBaseUrl(baseUrl);
+  const changeServer = async (connection: ServerConnection) => {
+    if (
+      connection.baseUrl === server.connection.baseUrl &&
+      connection.allowInvalidCertificates ===
+        server.connection.allowInvalidCertificates
+    ) {
+      return;
+    }
+    if (connection.baseUrl !== server.connection.baseUrl) {
+      await mobileTokenStorage.clearTokens();
+    }
+    await mobileBaseUrlProvider.setConnection(connection);
     queryClient.clear();
-    setServer({ kind: "ready", baseUrl });
+    setServer({ kind: "ready", connection });
   };
+
+  const connectionKey = `${server.connection.baseUrl}|${server.connection.allowInvalidCertificates}`;
 
   return (
     <HashRouter>
       <AuthProvider
-        key={server.baseUrl}
+        key={connectionKey}
         baseUrlProvider={mobileBaseUrlProvider}
+        httpTransport={createMobileHttpTransport(
+          server.connection.allowInvalidCertificates,
+        )}
         tokenStorage={mobileTokenStorage}
         webSocketTransport={mobileWebSocketTransport}
       >
         <React.Suspense fallback={null}>
           <MobileRoutes
-            baseUrl={server.baseUrl}
+            connection={server.connection}
             onServerChanged={changeServer}
           />
         </React.Suspense>
@@ -130,11 +153,11 @@ export default function App({ queryClient }: { queryClient: QueryClient }) {
 }
 
 function MobileRoutes({
-  baseUrl,
+  connection,
   onServerChanged,
 }: {
-  baseUrl: string;
-  onServerChanged: (baseUrl: string) => Promise<void>;
+  connection: ServerConnection;
+  onServerChanged: (connection: ServerConnection) => Promise<void>;
 }) {
   return (
     <RequireSetup>
@@ -171,7 +194,7 @@ function MobileRoutes({
           element={
             <RequireAuth>
               <MobileSettingsRoute
-                baseUrl={baseUrl}
+                connection={connection}
                 onServerChanged={onServerChanged}
               />
             </RequireAuth>

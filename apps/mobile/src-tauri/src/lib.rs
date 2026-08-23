@@ -1,9 +1,10 @@
 //! Loom mobile client.
 //!
 //! The window hosts the same React UI the web frontend uses; all privileged
-//! work happens in `web-backend` over its HTTP API, so this shell deliberately
-//! exposes no custom commands. Public server configuration is persisted by the
-//! Store plugin; authentication tokens are encrypted by Stronghold. See
+//! work happens in `web-backend` over its HTTP API, so this shell exposes only
+//! persistence and native HTTP transport plugins, not app-specific commands.
+//! Public server configuration is persisted by Store; authentication tokens
+//! are encrypted by Stronghold. See
 //! `docs/adr/0010-desktop-secure-storage-and-network-config.md`.
 
 use tauri::Manager;
@@ -11,6 +12,7 @@ use tauri::Manager;
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
+        .plugin(tauri_plugin_http::init())
         .setup(|app| {
             let salt_path = app
                 .path()

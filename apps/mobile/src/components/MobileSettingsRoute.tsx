@@ -1,7 +1,14 @@
 import { Outlet, useLocation, useNavigate } from "react-router-dom";
 
+import {
+  createMobileHttpTransport,
+  mobileInvalidCertificateWebSocketNote,
+} from "@/adapters/mobileHttpTransport";
 import { MobileAppShell } from "@/components/MobileAppShell";
-import { ConnectToServer } from "@loom/ui-kit/components/ConnectToServer";
+import {
+  ConnectToServer,
+  type ServerConnection,
+} from "@loom/ui-kit/components/ConnectToServer";
 import { SettingsLayout } from "@loom/ui-kit/components/SettingsLayout";
 import {
   Card,
@@ -13,11 +20,11 @@ import {
 import { GeneralPanel } from "@loom/ui-kit/pages/settings/GeneralPanel";
 
 export function MobileSettingsRoute({
-  baseUrl,
+  connection,
   onServerChanged,
 }: {
-  baseUrl: string;
-  onServerChanged: (baseUrl: string) => Promise<void>;
+  connection: ServerConnection;
+  onServerChanged: (connection: ServerConnection) => Promise<void>;
 }) {
   const navigate = useNavigate();
   const location = useLocation();
@@ -43,10 +50,14 @@ export function MobileSettingsRoute({
             <CardContent>
               <ConnectToServer
                 embedded
-                initialUrl={baseUrl}
-                onConnected={({ baseUrl: nextBaseUrl }) =>
-                  onServerChanged(nextBaseUrl)
+                initialUrl={connection.baseUrl}
+                initialAllowInvalidCertificates={
+                  connection.allowInvalidCertificates
                 }
+                supportsInvalidCertificates
+                invalidCertificateNote={mobileInvalidCertificateWebSocketNote}
+                getHttpTransport={createMobileHttpTransport}
+                onConnected={onServerChanged}
               />
             </CardContent>
           </Card>
