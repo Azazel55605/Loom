@@ -17,6 +17,7 @@
 //!
 //! See `docs/adr/0011-connector-instance-registry.md`.
 
+pub mod diagnostics;
 pub mod registry;
 pub mod runtime;
 

@@ -22,6 +22,14 @@ const badgeVariants = cva(
           "border-transparent bg-status-degraded text-status-foreground shadow",
         down: "border-transparent bg-status-down text-status-foreground shadow",
         unknown: "border-transparent bg-status-unknown text-status-foreground",
+        // Not a health state: an action Loom is running *right now*. Uses the
+        // accent rather than a --status-* token precisely because it is not a
+        // verdict about the service — it is Loom saying what it is doing, and
+        // it should read as activity rather than as a fourth kind of unwell.
+        // `.reduce-motion` is honoured globally, so the pulse stops for anyone
+        // who asked for that.
+        pending:
+          "border-transparent bg-accent text-accent-foreground shadow animate-pulse",
       },
     },
     defaultVariants: {

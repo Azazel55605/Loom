@@ -16,14 +16,25 @@ import { ConnectorIcon } from "@loom/ui-kit/components/ConnectorIcon";
 import { Skeleton } from "@loom/ui-kit/components/ui/skeleton";
 import { ActionButtonWidget } from "@loom/ui-kit/widgets/ActionButton";
 import { renderWidget } from "@loom/ui-kit/widgets/renderWidget";
-import type { ConnectorError, ConnectorStatus, DashboardPlacement } from "@loom/ui-kit/lib/api";
+import type {
+  ConnectorError,
+  ConnectorStatus,
+  DashboardPlacement,
+  PendingOperation,
+} from "@loom/ui-kit/lib/api";
+import { connectorAvailability } from "@loom/ui-kit/lib/connector-availability";
 import { useApiClient, useConnectorStatusSocket } from "@loom/ui-kit/lib/api-context";
 import { useAuth } from "@loom/ui-kit/lib/auth-context";
 import { describeConnectorError } from "@loom/ui-kit/lib/connector-error";
 import { hasPermission, PERMISSION_KEYS } from "@loom/ui-kit/lib/permissions";
 import { useRetainedStatusDetails } from "@loom/ui-kit/lib/use-retained-status-details";
 
-type LiveReading = { status: ConnectorStatus | null; statusError?: ConnectorError };
+type LiveReading = {
+  status: ConnectorStatus | null;
+  statusError?: ConnectorError;
+  pendingOperation?: PendingOperation | null;
+  diagnosis?: string | null;
+};
 
 export function ConnectorDetailModal({
   placement,
@@ -53,7 +64,12 @@ export function ConnectorDetailModal({
       return;
     }
     return socket.subscribe([instance.id], (update) => {
-      setLive({ status: update.status, statusError: update.statusError });
+      setLive({
+        status: update.status,
+        statusError: update.statusError,
+        pendingOperation: update.pendingOperation,
+        diagnosis: update.diagnosis,
+      });
     });
   }, [instance.id, open, socket]);
 
@@ -75,10 +91,13 @@ export function ConnectorDetailModal({
     }
   }, [detail.data, execute, instance.name]);
 
-  const reading = live ?? {
+  const reading: LiveReading = live ?? {
     status: detail.data?.status ?? instance.status,
     statusError: detail.data?.statusError ?? instance.statusError,
+    pendingOperation: detail.data?.pendingOperation ?? instance.pendingOperation,
+    diagnosis: detail.data?.diagnosis ?? instance.diagnosis,
   };
+  const availability = connectorAvailability(reading);
   const rawDetails =
     typeof reading.status?.details === "object" && reading.status.details !== null && !Array.isArray(reading.status.details)
       ? reading.status.details as Record<string, unknown>
@@ -99,13 +118,18 @@ export function ConnectorDetailModal({
               size={22}
             />
             <DialogTitle>{instance.name}</DialogTitle>
-            <Badge variant={reading.status?.health ?? "unknown"} className="capitalize">
-              {reading.status?.health ?? "No reading"}
-            </Badge>
+            <Badge variant={availability.tone}>{availability.label}</Badge>
           </div>
           <DialogDescription>
             {instance.metadata.name} · {instance.connectorType} · v{instance.metadata.version}
           </DialogDescription>
+          {/* Beneath the Badge that already said something is wrong. A plain
+              line rather than a second Alert: one message per problem. */}
+          {availability.diagnosis !== null ? (
+            <p className="text-xs leading-relaxed text-muted-foreground">
+              {availability.diagnosis}
+            </p>
+          ) : null}
           {reading.status !== null ? (
             <p className="text-xs text-muted-foreground">
               Last checked <time dateTime={reading.status.lastChecked}>{formatChecked(reading.status.lastChecked)}</time>
@@ -126,7 +150,7 @@ export function ConnectorDetailModal({
               {reading.statusError !== undefined ? <Alert variant="destructive"><AlertCircle aria-hidden="true" /><AlertDescription>{describeConnectorError(reading.statusError)}</AlertDescription></Alert> : null}
               <div className="grid gap-5 md:grid-cols-2">
                 {placement.widgetBindings.map((binding, index) => (
-                  <React.Fragment key={index}>{renderWidget({ binding, statusDetails, dataPoints: detail.data.dataPoints, actions: detail.data.actions, onExecute: runAction, disabled: !canControl, size: "expanded", className: "min-h-[5rem]" })}</React.Fragment>
+                  <React.Fragment key={index}>{renderWidget({ binding, statusDetails, dataPoints: detail.data.dataPoints, actions: detail.data.actions, onExecute: runAction, disabled: !canControl, unavailableReason: availability.unavailableReason, size: "expanded", className: "min-h-[5rem]" })}</React.Fragment>
                 ))}
               </div>
               {detail.data.actions.some((action) => !boundActions.has(action.id)) ? (
@@ -134,7 +158,7 @@ export function ConnectorDetailModal({
                   <h3 className="text-sm font-semibold">Other actions</h3>
                   <div className="grid gap-2 sm:grid-cols-2">
                     {detail.data.actions.filter((action) => !boundActions.has(action.id)).map((action) => (
-                      <ActionButtonWidget key={action.id} label={action.label} actionId={action.id} description={action.description} paramsSchema={action.paramsSchema} config={{}} onExecute={runAction} disabled={!canControl} />
+                      <ActionButtonWidget key={action.id} label={action.label} actionId={action.id} description={action.description} paramsSchema={action.paramsSchema} config={{}} onExecute={runAction} disabled={!canControl || availability.actionsDisabled} />
                     ))}
                   </div>
                 </section>

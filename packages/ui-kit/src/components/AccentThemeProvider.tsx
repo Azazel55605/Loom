@@ -1,5 +1,7 @@
 import * as React from "react";
 
+import { TooltipProvider } from "@loom/ui-kit/components/ui/tooltip";
+
 /**
  * Owns the customization axes from docs/UI_GUIDELINES.md — accent colour, blur,
  * and motion — plus the light/dark palette, and persists them per device.
@@ -312,7 +314,16 @@ export function AccentThemeProvider({
     ],
   );
 
-  return <AppearanceContext.Provider value={value}>{children}</AppearanceContext.Provider>;
+  // `TooltipProvider` lives here rather than in each app's entry point: it is
+  // required context for every Radix tooltip in the kit, it holds no
+  // appearance state of its own, and mounting it once at the outermost ui-kit
+  // provider is what lets a component deep in the tree use a tooltip without
+  // three apps having to opt in first.
+  return (
+    <AppearanceContext.Provider value={value}>
+      <TooltipProvider delayDuration={200}>{children}</TooltipProvider>
+    </AppearanceContext.Provider>
+  );
 }
 
 /**

@@ -80,6 +80,16 @@ export type ConnectorAction = {
   description: string | null;
   /** JSON Schema for this action's params; `{}` when it takes none. */
   paramsSchema: unknown;
+  /**
+   * Whether running this makes the service stop answering for a while.
+   *
+   * Not "is this dangerous" — the test is whether a user would be *surprised*
+   * by the gap. `stop` takes the service down too, but the person who pressed
+   * Stop expects that; `restart` is the case where a service vanishes and
+   * comes back on its own. While one of these runs, the backend reports a
+   * `pendingOperation` instead of letting the outage read as a fault.
+   */
+  isDisruptive: boolean;
 };
 
 /**
@@ -93,6 +103,19 @@ export type ActionResult = {
   success: boolean;
   message: string;
   payload: unknown | null;
+};
+
+/**
+ * A disruptive action the platform is currently running against an instance.
+ *
+ * `actionLabel` is the connector's own word for it, ready to render — the same
+ * word that is on the button, so "Performing: Restart" and the Restart button
+ * cannot disagree.
+ */
+export type PendingOperation = {
+  actionLabel: string;
+  /** RFC 3339. */
+  startedAt: string;
 };
 
 /** Identifying information for a connector. */
@@ -291,6 +314,22 @@ export type ConnectorInstanceSummary = {
   status: ConnectorStatus | null;
   /** Present only when `status` is null; absent otherwise. */
   statusError?: ConnectorError;
+  /**
+   * A disruptive action running against this instance right now.
+   *
+   * A **sibling** of `status`, not a field inside it, and the two say different
+   * things: `status` is what the connector reported, this is what Loom is doing
+   * to it. A service mid-restart genuinely is Down, and this is the context that
+   * makes that reading useful rather than alarming — so it takes visual
+   * precedence over health wherever both are shown.
+   */
+  pendingOperation: PendingOperation | null;
+  /**
+   * Why this instance is Down, established by probing the network beneath it —
+   * DNS, then a TCP connect. `null` unless it is Down and its connector names
+   * an endpoint worth probing. Cleared as soon as it recovers.
+   */
+  diagnosis: string | null;
   /** Values the connector agreed may be shown. May be empty — notably for an
    *  instance the backend could not construct at startup. */
   displayFields: DisplayField[];

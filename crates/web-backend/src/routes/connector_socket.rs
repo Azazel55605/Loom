@@ -160,6 +160,8 @@ async fn handle_socket(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::connectors::runtime::PendingOperation;
+    use chrono::Utc;
     use loom_core::connector::ConnectorStatus;
 
     fn update(id: Uuid) -> ConnectorStatusUpdate {
@@ -168,6 +170,8 @@ mod tests {
             snapshot: ConnectorStatusSnapshot {
                 status: Some(ConnectorStatus::healthy()),
                 status_error: None,
+                pending_operation: None,
+                diagnosis: None,
             },
         }
     }
@@ -203,5 +207,40 @@ mod tests {
         assert_eq!(json["instanceId"], id.to_string());
         assert!(json["status"].is_object());
         assert!(json.get("statusError").is_none());
+        // Both overlay fields are present as explicit nulls rather than
+        // omitted. A client destructures them on every frame, and a key that
+        // appears only sometimes is a key that gets read as `undefined` by
+        // something that meant to read `null`.
+        assert_eq!(json["pendingOperation"], serde_json::Value::Null);
+        assert_eq!(json["diagnosis"], serde_json::Value::Null);
+    }
+
+    /// The overlay is what makes a restart legible, so its wire shape is worth
+    /// pinning: a client renders `actionLabel` verbatim.
+    #[test]
+    fn a_pending_operation_is_pushed_with_its_label_and_start_time() {
+        let id = Uuid::new_v4();
+        let started_at = Utc::now();
+        let mut snapshot = update(id).snapshot;
+        snapshot.pending_operation = Some(PendingOperation {
+            action_label: "Restart".to_owned(),
+            started_at,
+        });
+        snapshot.diagnosis = Some("Host `192.0.2.10` is unreachable on port `2375`.".to_owned());
+
+        let json = serde_json::to_value(ServerMessage::Status {
+            instance_id: id,
+            snapshot,
+        })
+        .expect("serializable update");
+
+        assert_eq!(json["pendingOperation"]["actionLabel"], "Restart");
+        assert_eq!(
+            json["pendingOperation"]["startedAt"],
+            serde_json::to_value(started_at).expect("rfc 3339")
+        );
+        assert!(json["diagnosis"]
+            .as_str()
+            .is_some_and(|d| d.contains("2375")));
     }
 }

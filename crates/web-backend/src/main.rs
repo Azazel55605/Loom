@@ -1451,6 +1451,180 @@ mod tests {
     }
 
     /// Unauthenticated access must be 401, not 403: there is no identity yet.
+    /// The overlay, end to end through the HTTP layer.
+    ///
+    /// A restart takes the service away and brings it back; a poll landing in
+    /// that window reports a perfectly accurate outage that helps nobody. What
+    /// a client needs instead is "Performing: Restart", and this checks it is
+    /// actually there *while the action is running* — not merely that the
+    /// marker type exists.
+    #[tokio::test]
+    async fn a_disruptive_action_is_reported_as_a_pending_operation_while_it_runs() {
+        let app = test_app().await;
+        let (access, _) = setup_and_login(&app.router).await;
+
+        // Slow enough to observe mid-flight, short enough not to pad the suite.
+        let (status, created) = send(
+            &app.router,
+            post_json_auth(
+                "/connector-instances",
+                &access,
+                serde_json::json!({
+                    "connectorType": "debug",
+                    "name": "Restartable",
+                    "config": { "simulatedLatencyMs": 600 },
+                }),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED, "{created:#}");
+        let id = created["id"].as_str().expect("id").to_owned();
+        assert_eq!(
+            created["pendingOperation"],
+            serde_json::Value::Null,
+            "nothing is running yet"
+        );
+
+        // `restart` is the fixture's disruptive action; `ping` is not. Both are
+        // read from the connector's own descriptors, never from a name this
+        // test or the route recognises.
+        let actions = created["actions"].as_array().expect("actions");
+        let disruptive: Vec<&str> = actions
+            .iter()
+            .filter(|action| action["isDisruptive"] == true)
+            .map(|action| action["id"].as_str().expect("id"))
+            .collect();
+        assert_eq!(disruptive, vec!["restart"]);
+
+        let router = app.router.clone();
+        let token = access.clone();
+        let restart_id = id.clone();
+        let restart = tokio::spawn(async move {
+            send(
+                &router,
+                post_json_auth(
+                    &format!("/connector-instances/{restart_id}/actions/restart"),
+                    &token,
+                    serde_json::Value::Null,
+                ),
+            )
+            .await
+        });
+
+        // Polled for rather than sampled once at a fixed delay. The fixture
+        // gates *every* call on its simulated latency, including the
+        // `actions()` lookup the route makes to find out whether this action is
+        // disruptive, so the marker goes up around one latency in — and a
+        // single well-timed sleep is the kind of assertion that passes here and
+        // flakes on a loaded runner.
+        let mut during = serde_json::Value::Null;
+        for _ in 0..40 {
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            let (status, body) = send(
+                &app.router,
+                get_with_auth(&format!("/connector-instances/{id}"), &bearer(&access)),
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK);
+            if !body["pendingOperation"].is_null() {
+                during = body;
+                break;
+            }
+        }
+        assert_eq!(
+            during["pendingOperation"]["actionLabel"], "Restart",
+            "the overlay must be visible while the action runs: {during:#}"
+        );
+        assert!(during["pendingOperation"]["startedAt"]
+            .as_str()
+            .is_some_and(|started| !started.is_empty()));
+        // The poll result underneath is untouched — the overlay adds context,
+        // it does not rewrite what the connector said.
+        assert!(during["status"]["health"].is_string());
+
+        let (status, result) = restart.await.expect("the action task");
+        assert_eq!(status, StatusCode::OK, "{result:#}");
+        assert_eq!(result["success"], true);
+
+        let (status, after) = send(
+            &app.router,
+            get_with_auth(&format!("/connector-instances/{id}"), &bearer(&access)),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(
+            after["pendingOperation"],
+            serde_json::Value::Null,
+            "the marker must be cleared once the action returns: {after:#}"
+        );
+    }
+
+    /// A non-disruptive action must not raise the overlay. An action wrongly
+    /// marked disruptive would hide a real outage behind "Performing…", so the
+    /// negative case is worth pinning too.
+    #[tokio::test]
+    async fn an_ordinary_action_raises_no_pending_operation() {
+        let app = test_app().await;
+        let (access, _) = setup_and_login(&app.router).await;
+        let id = create_debug_instance(&app.router, &access, "Pingable").await;
+
+        let (status, result) = send(
+            &app.router,
+            post_json_auth(
+                &format!("/connector-instances/{id}/actions/ping"),
+                &access,
+                serde_json::Value::Null,
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{result:#}");
+
+        let (status, after) = send(
+            &app.router,
+            get_with_auth(&format!("/connector-instances/{id}"), &bearer(&access)),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(after["pendingOperation"], serde_json::Value::Null);
+    }
+
+    /// A Down instance whose connector names a network endpoint is explained,
+    /// not merely reported.
+    #[tokio::test]
+    async fn a_down_instance_carries_a_network_diagnosis() {
+        let app = test_app().await;
+        let (access, _) = setup_and_login(&app.router).await;
+
+        // Loopback port 1 is reserved and nothing binds it, so the probe is
+        // refused immediately — deterministic on any machine, no network.
+        let (status, created) = send(
+            &app.router,
+            post_json_auth(
+                "/connector-instances",
+                &access,
+                serde_json::json!({
+                    "connectorType": "debug",
+                    "name": "Offline",
+                    "config": {
+                        "simulatedHealth": "down",
+                        "networkTarget": { "host": "127.0.0.1", "port": 1 },
+                    },
+                }),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED, "{created:#}");
+
+        assert_eq!(created["status"]["health"], "down");
+        let diagnosis = created["diagnosis"]
+            .as_str()
+            .unwrap_or_else(|| panic!("a Down instance should carry a diagnosis: {created:#}"));
+        assert!(
+            diagnosis.contains("unreachable on port `1`"),
+            "the diagnosis should name the port that was tried: {diagnosis}"
+        );
+    }
+
     #[tokio::test]
     async fn connector_routes_reject_an_anonymous_caller() {
         let app = test_app().await;

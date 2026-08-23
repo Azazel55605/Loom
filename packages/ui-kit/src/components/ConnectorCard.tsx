@@ -19,13 +19,13 @@ import {
   takesParameters,
 } from "@loom/ui-kit/components/ActionParamsDialog";
 import { ConnectorIcon } from "@loom/ui-kit/components/ConnectorIcon";
+import { connectorAvailability } from "@loom/ui-kit/lib/connector-availability";
 import { ActionButtonSkeleton } from "@loom/ui-kit/widgets/ActionButton";
 import {
   ApiError,
   SessionExpiredError,
   type ConnectorAction,
   type ConnectorInstanceSummary,
-  type HealthState,
 } from "@loom/ui-kit/lib/api";
 import { useApiClient } from "@loom/ui-kit/lib/api-context";
 import { useAuth } from "@loom/ui-kit/lib/auth-context";
@@ -58,14 +58,10 @@ import { hasPermission, PERMISSION_KEYS } from "@loom/ui-kit/lib/permissions";
  * This is the generic fallback that keeps a connector operable until then.
  */
 
-/** Human-facing label per health state. Separate from the badge variant so the
- *  wording can change without touching the palette, and vice versa. */
-const HEALTH_LABEL: Record<HealthState, string> = {
-  healthy: "Healthy",
-  degraded: "Degraded",
-  down: "Down",
-  unknown: "Unknown",
-};
+// The health-state wording used to live here. It now lives in
+// `lib/connector-availability.ts` alongside the rule that a pending operation
+// outranks it, because the two were always one decision and keeping them apart
+// meant this card could disagree with a dashboard tile about the same instance.
 
 /**
  * Formats the status timestamp for display.
@@ -102,6 +98,9 @@ export function ConnectorCard({
   const { user } = useAuth();
   const { id, name, connectorType, metadata, iconOverride, status, statusError, displayFields } =
     instance;
+  // The same rule the dashboard tiles use: a pending operation outranks health,
+  // and an unreachable connector cannot be asked to do anything.
+  const availability = connectorAvailability(instance);
 
   // Visibility only. **Not a security boundary**: the backend checks
   // `connectors.control` on every action request, scoped to this instance id,
@@ -200,11 +199,7 @@ export function ConnectorCard({
           </div>
 
           <div className="flex items-center gap-1">
-            {status !== null ? (
-              <Badge variant={status.health}>{HEALTH_LABEL[status.health]}</Badge>
-            ) : (
-              <Badge variant="unknown">No reading</Badge>
-            )}
+            <Badge variant={availability.tone}>{availability.label}</Badge>
 
             {hasManageControls && (
               <>
@@ -300,8 +295,10 @@ export function ConnectorCard({
                   key={action.id}
                   variant="outline"
                   size="sm"
-                  title={action.description ?? undefined}
-                  disabled={mutation.isPending}
+                  title={availability.unavailableReason ?? action.description ?? undefined}
+                  // An unreachable connector cannot carry out an action, so the
+                  // button says so before the click rather than after it.
+                  disabled={mutation.isPending || availability.actionsDisabled}
                   onClick={() => runAction(action)}
                 >
                   {isPending && <Loader2 className="animate-spin" aria-hidden="true" />}

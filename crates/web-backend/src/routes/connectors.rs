@@ -33,7 +33,7 @@ use crate::auth::extract::{
     AuthenticatedUser, ConnectorsControl, ConnectorsManage, ConnectorsView, Permission,
     RequirePermission,
 };
-use crate::connectors::runtime::{BuildError, ConnectorStatusSnapshot};
+use crate::connectors::runtime::{BuildError, ConnectorStatusSnapshot, PendingOperation};
 use crate::error::{internal_error, ErrorBody};
 use crate::state::AppState;
 
@@ -132,6 +132,18 @@ pub struct ConnectorInstanceResponse {
     /// blank out the whole list, so the failure is reported per entry.
     #[serde(skip_serializing_if = "Option::is_none")]
     status_error: Option<ConnectorError>,
+    /// A disruptive action running against this instance right now.
+    ///
+    /// A **sibling** of `status` rather than a field inside it, and the two
+    /// halves say different things: `status` is what the connector reported,
+    /// this is what the platform is doing to it. A service mid-restart really
+    /// is Down, and folding the overlay into `ConnectorStatus` would both
+    /// destroy that fact and change a Core type that three clients and every
+    /// connector already depend on. Same shape as the WebSocket frame.
+    pending_operation: Option<PendingOperation>,
+    /// Why this instance is Down, established by probing the network beneath
+    /// it. `null` unless it is Down and its connector names a target.
+    diagnosis: Option<String>,
     /// The values this connector has agreed may be shown on the shell.
     display_fields: Vec<DisplayField>,
 }
@@ -601,7 +613,47 @@ pub async fn execute_action(
         }
     };
 
-    match connector.execute_action(&action_id, params).await {
+    // A disruptive action makes the service stop answering for a while, and a
+    // poll landing in that window would report a perfectly accurate outage. The
+    // marker goes up *before* the request is dispatched, because the gap
+    // between sending it and recording it is exactly where that spurious Down
+    // would be observed.
+    //
+    // Looked up from the connector's own action list rather than from a name
+    // this route recognises: which actions are disruptive is the connector
+    // author's judgement, and hardcoding "restart" here would be right for
+    // Docker and wrong for the next connector that calls it "recreate".
+    let disruptive = connector
+        .actions()
+        .await
+        .into_iter()
+        .find(|action| action.id == action_id)
+        .filter(|action| action.is_disruptive)
+        .map(|action| action.label);
+
+    let instance_id = Uuid::parse_str(&id).ok();
+    if let (Some(uuid), Some(label)) = (instance_id, disruptive.as_ref()) {
+        state.connectors.begin_operation(uuid, label).await;
+    }
+
+    let outcome = connector.execute_action(&action_id, params).await;
+
+    if let Some(uuid) = instance_id {
+        if disruptive.is_some() {
+            // Cleared whatever happened: a restart that failed is not still
+            // being performed. The safety net in the runtime covers the case
+            // where `execute_action` never returns at all.
+            state.connectors.end_operation(uuid).await;
+        }
+        // Every action, not only disruptive ones — pressing a button is the
+        // strongest signal available that the state is about to change and
+        // that somebody is watching. This also undoes any poll backoff, so a
+        // connector that had drifted out to a two-minute interval reports its
+        // new state immediately rather than when its turn next comes round.
+        state.connectors.refresh_now(uuid).await;
+    }
+
+    match outcome {
         Ok(result) => Json(result).into_response(),
         Err(error) => ErrorBody::connector(status_for(&error), error),
     }
@@ -657,6 +709,10 @@ fn entry_for(
     live: Option<&dyn Connector>,
     snapshot: Option<&ConnectorStatusSnapshot>,
 ) -> ConnectorInstanceResponse {
+    let (pending_operation, diagnosis) = snapshot.map_or((None, None), |value| {
+        (value.pending_operation.clone(), value.diagnosis.clone())
+    });
+
     let (metadata, status, status_error, display_fields) = match live {
         Some(connector) => (
             connector.metadata(),
@@ -693,6 +749,8 @@ fn entry_for(
         icon_override: row.icon_override.clone(),
         status,
         status_error,
+        pending_operation,
+        diagnosis,
         display_fields,
     }
 }

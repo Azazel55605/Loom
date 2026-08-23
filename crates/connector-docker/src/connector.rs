@@ -12,7 +12,7 @@ use futures_util::StreamExt;
 use loom_core::connector::{
     ActionResult, ActionWidgetType, ChartType, Connector, ConnectorAction, ConnectorError,
     ConnectorMetadata, ConnectorStatus, DataPointDescriptor, DataPointValueType, DisplayField,
-    DisplayWidgetType, HealthState, WidgetBinding, WidgetLayout,
+    DisplayWidgetType, HealthState, NetworkTarget, WidgetBinding, WidgetLayout,
 };
 use serde::Serialize;
 use serde_json::{json, Map, Value};
@@ -400,8 +400,15 @@ impl Connector for DockerConnector {
             ConnectorAction::simple(ACTION_START, "Start").with_description("Start the container."),
             ConnectorAction::simple(ACTION_STOP, "Stop")
                 .with_description("Stop the container, giving it time to shut down."),
+            // The only disruptive one. `start`, `stop`, `pause` and `unpause`
+            // each move the container to a state the person who pressed the
+            // button asked for and can see coming; `restart` is the case where
+            // a running service vanishes and is expected back, and the gap in
+            // between is exactly what the "Performing: …" overlay exists to
+            // explain rather than report as an outage.
             ConnectorAction::simple(ACTION_RESTART, "Restart")
-                .with_description("Stop and start the container."),
+                .with_description("Stop and start the container.")
+                .disruptive(),
             ConnectorAction::simple(ACTION_PAUSE, "Pause")
                 .with_description("Freeze every process in the container without stopping it."),
             ConnectorAction::simple(ACTION_UNPAUSE, "Resume")
@@ -483,6 +490,52 @@ impl Connector for DockerConnector {
             DataPointDescriptor::new(DATA_POINT_UPTIME, "Uptime", DataPointValueType::String),
             DataPointDescriptor::new(DATA_POINT_LOGS, "Recent logs", DataPointValueType::String),
         ]
+    }
+
+    /// The Docker endpoint, when probing it would mean anything.
+    ///
+    /// A `tcp://host:port` endpoint — a remote daemon or a socket proxy — is
+    /// worth probing: if it stops answering, whether the name resolves and
+    /// whether the port accepts a connection are three different problems with
+    /// three different fixes.
+    ///
+    /// A `unix://` socket is not. It is a file on this machine, reached over no
+    /// network; a DNS lookup and a TCP connect have nothing to say about it,
+    /// and "the host is reachable" would be a tautology dressed up as a
+    /// diagnosis. `connect()` already reports a missing socket precisely, which
+    /// is the actual failure in that setup.
+    fn network_target(&self) -> Option<NetworkTarget> {
+        let host = self
+            .config
+            .docker_host
+            .strip_prefix("tcp://")
+            .or_else(|| self.config.docker_host.strip_prefix("http://"))?;
+
+        // Trim anything after the authority: a Docker URI does not normally
+        // carry a path, but splitting here means one that does cannot turn into
+        // a hostname with a slash in it.
+        let authority = host.split(['/', '?']).next().unwrap_or(host);
+
+        // `rsplit_once` rather than `split_once`, so an IPv6 literal in
+        // brackets keeps its colons and only the trailing port is taken.
+        match authority.rsplit_once(':') {
+            Some((host, port)) if !host.is_empty() => match port.parse::<u16>() {
+                Ok(port) => Some(NetworkTarget::new(host.trim_matches(['[', ']']), port)),
+                // A host with an unparseable port is still a host worth naming;
+                // the probe stops after DNS, which is better than nothing.
+                Err(_) => Some(NetworkTarget {
+                    host: host.trim_matches(['[', ']']).to_owned(),
+                    port: None,
+                }),
+            },
+            // Docker over TCP with no port is unusual but legal — the daemon's
+            // default is implied. Report the host so DNS is still checked.
+            _ if !authority.is_empty() => Some(NetworkTarget {
+                host: authority.trim_matches(['[', ']']).to_owned(),
+                port: None,
+            }),
+            _ => None,
+        }
     }
 
     fn default_layout(&self) -> WidgetLayout {
@@ -605,4 +658,95 @@ fn unavailable_details(reason: &str) -> Value {
         // Not a declared data point on purpose — see `status`.
         "error": reason,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::DockerConnectorConfig;
+
+    /// Builds a connector without touching Docker.
+    ///
+    /// `network_target()` and `actions()` are descriptive: neither reaches the
+    /// daemon, and both are worth testing on a machine that has none. The
+    /// client is built but never used, which is why a `tcp://` host that does
+    /// not exist is fine here.
+    fn describe(docker_host: &str) -> Option<NetworkTarget> {
+        let config = DockerConnectorConfig {
+            docker_host: docker_host.to_owned(),
+            container_name: "irrelevant".to_owned(),
+        };
+        let docker = config.connect().expect("building a client does no I/O");
+        DockerConnector {
+            docker: docker.clone(),
+            control: docker,
+            config,
+            history: Arc::new(Mutex::new(History::default())),
+        }
+        .network_target()
+    }
+
+    #[test]
+    fn a_tcp_endpoint_is_worth_probing() {
+        assert_eq!(
+            describe("tcp://docker-proxy.example:2375"),
+            Some(NetworkTarget::new("docker-proxy.example", 2375))
+        );
+        assert_eq!(
+            describe("http://192.0.2.10:2376"),
+            Some(NetworkTarget::new("192.0.2.10", 2376))
+        );
+        // An IPv6 literal keeps its own colons; only the trailing port is taken.
+        assert_eq!(
+            describe("tcp://[2001:db8::1]:2375"),
+            Some(NetworkTarget::new("2001:db8::1", 2375))
+        );
+    }
+
+    #[test]
+    fn a_local_socket_has_nothing_to_probe() {
+        // A DNS lookup and a TCP connect have nothing to say about a file.
+        assert_eq!(describe("unix:///var/run/docker.sock"), None);
+    }
+
+    #[test]
+    fn a_host_without_a_usable_port_still_reports_its_host() {
+        // DNS is still worth checking even when there is nowhere to connect.
+        for host in ["tcp://docker.example", "tcp://docker.example:not-a-port"] {
+            let target = describe(host).unwrap_or_else(|| panic!("{host} names a host"));
+            assert_eq!(target.host, "docker.example");
+            assert_eq!(target.port, None, "{host} names no usable port");
+        }
+    }
+
+    #[tokio::test]
+    async fn only_restart_is_marked_disruptive() {
+        let config = DockerConnectorConfig {
+            docker_host: "tcp://docker-proxy.example:2375".to_owned(),
+            container_name: "irrelevant".to_owned(),
+        };
+        let docker = config.connect().expect("building a client does no I/O");
+        let connector = DockerConnector {
+            docker: docker.clone(),
+            control: docker,
+            config,
+            history: Arc::new(Mutex::new(History::default())),
+        };
+
+        // `actions()` is a static list on this connector, so it answers without
+        // a daemon.
+        let disruptive: Vec<String> = connector
+            .actions()
+            .await
+            .into_iter()
+            .filter(|action| action.is_disruptive)
+            .map(|action| action.id)
+            .collect();
+        assert_eq!(
+            disruptive,
+            vec![ACTION_RESTART.to_owned()],
+            "stop and start take the container where the user asked; only restart \
+             brings it back on its own"
+        );
+    }
 }

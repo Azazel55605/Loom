@@ -1,3 +1,4 @@
+import * as React from "react";
 import { AlertTriangle } from "lucide-react";
 
 import type {
@@ -16,6 +17,11 @@ import { ActionSelectorSkeleton, ActionSelectorWidget } from "@loom/ui-kit/widge
 import { ActionSliderSkeleton, ActionSliderWidget } from "@loom/ui-kit/widgets/ActionSlider";
 import { ActionTextFieldSkeleton, ActionTextFieldWidget } from "@loom/ui-kit/widgets/ActionTextField";
 import { ActionToggleSkeleton, ActionToggleWidget } from "@loom/ui-kit/widgets/ActionToggle";
+import {
+  Tooltip,
+  TooltipContent,
+  TooltipTrigger,
+} from "@loom/ui-kit/components/ui/tooltip";
 import { soleParameterName } from "@loom/ui-kit/widgets/compatibility";
 import type { WidgetExecute } from "@loom/ui-kit/widgets/types";
 
@@ -34,6 +40,15 @@ export type RenderWidgetOptions = {
   /** Disables every control. Set for a viewer without `connectors.control`.
    *  Visibility only — the backend re-checks each request. */
   disabled?: boolean;
+  /**
+   * Why the controls are inert, when they are — from
+   * `connectorAvailability().unavailableReason`.
+   *
+   * Setting this also disables them: a reason not to allow something and the
+   * disabling are the same fact, and letting them be set separately is how a
+   * control ends up greyed out with no explanation, or clickable with one.
+   */
+  unavailableReason?: string | null;
   className?: string;
   size?: "compact" | "expanded";
 };
@@ -64,6 +79,7 @@ export function renderWidget({
   actions,
   onExecute,
   disabled,
+  unavailableReason,
   className,
   size = "compact",
 }: RenderWidgetOptions) {
@@ -141,24 +157,68 @@ export function renderWidget({
     // does not have to restate it. An explicit `config.paramName` still wins.
     config: { paramName: soleParameterName(action) ?? "value", ...asObject(config) },
     onExecute,
-    disabled,
+    disabled: disabled === true || unavailableReason != null,
     className,
   };
 
-  switch (widgetType) {
-    case "button":
-      return <ActionButtonWidget {...shared} />;
-    case "toggle":
-      return <ActionToggleWidget {...shared} />;
-    case "slider":
-      return <ActionSliderWidget {...shared} />;
-    case "textField":
-      return <ActionTextFieldWidget {...shared} />;
-    case "selector":
-      return <ActionSelectorWidget {...shared} />;
-    default:
-      return <MissingBinding what="widget type" id={String(widgetType)} className={className} />;
+  const control = (() => {
+    switch (widgetType) {
+      case "button":
+        return <ActionButtonWidget {...shared} />;
+      case "toggle":
+        return <ActionToggleWidget {...shared} />;
+      case "slider":
+        return <ActionSliderWidget {...shared} />;
+      case "textField":
+        return <ActionTextFieldWidget {...shared} />;
+      case "selector":
+        return <ActionSelectorWidget {...shared} />;
+      default:
+        return null;
+    }
+  })();
+
+  if (control === null) {
+    return <MissingBinding what="widget type" id={String(widgetType)} className={className} />;
   }
+
+  // Wrapped here rather than inside each of the five widgets: the explanation
+  // is the same sentence for all of them and it comes from the *connector's*
+  // state, not the widget's.
+  return <Unavailable reason={unavailableReason}>{control}</Unavailable>;
+}
+
+/**
+ * Explains a control that cannot be used, or gets out of the way.
+ *
+ * A disabled element fires no pointer events, so the tooltip trigger is the
+ * wrapper *around* it rather than the control itself — the standard Radix
+ * arrangement for this, and the reason the span exists at all. `tabIndex={0}`
+ * makes the explanation reachable by keyboard, which is otherwise the one route
+ * that cannot get it.
+ *
+ * A themed tooltip rather than a `title` attribute: a native tooltip is a
+ * browser-default control, which docs/UI_GUIDELINES.md rules out, and it looks
+ * different on each of the three platforms this ships to.
+ */
+function Unavailable({
+  reason,
+  children,
+}: {
+  reason: string | null | undefined;
+  children: React.ReactNode;
+}) {
+  if (reason == null) return <>{children}</>;
+  return (
+    <Tooltip>
+      <TooltipTrigger asChild>
+        <span tabIndex={0} className="block cursor-not-allowed">
+          {children}
+        </span>
+      </TooltipTrigger>
+      <TooltipContent>{reason}</TooltipContent>
+    </Tooltip>
+  );
 }
 
 function asObject(config: unknown): Record<string, unknown> {

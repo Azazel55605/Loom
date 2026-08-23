@@ -338,7 +338,15 @@ export function DashboardView({
     return connectorSocket.subscribe(instanceIds, (update) => {
       setLive((current) => ({
         ...current,
-        [update.instanceId]: { status: update.status, statusError: update.statusError },
+        [update.instanceId]: {
+          status: update.status,
+          statusError: update.statusError,
+          // Carried through rather than dropped: these are the two fields that
+          // make a restart legible and an outage explicable, and they are only
+          // useful if they arrive as fast as the health they qualify.
+          pendingOperation: update.pendingOperation,
+          diagnosis: update.diagnosis,
+        },
       }));
     });
   }, [connectorSocket, instanceIds]);

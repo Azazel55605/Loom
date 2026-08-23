@@ -646,9 +646,29 @@ these shapes:
   "type": "status",
   "instanceId": "5aa2574d-9ba0-4af8-b7ae-74671fb48777",
   "status": null,
-  "statusError": { "unreachable": { "reason": "connection timed out" } }
+  "statusError": { "unreachable": { "reason": "connection timed out" } },
+  "pendingOperation": null,
+  "diagnosis": "Host `192.0.2.10` is unreachable on port `2375`. It may be offline, or a firewall is blocking the connection."
 }
 ```
+
+```json
+{
+  "type": "status",
+  "instanceId": "5aa2574d-9ba0-4af8-b7ae-74671fb48777",
+  "status": { "health": "down", "details": {}, "lastChecked": "2026-08-21T12:00:05Z" },
+  "statusError": null,
+  "pendingOperation": { "actionLabel": "Restart", "startedAt": "2026-08-21T12:00:03Z" },
+  "diagnosis": null
+}
+```
+
+`pendingOperation` and `diagnosis` are **always present**, as `null` when they
+do not apply — see [Pending operations and diagnosis](#pending-operations-and-diagnosis)
+for what they mean and why they are siblings of `status` rather than fields
+inside it. They are pushed the moment they change, not only on the next poll:
+an overlay a client learns about one poll late has been invisible for most of
+the window it existed to cover.
 
 `statusError` is omitted after a successful poll. Updates for ids not currently
 subscribed on that connection are not sent. Disconnecting drops the connection's
@@ -834,7 +854,46 @@ Requires a **global** `connectors.view` grant.
 | `iconOverride` | string | The user's icon for *this instance*, overriding `metadata.icon`. Same [reference convention](#icon-references). Set through `PATCH /connector-instances/{id}`. | **`null`** when no override is set — fall back to `metadata.icon`, then to the client's own default. |
 | `status` | object | [`ConnectorStatus`](#connectorstatus) from the latest successful poll. | **`null`** when the latest check itself failed. |
 | `statusError` | object | The [`ConnectorError`](#connectorerror) that made `status` null. | **Omitted** (not null) on the healthy path. |
+| `pendingOperation` | object | A disruptive action Loom is running against this instance right now: `{ actionLabel, startedAt }`. See [Pending operations and diagnosis](#pending-operations-and-diagnosis). | **`null`** when nothing is running. |
+| `diagnosis` | string | Why this instance is Down, established by probing the network beneath it. | **`null`** unless it is Down *and* its connector names an endpoint worth probing. |
 | `displayFields` | array | [`DisplayField`](#displayfield) values the connector agreed may be shown. | Always present; may be empty. |
+
+#### Pending operations and diagnosis
+
+Both fields sit **beside** `status`, never inside it. `status` is what the
+connector reported; these two are what the *platform* knows about it, and
+folding either into [`ConnectorStatus`](#connectorstatus) would change a Core
+type that every connector and all three clients already depend on — to say
+something no connector can know.
+
+**`pendingOperation` exists because a restarting service is genuinely Down.**
+An action whose `isDisruptive` is true takes the service away and brings it
+back; a poll landing in that window reports an outage that is accurate and
+unhelpful. While such an action runs, this field carries the action's own
+label, and a client shows **"Performing: Restart"** in place of the health
+badge. The raw health value is still there underneath for anything that wants
+it.
+
+- Set immediately before the action is dispatched, cleared when it returns —
+  whichever way it returns, because a restart that failed is not still being
+  performed.
+- Cleared by a safety net after two minutes if the action never reports back at
+  all, so one hung call cannot pin an instance to "Performing…" for the life of
+  the process.
+- Only actions the connector marks disruptive raise it. `stop` does not: the
+  person who pressed Stop is not surprised that the service stopped.
+
+**`diagnosis` answers "why".** When an instance goes Down and its connector
+publishes a network target, the backend resolves the host and attempts a TCP
+connection to the port, producing one of three sentences: DNS failed, the host
+is unreachable on that port, or the host is reachable and the service is not.
+The probe is debounced to at most once a minute per instance while it stays
+Down, and the field is cleared as soon as it recovers.
+
+Not every Down instance gets one, and that is deliberate rather than a gap. A
+connector talking to a Unix socket, or an in-process fixture, has no host and
+port whose reachability would tell anyone anything — those report `null` rather
+than a reassuring sentence that means nothing.
 
 **One failing connector does not fail the list.** A connector whose `status()`
 returns an error contributes `"status": null` plus a `statusError`, and every
@@ -2129,7 +2188,8 @@ the number is live.
   "id": "restart",
   "label": "Restart",
   "description": "Restarts the service.",
-  "paramsSchema": {}
+  "paramsSchema": {},
+  "isDisruptive": true
 }
 ```
 
@@ -2139,6 +2199,15 @@ the number is live.
 | `label` | string | Short human-facing name for a button or menu entry. | Always present. |
 | `description` | string | Longer explanation for tooltips and confirmation prompts — the place to warn that an action is disruptive. | Serialized as **`null`** when absent, never omitted. |
 | `paramsSchema` | object | JSON Schema for this action's parameters, driving client-side form generation and server-side validation. | Always present; `{}` for a parameterless action, never `null`. |
+| `isDisruptive` | boolean | Whether running this makes the service stop answering for a while. Raises a [`pendingOperation`](#pending-operations-and-diagnosis) while it runs. | Always present; `false` unless the connector opts in. |
+
+**`isDisruptive` is not "is this dangerous".** The test is whether a user would
+be *surprised* by the gap. `stop` takes a service down, but the person who
+pressed Stop expects that and does not need it explained; `restart` is the case
+where a running service vanishes and is expected back, and the user has no idea
+how long the gap should be. Marking an action disruptive when it is not
+suppresses a genuine outage behind "Performing…", which is why the default is
+`false` and opting in is the deliberate half.
 
 `id` is separate from `label` so renaming a button does not invalidate stored
 automations or URLs. `paramsSchema` is `{}` rather than `null` for parameterless

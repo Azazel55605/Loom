@@ -26,7 +26,9 @@ import {
   type ConnectorError,
   type ConnectorStatus,
   type DashboardPlacement,
+  type PendingOperation,
 } from "@loom/ui-kit/lib/api";
+import { connectorAvailability } from "@loom/ui-kit/lib/connector-availability";
 import { useApiClient } from "@loom/ui-kit/lib/api-context";
 import { useAuth } from "@loom/ui-kit/lib/auth-context";
 import { ConnectorIcon } from "@loom/ui-kit/components/ConnectorIcon";
@@ -40,6 +42,10 @@ import { renderWidget } from "@loom/ui-kit/widgets/renderWidget";
 export type LiveStatus = {
   status: ConnectorStatus | null;
   statusError?: ConnectorError;
+  /** A disruptive action in flight, which outranks health on screen. */
+  pendingOperation?: PendingOperation | null;
+  /** Why this instance is Down, probed from the network beneath it. */
+  diagnosis?: string | null;
 };
 
 /** The class the grid is told to treat as the drag handle. Only the header
@@ -166,7 +172,15 @@ export function PlacementTile({
 
   const status = live?.status ?? instance.status;
   const statusError = live === undefined ? instance.statusError : live.statusError;
-  const health = status?.health ?? "unknown";
+  // One helper decides what the badge says and whether the controls work, so
+  // "a pending operation outranks health" is a rule that exists once rather
+  // than being re-derived in the tile, the modal and the dispatcher.
+  const availability = connectorAvailability({
+    status,
+    statusError,
+    pendingOperation: live === undefined ? instance.pendingOperation : live.pendingOperation,
+    diagnosis: live === undefined ? instance.diagnosis : live.diagnosis,
+  });
   const currentDetails =
     typeof status?.details === "object" && status.details !== null && !Array.isArray(status.details)
       ? (status.details as Record<string, unknown>)
@@ -226,8 +240,8 @@ export function PlacementTile({
               onCheckedChange={(checked) => onSelectedChange?.(checked === true)}
             />
           ) : null}
-          <Badge variant={health} className="capitalize">
-            {status === null ? "No reading" : health}
+          <Badge variant={availability.tone} title={availability.label}>
+            {availability.label}
           </Badge>
           {grouping ? null : editing ? (
             <>
@@ -332,6 +346,16 @@ export function PlacementTile({
           </Alert>
         ) : null}
 
+        {/* The network-level explanation, when there is one. A plain line
+            rather than another Alert: it sits under a Badge that has already
+            said something is wrong, and a second red box would be shouting the
+            same thing twice. */}
+        {availability.diagnosis !== null ? (
+          <p className="mb-3 text-xs leading-relaxed text-muted-foreground">
+            {availability.diagnosis}
+          </p>
+        ) : null}
+
         {detail.isError ? (
           <Alert variant="destructive">
             <AlertCircle aria-hidden="true" />
@@ -354,6 +378,10 @@ export function PlacementTile({
                   // Controls are dead while the layout is being rearranged: a
                   // click meant to grab a card should not restart a service.
                   disabled: !canControl || editing,
+                  // ...and dead, *with an explanation*, when the connector
+                  // cannot be reached at all. A button that fails on click
+                  // teaches nothing; one that says why before the click does.
+                  unavailableReason: availability.unavailableReason,
                   className:
                     // A chart or a log pane needs room; the scalar widgets do
                     // not. Spanning them is what keeps a mixed card readable

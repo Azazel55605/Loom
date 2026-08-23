@@ -44,6 +44,10 @@ export function ActionButtonWidget({
     label,
     description: description ?? null,
     paramsSchema: paramsSchema ?? {},
+    // Only the params dialog reads this descriptor, and it does not care
+    // whether the action is disruptive — the backend owns that decision and
+    // acts on it when the request arrives.
+    isDisruptive: false,
   };
 
   async function run(params: Record<string, unknown>) {

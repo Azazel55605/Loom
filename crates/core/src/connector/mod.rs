@@ -153,6 +153,56 @@ pub trait Connector: Send + Sync {
     /// anything. It is a starting point the user then owns, not a constraint —
     /// nothing re-applies it after placement.
     fn default_layout(&self) -> WidgetLayout;
+
+    /// The host and port a *network-level* probe should try when this connector
+    /// stops answering, if probing one would mean anything.
+    ///
+    /// Purely descriptive: core neither resolves nor connects to it. This
+    /// answers "if I am broken, which endpoint is worth checking?", and the
+    /// platform decides whether and how to check, because reaching out to a
+    /// network is exactly the sort of thing core does not do.
+    ///
+    /// `None` means "no useful probe", and that is the honest answer more often
+    /// than it looks: a connector reaching a Unix socket, an in-process
+    /// fixture, or a service behind a path on a host it shares has no host and
+    /// port whose reachability would tell a user anything they did not already
+    /// know.
+    ///
+    /// Returning a target buys one concrete thing — the difference between
+    /// "your DNS name does not resolve", "the host is not answering on that
+    /// port", and "the host is fine, the service is not", which are three
+    /// different afternoons.
+    fn network_target(&self) -> Option<NetworkTarget> {
+        None
+    }
+}
+
+/// Where to aim a network-level reachability probe.
+///
+/// A host and optionally a port, not a URL: the probe is a DNS lookup and a TCP
+/// connect, so a scheme and a path would be noise, and carrying them would
+/// invite someone to make an HTTP request out of it and call the answer
+/// reachability.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct NetworkTarget {
+    /// Hostname or literal IP address. A hostname is resolved first, which is
+    /// what separates "DNS is wrong" from "the host is down".
+    pub host: String,
+    /// TCP port to attempt. `None` means the connector knows a host but no
+    /// port worth trying — the probe then stops after DNS, because a connect
+    /// needs somewhere to connect to.
+    pub port: Option<u16>,
+}
+
+impl NetworkTarget {
+    /// A target with both halves known — the case a full probe can run on.
+    pub fn new(host: impl Into<String>, port: u16) -> Self {
+        Self {
+            host: host.into(),
+            port: Some(port),
+        }
+    }
 }
 
 /// One resource found by a live connector's discovery pass.
@@ -299,6 +349,26 @@ pub struct ConnectorAction {
     /// An action that takes no parameters uses an empty object rather than
     /// `null`, so consumers can always treat this as a schema.
     pub params_schema: Value,
+    /// Whether running this action is expected to make the service *stop
+    /// answering for a while*.
+    ///
+    /// Not "is this dangerous" and not "should we confirm first" — both are
+    /// worth having and neither is this. This flag exists for one job: while a
+    /// disruptive action is in flight, the platform should say **"Performing:
+    /// Restart"** rather than flashing the service as Down, because Down is
+    /// true and useless. It is the difference between a dashboard that is
+    /// alarming and one that is informative.
+    ///
+    /// The test is *unexpectedly* unavailable. `stop` makes a service stop
+    /// answering too, but the person who pressed Stop is not surprised by that
+    /// and does not need it explained; `restart` is the case where a service
+    /// disappears and comes back on its own, and the user has no idea how long
+    /// the gap should be.
+    ///
+    /// Defaults to `false` — a connector author opts in per action, because an
+    /// action wrongly marked disruptive suppresses a genuine outage.
+    #[serde(default)]
+    pub is_disruptive: bool,
 }
 
 impl ConnectorAction {
@@ -312,6 +382,7 @@ impl ConnectorAction {
             label: label.into(),
             description: None,
             params_schema: Value::Object(Default::default()),
+            is_disruptive: false,
         }
     }
 
@@ -319,6 +390,14 @@ impl ConnectorAction {
     #[must_use]
     pub fn with_description(mut self, description: impl Into<String>) -> Self {
         self.description = Some(description.into());
+        self
+    }
+
+    /// Marks this action as one that takes the service away and brings it back
+    /// — see [`ConnectorAction::is_disruptive`].
+    #[must_use]
+    pub fn disruptive(mut self) -> Self {
+        self.is_disruptive = true;
         self
     }
 }
@@ -999,12 +1078,58 @@ mod tests {
                 "id": "restart",
                 "label": "Restart",
                 "description": "Restarts it.",
-                "paramsSchema": {}
+                "paramsSchema": {},
+                "isDisruptive": false
             })
         );
         assert_eq!(
             serde_json::from_value::<ConnectorAction>(value).unwrap(),
             action
+        );
+    }
+
+    #[test]
+    fn an_action_is_only_disruptive_when_it_says_so() {
+        // The default matters more than the flag: an action wrongly marked
+        // disruptive suppresses a real outage behind a "Performing…" overlay,
+        // so opting in has to be the deliberate half.
+        assert!(!ConnectorAction::simple("ping", "Ping").is_disruptive);
+        assert!(
+            ConnectorAction::simple("restart", "Restart")
+                .disruptive()
+                .is_disruptive
+        );
+
+        // `isDisruptive` is `#[serde(default)]`, so a stored or third-party
+        // action written before the field existed still deserializes — as
+        // not-disruptive, which is the safe reading.
+        let older = json!({
+            "id": "restart",
+            "label": "Restart",
+            "description": null,
+            "paramsSchema": {}
+        });
+        let parsed: ConnectorAction = serde_json::from_value(older).expect("older shape");
+        assert!(!parsed.is_disruptive);
+    }
+
+    #[test]
+    fn a_network_target_carries_a_host_and_an_optional_port() {
+        let full = NetworkTarget::new("proxy.example", 2375);
+        assert_eq!(
+            serde_json::to_value(&full).unwrap(),
+            json!({ "host": "proxy.example", "port": 2375 })
+        );
+
+        // A host with no port is a legitimate target: DNS is still worth
+        // checking even when there is nowhere to connect afterwards.
+        let dns_only = NetworkTarget {
+            host: "proxy.example".to_owned(),
+            port: None,
+        };
+        assert_eq!(
+            serde_json::to_value(&dns_only).unwrap(),
+            json!({ "host": "proxy.example", "port": null })
         );
     }
 

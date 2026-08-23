@@ -66,8 +66,8 @@ use serde_json::{json, Map, Value};
 use super::{
     ActionResult, ActionWidgetType, ChartType, Connector, ConnectorAction, ConnectorError,
     ConnectorMetadata, ConnectorStatus, DataPointDescriptor, DataPointValueType,
-    DiscoveredResource, DisplayField, DisplayWidgetType, HealthState, SetupGuide, WidgetBinding,
-    WidgetLayout,
+    DiscoveredResource, DisplayField, DisplayWidgetType, HealthState, NetworkTarget, SetupGuide,
+    WidgetBinding, WidgetLayout,
 };
 
 /// The connector type id this fixture registers under.
@@ -165,6 +165,21 @@ pub struct DebugConnectorConfig {
 
     /// The starting value of the simulated boolean data point.
     pub enabled: bool,
+
+    /// What [`Connector::network_target`] should report. Defaults to `None`.
+    ///
+    /// The fixture reaches nothing, so it has no real endpoint — which is
+    /// precisely why this is configurable. The platform's network diagnostic
+    /// (DNS lookup, then TCP connect) has three outcomes a client must render,
+    /// and reaching all three otherwise needs a real host that is broken in a
+    /// specific way. Point this at a name that does not resolve, or at an
+    /// address with nothing listening, and the diagnostic under test produces
+    /// the matching diagnosis on any machine.
+    ///
+    /// Same job as [`DebugConnectorConfig::fail_mode`], one layer further out:
+    /// `fail_mode` makes the connector fail, this makes the *network under* it
+    /// fail.
+    pub network_target: Option<NetworkTarget>,
 }
 
 impl Default for DebugConnectorConfig {
@@ -176,6 +191,7 @@ impl Default for DebugConnectorConfig {
             base_load: 42.0,
             label: "debug-fixture".to_string(),
             enabled: true,
+            network_target: None,
         }
     }
 }
@@ -365,6 +381,7 @@ impl DebugConnector {
             base_load,
             label,
             enabled: raw.enabled.unwrap_or(true),
+            network_target: raw.network_target,
         }))
     }
 
@@ -456,6 +473,8 @@ struct RawConfig {
     label: Option<String>,
     #[serde(default)]
     enabled: Option<bool>,
+    #[serde(default)]
+    network_target: Option<NetworkTarget>,
 }
 
 /// Which failure the fixture should simulate, as it appears in stored config.
@@ -567,8 +586,13 @@ impl Connector for DebugConnector {
         }
 
         vec![
+            // Disruptive, so the fixture can exercise the "Performing: …"
+            // overlay without a real service having to be taken away. The
+            // whole point of this connector is that every state a client has
+            // to render is reachable from a laptop with no homelab.
             ConnectorAction::simple(ACTION_RESTART, "Restart")
-                .with_description("Pretends to restart the simulated service."),
+                .with_description("Pretends to restart the simulated service.")
+                .disruptive(),
             ConnectorAction::simple(ACTION_PING, "Ping")
                 .with_description("Pretends to check that the simulated service answers."),
             ConnectorAction {
@@ -583,6 +607,7 @@ impl Connector for DebugConnector {
                     "required": ["enabled"],
                     "additionalProperties": false
                 }),
+                is_disruptive: false,
             },
             ConnectorAction {
                 id: ACTION_SET_LOAD.to_string(),
@@ -598,6 +623,7 @@ impl Connector for DebugConnector {
                     "required": ["value"],
                     "additionalProperties": false
                 }),
+                is_disruptive: false,
             },
             ConnectorAction {
                 id: ACTION_SET_LABEL.to_string(),
@@ -611,6 +637,7 @@ impl Connector for DebugConnector {
                     "required": ["label"],
                     "additionalProperties": false
                 }),
+                is_disruptive: false,
             },
         ]
     }
@@ -727,6 +754,19 @@ impl Connector for DebugConnector {
                     "type": "boolean",
                     "default": true,
                     "description": "Starting value of the simulated on/off data point."
+                },
+                "networkTarget": {
+                    "type": "object",
+                    "properties": {
+                        "host": { "type": "string", "minLength": 1 },
+                        "port": { "type": "integer", "minimum": 1, "maximum": 65535 }
+                    },
+                    "required": ["host"],
+                    "additionalProperties": false,
+                    "description": "Endpoint the platform's network diagnostic should probe when \
+                                    this fixture reports Down. The fixture contacts nothing, so \
+                                    this exists to make each diagnosis reachable: a name that does \
+                                    not resolve, or an address with nothing listening."
                 }
             },
             "additionalProperties": false
@@ -842,6 +882,12 @@ impl Connector for DebugConnector {
     /// The load appears three times on purpose — as a tile, a gauge, and a bar
     /// — because the fixture's job includes letting three different renderers
     /// be compared side by side against the same moving number.
+    /// Whatever the configuration asked for — see
+    /// [`DebugConnectorConfig::network_target`].
+    fn network_target(&self) -> Option<NetworkTarget> {
+        self.config.network_target.clone()
+    }
+
     fn default_layout(&self) -> WidgetLayout {
         WidgetLayout::new(vec![
             WidgetBinding::display(DATA_POINT_LOAD, DisplayWidgetType::StatTile),

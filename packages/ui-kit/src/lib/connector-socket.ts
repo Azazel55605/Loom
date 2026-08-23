@@ -1,4 +1,9 @@
-import type { ApiClient, ConnectorError, ConnectorStatus } from "@loom/ui-kit/lib/api";
+import type {
+  ApiClient,
+  ConnectorError,
+  ConnectorStatus,
+  PendingOperation,
+} from "@loom/ui-kit/lib/api";
 import type {
   TransportSocket,
   WebSocketTransport,
@@ -12,6 +17,10 @@ export type ConnectorStatusUpdate = {
   instanceId: string;
   status: ConnectorStatus | null;
   statusError?: ConnectorError;
+  /** A disruptive action in flight. Takes visual precedence over `status`. */
+  pendingOperation: PendingOperation | null;
+  /** Why this instance is Down, probed from the network beneath it. */
+  diagnosis: string | null;
 };
 
 type StatusListener = (update: ConnectorStatusUpdate) => void;
