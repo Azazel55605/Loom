@@ -1,6 +1,12 @@
 import * as React from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { GridLayout, useContainerWidth, type Layout, type LayoutItem } from "react-grid-layout";
+import {
+  ResponsiveGridLayout,
+  useContainerWidth,
+  type Layout,
+  type LayoutItem,
+  type ResponsiveLayouts,
+} from "react-grid-layout";
 import { AlertCircle, Check, LayoutGrid, Pencil, Plus, Share2, Trash2 } from "lucide-react";
 import { toast } from "sonner";
 
@@ -57,6 +63,9 @@ const dashboardQueryKey = (dashboardId: string) => ["dashboard", dashboardId] as
 const GRID_COLS = 6;
 const GRID_ROW_HEIGHT = 110;
 const GRID_MARGIN: [number, number] = [16, 16];
+const GRID_BREAKPOINTS = { lg: 768, md: 600, sm: 420, xs: 0 } as const;
+const GRID_COLUMNS = { lg: 6, md: 4, sm: 2, xs: 1 } as const;
+type GridBreakpoint = keyof typeof GRID_BREAKPOINTS;
 
 function layoutFromPlacements(placements: DashboardPlacement[]): Layout {
   return placements.map((placement) => ({
@@ -68,6 +77,65 @@ function layoutFromPlacements(placements: DashboardPlacement[]): Layout {
     minW: placement.connector.metadata.minSize[0],
     minH: placement.connector.metadata.minSize[1],
   }));
+}
+
+function scaledLayout(placements: DashboardPlacement[], columns: number): Layout {
+  return placements.map((placement) => {
+    const minimumWidth = Math.min(placement.connector.metadata.minSize[0], columns);
+    const width = Math.min(
+      columns,
+      Math.max(minimumWidth, Math.ceil((placement.width * columns) / GRID_COLS)),
+    );
+    return {
+      i: placement.id,
+      x: Math.min(Math.floor((placement.positionX * columns) / GRID_COLS), columns - width),
+      y: placement.positionY,
+      w: width,
+      h: placement.height,
+      minW: minimumWidth,
+      minH: placement.connector.metadata.minSize[1],
+    };
+  });
+}
+
+function stackedLayout(placements: DashboardPlacement[], columns: number): Layout {
+  let nextRow = 0;
+  return [...placements]
+    .sort(
+      (left, right) =>
+        left.positionY - right.positionY || left.positionX - right.positionX,
+    )
+    .map((placement) => {
+      const item = {
+        i: placement.id,
+        x: 0,
+        y: nextRow,
+        w: columns,
+        h: placement.height,
+        minW: columns,
+        minH: placement.connector.metadata.minSize[1],
+      };
+      nextRow += placement.height;
+      return item;
+    });
+}
+
+function responsiveLayoutsFromPlacements(
+  placements: DashboardPlacement[],
+): ResponsiveLayouts<GridBreakpoint> {
+  return {
+    lg: layoutFromPlacements(placements),
+    md: scaledLayout(placements, GRID_COLUMNS.md),
+    sm: stackedLayout(placements, GRID_COLUMNS.sm),
+    xs: stackedLayout(placements, GRID_COLUMNS.xs),
+  };
+}
+
+function breakpointForWidth(width: number): GridBreakpoint {
+  if (width >= GRID_BREAKPOINTS.lg) return "lg";
+  if (width >= GRID_BREAKPOINTS.md) return "md";
+  if (width >= GRID_BREAKPOINTS.sm) return "sm";
+  return "xs";
 }
 
 /**
@@ -120,7 +188,7 @@ export function DashboardView({
   const [bindingsFor, setBindingsFor] = React.useState<DashboardPlacement | null>(null);
   const [removing, setRemoving] = React.useState<DashboardPlacement | null>(null);
   const [live, setLive] = React.useState<Record<string, LiveStatus>>({});
-  const { width, containerRef, mounted } = useContainerWidth();
+  const { width, containerRef, mounted } = useContainerWidth({ measureBeforeMount: true });
 
   const dashboard = useQuery({
     queryKey: dashboardQueryKey(dashboardId),
@@ -132,10 +200,10 @@ export function DashboardView({
     [dashboard.data],
   );
 
-  const [layout, setLayout] = React.useState<Layout>([]);
-  React.useEffect(() => {
-    setLayout(layoutFromPlacements(placements));
-  }, [placements]);
+  const responsiveLayouts = React.useMemo(
+    () => responsiveLayoutsFromPlacements(placements),
+    [placements],
+  );
 
   const instanceIds = React.useMemo(
     () => [...new Set(placements.map((placement) => placement.connector.id))],
@@ -192,9 +260,18 @@ export function DashboardView({
   });
 
   const persist = React.useCallback(
-    async (next: Layout) => {
+    async (next: Layout, breakpoint: GridBreakpoint) => {
       const stored = new Map(placements.map((placement) => [placement.id, placement]));
-      const moved = next.filter((item) => {
+      // The API stores one canonical layout. At narrower breakpoints the grid
+      // is derived from it, so preserve desktop x/width while still allowing
+      // touch users to adjust vertical order and height.
+      const canonical = next.map((item) => {
+        const placement = stored.get(item.i);
+        return breakpoint === "lg" || placement === undefined
+          ? item
+          : { ...item, x: placement.positionX, w: placement.width };
+      });
+      const moved = canonical.filter((item) => {
         const placement = stored.get(item.i);
         return (
           placement !== undefined &&
@@ -233,10 +310,9 @@ export function DashboardView({
 
   const onLayoutSettled = React.useCallback(
     (next: Layout, _old: LayoutItem | null) => {
-      setLayout(next);
-      void persist(next);
+      void persist(next, breakpointForWidth(width));
     },
-    [persist],
+    [persist, width],
   );
 
   if (dashboard.isPending) return <DashboardViewSkeleton />;
@@ -400,19 +476,18 @@ export function DashboardView({
           className="min-w-0"
         >
           {mounted ? (
-            <GridLayout
+            <ResponsiveGridLayout<GridBreakpoint>
               width={width}
-              layout={layout}
+              breakpoints={GRID_BREAKPOINTS}
+              cols={GRID_COLUMNS}
+              layouts={responsiveLayouts}
+              rowHeight={GRID_ROW_HEIGHT}
+              margin={{ lg: GRID_MARGIN, md: GRID_MARGIN, sm: [12, 12], xs: [12, 12] }}
               // Gates the resize grip in CSS. The library keeps rendering the
               // handle element even with resizing disabled, and a grip that
               // appears on hover and then refuses to move is worse than no grip
               // — particularly for a Viewer, who has no way to make it work.
               className={editingLayout ? "loom-grid-editing" : undefined}
-              gridConfig={{
-                cols: GRID_COLS,
-                rowHeight: GRID_ROW_HEIGHT,
-                margin: GRID_MARGIN,
-              }}
               // The header is the only drag surface, so a press on a slider or a
               // button inside a card never becomes a drag.
               dragConfig={{ enabled: editingLayout, handle: `.${DRAG_HANDLE_CLASS}` }}
@@ -431,7 +506,7 @@ export function DashboardView({
                   />
                 </div>
               ))}
-            </GridLayout>
+            </ResponsiveGridLayout>
           ) : (
             <Skeleton className="h-48 w-full" />
           )}

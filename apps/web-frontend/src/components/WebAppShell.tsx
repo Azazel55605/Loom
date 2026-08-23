@@ -14,6 +14,7 @@ export function WebAppShell({ children }: { children: React.ReactNode }) {
 
   return (
     <SharedAppShell
+      sidebarNavigationKey={location.pathname}
       homeControl={
         <Link to="/dashboards" className="text-base font-semibold tracking-tight">
           Loom

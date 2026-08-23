@@ -13,6 +13,7 @@ export function DesktopAppShell({ children }: { children: React.ReactNode }) {
 
   return (
     <AppShell
+      sidebarNavigationKey={location.pathname}
       homeControl={
         <Link to="/dashboards" className="text-base font-semibold tracking-tight">
           Loom

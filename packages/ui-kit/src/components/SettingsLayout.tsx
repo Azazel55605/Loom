@@ -31,12 +31,24 @@ export function SettingsLayout({
       </div>
 
       <Tabs value={activeSection} onValueChange={onSectionChange}>
-        <TabsList>
-          <TabsTrigger value="general">General</TabsTrigger>
-          <TabsTrigger value="account">Account</TabsTrigger>
-          <TabsTrigger value="appearance">Appearance</TabsTrigger>
-          {canAdminister && <TabsTrigger value="permissions">Permissions</TabsTrigger>}
-        </TabsList>
+        <div className="max-w-full touch-pan-x overflow-x-auto pb-1">
+          <TabsList className="w-max min-w-full justify-start sm:min-w-0">
+            <TabsTrigger className="shrink-0" value="general">
+              General
+            </TabsTrigger>
+            <TabsTrigger className="shrink-0" value="account">
+              Account
+            </TabsTrigger>
+            <TabsTrigger className="shrink-0" value="appearance">
+              Appearance
+            </TabsTrigger>
+            {canAdminister && (
+              <TabsTrigger className="shrink-0" value="permissions">
+                Permissions
+              </TabsTrigger>
+            )}
+          </TabsList>
+        </div>
       </Tabs>
 
       {children}

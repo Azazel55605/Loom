@@ -324,23 +324,19 @@
    Present in the DOM whether or not resizing is enabled, so it is hidden
    outright unless the dashboard is in edit mode: a grip that appears on hover
    and then refuses to move is worse than no grip at all, and a Viewer has no
-   way to make it work. In edit mode it fades in on hover, or on focus-within so
-   it is discoverable without a pointer. */
+   way to make it work. In edit mode the 44px target remains visible without
+   hover, so it is discoverable and reachable on a touchscreen. */
 .react-grid-item > .react-resizable-handle {
   display: none;
   position: absolute;
-  width: 20px;
-  height: 20px;
+  width: 44px;
+  height: 44px;
   opacity: 0;
   transition: opacity 150ms ease;
 }
 
 .loom-grid-editing .react-grid-item > .react-resizable-handle {
   display: block;
-}
-
-.loom-grid-editing .react-grid-item:hover > .react-resizable-handle,
-.loom-grid-editing .react-grid-item:focus-within > .react-resizable-handle {
   opacity: 1;
 }
 

@@ -35,6 +35,22 @@ different products from one codebase. Themed equivalents keep one product, and
 keep the accent color and blur settings meaningful everywhere rather than
 applying to some controls and silently skipping others.
 
+### Responsive layout is shared behavior
+
+Responsive behavior belongs in `packages/ui-kit`, alongside the component it
+changes. Do not fork a shared component into Web, Desktop, and Mobile versions
+just to rearrange it at a breakpoint. Platform wrappers inject navigation and
+transport concerns; Tailwind breakpoints, responsive component props, and
+pointer media queries adapt the same component to its available space.
+
+Below the `md` breakpoint, persistent sidebars become focus-trapped off-canvas
+`Sheet` drawers that start closed and close after navigation. Dashboard grids
+reduce their column count as space contracts and stack cards full-width on
+phone-sized containers, while preserving the canonical desktop geometry.
+Controls that depend on pointer precision need at least a 44 by 44 pixel touch
+target, and controls that cannot usefully shrink — such as settings tabs —
+scroll horizontally inside their own region instead of widening the page.
+
 ## Customization axes
 
 All three are **user-adjustable at runtime**, not hardcoded values. Treat them
