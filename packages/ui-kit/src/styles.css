@@ -261,3 +261,136 @@
       );
   }
 }
+
+/* -------------------------------------------------------------------------- */
+/* Dashboard grid                                                             */
+/* -------------------------------------------------------------------------- */
+
+/*
+ * react-grid-layout's own stylesheet is deliberately NOT imported.
+ *
+ * It is cosmetic — the library positions items with inline styles — and what it
+ * paints is a literal `red` placeholder and an `rgba(0, 0, 0, 0.4)` resize
+ * handle. Both ignore the token palette, both are invisible-to-wrong on the
+ * dark palette, and neither follows the accent choice. Per the sourcing rule in
+ * docs/UI_GUIDELINES.md the themed equivalent is what ships, so these are the
+ * same rules rewritten against our tokens. The class names are the library's,
+ * because the library is what applies them.
+ *
+ * Deliberately NOT inside `@layer components`. Tailwind treats the contents of
+ * that layer as purgeable candidates, and these class names never appear in any
+ * scanned source file — react-grid-layout applies them at runtime — so every one
+ * of these rules would be stripped from the build. Plain top-level CSS is not
+ * subject to that scan.
+ */
+.react-grid-layout {
+  position: relative;
+  transition: height 200ms ease;
+}
+
+.react-grid-item {
+  transition: all 200ms ease;
+  transition-property: transform, width, height;
+}
+
+/* Dragging and resizing must track the pointer exactly. A transition here
+   means the item lags the cursor, which reads as a dropped frame. */
+.react-grid-item.react-draggable-dragging,
+.react-grid-item.resizing {
+  transition: none;
+  z-index: 3;
+}
+
+.react-grid-item.dropping {
+  visibility: hidden;
+}
+
+/* Where the item will land. Accent-derived rather than a fixed colour, so it
+   stays the "this is yours" colour the rest of the interface uses. */
+.react-grid-item.react-grid-placeholder {
+  z-index: 2;
+  border-radius: var(--radius);
+  background: hsl(var(--accent) / 0.18);
+  border: 1px dashed hsl(var(--accent) / 0.5);
+  transition-duration: 100ms;
+  user-select: none;
+}
+
+.react-grid-item.react-grid-placeholder.placeholder-resizing {
+  transition: none;
+}
+
+/* The resize grip.
+   Present in the DOM whether or not resizing is enabled, so it is hidden
+   outright unless the dashboard is in edit mode: a grip that appears on hover
+   and then refuses to move is worse than no grip at all, and a Viewer has no
+   way to make it work. In edit mode it fades in on hover, or on focus-within so
+   it is discoverable without a pointer. */
+.react-grid-item > .react-resizable-handle {
+  display: none;
+  position: absolute;
+  width: 20px;
+  height: 20px;
+  opacity: 0;
+  transition: opacity 150ms ease;
+}
+
+.loom-grid-editing .react-grid-item > .react-resizable-handle {
+  display: block;
+}
+
+.loom-grid-editing .react-grid-item:hover > .react-resizable-handle,
+.loom-grid-editing .react-grid-item:focus-within > .react-resizable-handle {
+  opacity: 1;
+}
+
+.react-grid-item > .react-resizable-handle::after {
+  content: "";
+  position: absolute;
+  right: 5px;
+  bottom: 5px;
+  width: 6px;
+  height: 6px;
+  border-right: 2px solid hsl(var(--muted-foreground));
+  border-bottom: 2px solid hsl(var(--muted-foreground));
+}
+
+.react-resizable-hide > .react-resizable-handle {
+  display: none;
+}
+
+.react-grid-item > .react-resizable-handle.react-resizable-handle-se {
+  right: 0;
+  bottom: 0;
+  cursor: se-resize;
+}
+
+.react-grid-item > .react-resizable-handle.react-resizable-handle-sw {
+  bottom: 0;
+  left: 0;
+  cursor: sw-resize;
+  transform: rotate(90deg);
+}
+
+.react-grid-item > .react-resizable-handle.react-resizable-handle-ne {
+  top: 0;
+  right: 0;
+  cursor: ne-resize;
+  transform: rotate(270deg);
+}
+
+.react-grid-item > .react-resizable-handle.react-resizable-handle-nw {
+  top: 0;
+  left: 0;
+  cursor: nw-resize;
+  transform: rotate(180deg);
+}
+
+/* Reduced motion removes the easing, not the movement: an item still has to
+   follow the pointer, and the placeholder still has to show where it lands.
+   What goes is the animated settle afterwards. */
+.reduce-motion .react-grid-layout,
+.reduce-motion .react-grid-item,
+.reduce-motion .react-grid-item.react-grid-placeholder {
+  transition: none;
+}

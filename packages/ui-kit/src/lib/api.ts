@@ -56,9 +56,16 @@ export type HealthState = "healthy" | "degraded" | "down" | "unknown";
 export type ConnectorStatus = {
   health: HealthState;
   /**
-   * Connector-specific extras — version strings, queue depths, disk usage.
-   * Intentionally unstructured; a client that does not recognise a connector
-   * ignores this rather than failing to parse it.
+   * The current reading for every data point, keyed by `DataPointDescriptor.id`.
+   *
+   * Typed loosely, but the shape is a contract: a JSON object whose values
+   * follow each data point's declared `valueType` — `number` → number,
+   * `string` → string, `bool` → boolean, `timeSeries` → an array of
+   * `{ timestamp, value }` objects, oldest first. A connector may add keys that
+   * are not data points (a version string, a queue depth) and a client that
+   * does not recognise one ignores it. This is what a `WidgetBinding.display`
+   * resolves against on every poll, which is why there is no separate
+   * values endpoint.
    */
   details: unknown;
   /** RFC 3339, UTC, `Z`-suffixed. Part of the value so a polled reading stays
@@ -101,8 +108,9 @@ export type ConnectorMetadata = {
   icon: string | null;
   version: string;
   /** `[width, height]` in dashboard grid units: the smallest footprint at which
-   *  this connector is still readable. Carried for the placement UI that does
-   *  not exist yet; nothing renders it today. */
+   *  this connector is still readable. Used as a new placement's default size
+   *  and as its `minW`/`minH` on the dashboard grid, and enforced again by the
+   *  backend on create and update. */
   minSize: [number, number];
 };
 
@@ -137,41 +145,64 @@ export type DataPointDescriptor = {
 export type ChartType = "pie" | "bar" | "line";
 
 /**
- * How a data point is drawn, or how an action is offered.
+ * How a data point is drawn. Read-only: nothing here invokes anything.
  *
  * **Not always a string.** Unit variants serialize bare; the one variant
  * carrying data is a single-key object, the same externally-tagged shape as
  * `ConnectorError`. A consumer that assumes a string throws on the chart case.
  */
-export type WidgetType =
+export type DisplayWidgetType =
   | "statTile"
   | "progressBar"
   | { metricChart: { chartType: ChartType } }
   | "gauge"
   | "statusDot"
-  | "logStream"
+  | "logStream";
+
+/** How an action is offered. Every variant invokes `executeConnectorAction`. */
+export type ActionWidgetType =
   | "button"
   | "toggle"
   | "slider"
   | "textField"
   | "selector";
 
-/** One data point drawn as one widget. */
-export type WidgetBinding = {
-  /** A `DataPointDescriptor.id`, or — for a control widget — a
-   *  `ConnectorAction.id`. */
-  dataPointId: string;
-  widgetType: WidgetType;
-  /** Widget-specific extras (`min`/`max`, `options`). Always an object. */
-  config: unknown;
-};
+/**
+ * One widget and the thing it is wired to.
+ *
+ * Externally tagged — a single-key object, `{ display: … }` or `{ action: … }`
+ * — because the two kinds bind to different identifier spaces: a display widget
+ * reads a `DataPointDescriptor.id` out of `status.details`, a control widget
+ * invokes a `ConnectorAction.id`. Narrow on the key, not on the widget type.
+ */
+export type WidgetBinding =
+  | {
+      display: {
+        /** A `DataPointDescriptor.id`; its current value is `status.details`
+         *  under this same key. */
+        dataPointId: string;
+        widgetType: DisplayWidgetType;
+        /** Widget-specific extras (`min`/`max`). Always an object. */
+        config: unknown;
+      };
+    }
+  | {
+      action: {
+        /** A `ConnectorAction.id`, as passed to `executeConnectorAction`. */
+        actionId: string;
+        widgetType: ActionWidgetType;
+        /** Widget-specific extras (`options`, `min`/`max`/`step`). Always an
+         *  object. */
+        config: unknown;
+      };
+    };
 
 /**
  * The widget arrangement a connector ships with.
  *
- * Carried through the client so the widget-rendering system can be built
- * against it. **Nothing renders it yet** — that, and the dashboard placement it
- * feeds, are the deliberate follow-up this change stops short of.
+ * A starting point for a placement's bindings, not a constraint: it is what a
+ * user gets when they place the connector without configuring anything, and it
+ * is theirs to edit afterwards.
  */
 export type WidgetLayout = {
   bindings: WidgetBinding[];
@@ -246,9 +277,11 @@ export type ConnectorInstanceDetail = ConnectorInstanceSummary & {
   config: unknown;
   /** What this instance can be asked to do right now. May be empty. */
   actions: ConnectorAction[];
-  /** What this instance can bind to a widget. Not rendered yet. */
+  /** What this instance can bind to a widget. Resolved against a placement's
+   *  `display` bindings for their labels and units. */
   dataPoints: DataPointDescriptor[];
-  /** The arrangement the connector ships with. Not rendered yet. */
+  /** The arrangement the connector ships with. Seeds a new placement's
+   *  bindings, which the user then owns — nothing re-applies it afterwards. */
   defaultLayout: WidgetLayout;
 };
 
@@ -313,6 +346,40 @@ export type CreateDashboardShareRequest = {
   targetType: DashboardShareTargetType;
   targetId: string;
   role: DashboardShareRole;
+};
+
+/**
+ * `POST /dashboards/{id}/placements` body — Editor or Owner.
+ *
+ * `widgetBindings` may be omitted, in which case the backend stores the
+ * connector's own `defaultLayout.bindings`. Width and height must each meet the
+ * connector's `metadata.minSize`, and every binding is validated against the
+ * namespace its tag names — a `display` against the connector's `dataPoints`, an
+ * `action` against its `actions`.
+ */
+export type CreateDashboardPlacementRequest = {
+  connectorInstanceId: string;
+  positionX: number;
+  positionY: number;
+  width: number;
+  height: number;
+  widgetBindings?: WidgetBinding[];
+};
+
+/**
+ * `PATCH /dashboards/{id}/placements/{placementId}` body — Editor or Owner.
+ *
+ * Every field is optional and an absent one is left alone, which is what lets a
+ * drag send only the position and a binding edit send only the bindings. The
+ * connector instance itself is fixed; re-pointing a placement means deleting it
+ * and adding another.
+ */
+export type UpdateDashboardPlacementRequest = {
+  positionX?: number;
+  positionY?: number;
+  width?: number;
+  height?: number;
+  widgetBindings?: WidgetBinding[];
 };
 
 /** `POST /connector-instances` body. */
@@ -1101,6 +1168,49 @@ function removeDashboardShare(
   );
 }
 
+/** `POST /dashboards/{id}/placements` — Editor or Owner. */
+function createDashboardPlacement(
+  runtime: ApiRuntime,
+  id: string,
+  data: CreateDashboardPlacementRequest,
+  signal?: AbortSignal,
+): Promise<DashboardPlacement> {
+  return authorizedRequest<DashboardPlacement>(
+    runtime,
+    `/dashboards/${encodeURIComponent(id)}/placements`,
+    { method: "POST", body: data, signal },
+  );
+}
+
+/** `PATCH /dashboards/{id}/placements/{placementId}` — Editor or Owner. */
+function updateDashboardPlacement(
+  runtime: ApiRuntime,
+  id: string,
+  placementId: string,
+  data: UpdateDashboardPlacementRequest,
+  signal?: AbortSignal,
+): Promise<DashboardPlacement> {
+  return authorizedRequest<DashboardPlacement>(
+    runtime,
+    `/dashboards/${encodeURIComponent(id)}/placements/${encodeURIComponent(placementId)}`,
+    { method: "PATCH", body: data, signal },
+  );
+}
+
+/** `DELETE /dashboards/{id}/placements/{placementId}` — Editor or Owner. */
+function deleteDashboardPlacement(
+  runtime: ApiRuntime,
+  id: string,
+  placementId: string,
+  signal?: AbortSignal,
+): Promise<void> {
+  return authorizedRequest<void>(
+    runtime,
+    `/dashboards/${encodeURIComponent(id)}/placements/${encodeURIComponent(placementId)}`,
+    { method: "DELETE", signal },
+  );
+}
+
 /* -------------------------------------------------------------------------- */
 /* Administration                                                              */
 /* -------------------------------------------------------------------------- */
@@ -1503,6 +1613,19 @@ export function createApiClient(options: {
     ) => addDashboardShare(runtime, id, data, signal),
     removeDashboardShare: (id: string, shareId: string, signal?: AbortSignal) =>
       removeDashboardShare(runtime, id, shareId, signal),
+    createDashboardPlacement: (
+      id: string,
+      data: CreateDashboardPlacementRequest,
+      signal?: AbortSignal,
+    ) => createDashboardPlacement(runtime, id, data, signal),
+    updateDashboardPlacement: (
+      id: string,
+      placementId: string,
+      data: UpdateDashboardPlacementRequest,
+      signal?: AbortSignal,
+    ) => updateDashboardPlacement(runtime, id, placementId, data, signal),
+    deleteDashboardPlacement: (id: string, placementId: string, signal?: AbortSignal) =>
+      deleteDashboardPlacement(runtime, id, placementId, signal),
     getUsers: (signal?: AbortSignal) => getUsers(runtime, signal),
     createUser: (data: CreateUserRequest, signal?: AbortSignal) =>
       createUser(runtime, data, signal),

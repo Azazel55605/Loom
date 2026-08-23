@@ -15,7 +15,8 @@
 //!    is reliably there to be listed, permission-checked, and acted on.
 //! 2. **Widget rendering development.** It exposes one data point of every
 //!    [`DataPointValueType`] and ships a [`default_layout`](Connector::default_layout)
-//!    binding them across the widget space, so every renderer can be built and
+//!    spreading them across the display widgets *and* wiring its actions to the
+//!    control widgets, so both halves of every renderer can be built and
 //!    reviewed against something that moves.
 //! 3. **Dashboard placement testing.** It declares a `min_size` and a real
 //!    layout, which is what a placement UI needs in order to be exercised.
@@ -55,13 +56,14 @@ use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
-use serde::Deserialize;
+use chrono::{DateTime, Utc};
+use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
 
 use super::{
-    ActionResult, ChartType, Connector, ConnectorAction, ConnectorError, ConnectorMetadata,
-    ConnectorStatus, DataPointDescriptor, DataPointValueType, DisplayField, HealthState,
-    WidgetBinding, WidgetLayout, WidgetType,
+    ActionResult, ActionWidgetType, ChartType, Connector, ConnectorAction, ConnectorError,
+    ConnectorMetadata, ConnectorStatus, DataPointDescriptor, DataPointValueType, DisplayField,
+    DisplayWidgetType, HealthState, WidgetBinding, WidgetLayout,
 };
 
 /// The connector type id this fixture registers under.
@@ -100,6 +102,16 @@ pub const DATA_POINT_LOAD_HISTORY: &str = "loadHistory";
 /// is serialized into every status response; an unbounded history would grow a
 /// response body without limit for a fixture nobody is monitoring.
 pub const HISTORY_CAPACITY: usize = 50;
+
+/// The data point id for the rolling buffer of fake log lines.
+pub const DATA_POINT_LOG: &str = "log";
+
+/// How many lines [`DATA_POINT_LOG`] keeps.
+///
+/// Small on purpose. This one is not a chart series but a scrolling text pane,
+/// and the fixture's job is to give `LogStream` something to scroll — not to
+/// simulate log retention, which is a real connector's problem.
+pub const LOG_CAPACITY: usize = 10;
 
 /// The fake hostname shown in [`Connector::display_fields`].
 ///
@@ -170,6 +182,20 @@ impl Default for DebugConnectorConfig {
 /// is shared, immutably, across every request task that touches it — and a
 /// data point that never changes gives a chart nothing to draw. The critical
 /// sections are a handful of arithmetic operations with no `await` inside them.
+/// One entry in the [`DATA_POINT_LOAD_HISTORY`] buffer.
+///
+/// Serialized straight into `status().details` as the `{ "timestamp", "value" }`
+/// object the [`DataPointValueType::TimeSeries`] contract requires
+/// ([`ConnectorStatus::details`]); the field names are the wire names, so this
+/// struct is the shape rather than a source for one.
+#[derive(Debug, Clone, Serialize)]
+struct HistorySample {
+    /// When the reading was taken, RFC 3339 on the wire.
+    timestamp: DateTime<Utc>,
+    /// The reading itself, rounded the same way the scalar data point is.
+    value: f64,
+}
+
 #[derive(Debug)]
 struct SimulatedState {
     /// Number of `status()` calls so far; drives the oscillation.
@@ -177,11 +203,57 @@ struct SimulatedState {
     /// The most recent load reading.
     load: f64,
     /// The last [`HISTORY_CAPACITY`] readings, oldest first.
-    history: VecDeque<f64>,
+    history: VecDeque<HistorySample>,
     /// Current value of the boolean data point.
     enabled: bool,
     /// Current value of the text data point.
     label: String,
+    /// The last [`LOG_CAPACITY`] fake log lines, oldest first.
+    log: VecDeque<String>,
+}
+
+impl SimulatedState {
+    /// Appends a reading to the bounded history, evicting the oldest first.
+    ///
+    /// One place rather than two, because both `status()` and the `set-load`
+    /// action push into this buffer and a capacity check that only one of them
+    /// performed would let the fixture grow without limit.
+    fn record(&mut self, value: f64) {
+        if self.history.len() == HISTORY_CAPACITY {
+            self.history.pop_front();
+        }
+        self.history.push_back(HistorySample {
+            timestamp: Utc::now(),
+            value: round2(value),
+        });
+    }
+
+    /// Appends one fake log line, evicting the oldest past [`LOG_CAPACITY`].
+    ///
+    /// The content is deliberately about the fixture itself — its tick counter
+    /// and its own simulated numbers. Nothing here imitates the log format of
+    /// any real service, because a plausible-looking line from a service Loom
+    /// does not have is a line someone will eventually try to debug.
+    fn append_log(&mut self, value: f64) {
+        let level = match self.tick % 4 {
+            0 => "INFO",
+            1 => "DEBUG",
+            2 => "INFO",
+            _ => "WARN",
+        };
+        let line = format!(
+            "{} {level:<5} simulated tick {} — load {:.1}%, {}",
+            Utc::now().format("%Y-%m-%dT%H:%M:%S%.3fZ"),
+            self.tick,
+            value,
+            if self.enabled { "enabled" } else { "disabled" }
+        );
+
+        if self.log.len() == LOG_CAPACITY {
+            self.log.pop_front();
+        }
+        self.log.push_back(line);
+    }
 }
 
 /// A [`Connector`] that simulates a service instead of contacting one.
@@ -209,6 +281,7 @@ impl DebugConnector {
             tick: 0,
             load: config.base_load,
             history: VecDeque::with_capacity(HISTORY_CAPACITY),
+            log: VecDeque::with_capacity(LOG_CAPACITY),
             enabled: config.enabled,
             label: config.label.clone(),
         };
@@ -323,20 +396,27 @@ impl DebugConnector {
         let load = simulated_load(self.config.base_load, state.tick);
         state.load = load;
 
-        if state.history.len() == HISTORY_CAPACITY {
-            state.history.pop_front();
-        }
-        state.history.push_back(load);
+        state.record(load);
+        state.append_log(load);
 
+        // One entry per data point, keyed by its own id and shaped by its
+        // declared value type — the `ConnectorStatus::details` contract, which
+        // this fixture exists partly to demonstrate.
         json!({
             DATA_POINT_LOAD: round2(state.load),
             DATA_POINT_LABEL: state.label,
             DATA_POINT_ENABLED: state.enabled,
-            DATA_POINT_LOAD_HISTORY: state
-                .history
+            DATA_POINT_LOAD_HISTORY: state.history.iter().collect::<Vec<&HistorySample>>(),
+            // Newline-joined rather than an array: the data point's declared
+            // value type is `String`, and `LogStream` is the widget that splits
+            // it back into lines. A JSON array here would be a second, undeclared
+            // shape for the same value type.
+            DATA_POINT_LOG: state
+                .log
                 .iter()
-                .map(|value| round2(*value))
-                .collect::<Vec<f64>>(),
+                .cloned()
+                .collect::<Vec<String>>()
+                .join("\n"),
         })
     }
 
@@ -573,10 +653,7 @@ impl Connector for DebugConnector {
                 {
                     let mut state = self.lock();
                     state.load = value;
-                    if state.history.len() == HISTORY_CAPACITY {
-                        state.history.pop_front();
-                    }
-                    state.history.push_back(value);
+                    state.record(value);
                 }
 
                 Ok(ActionResult::ok(format!("Simulated load set to {value}."))
@@ -695,10 +772,15 @@ impl Connector for DebugConnector {
                 DataPointValueType::TimeSeries,
             )
             .with_unit("%"),
+            DataPointDescriptor::new(
+                DATA_POINT_LOG,
+                "Recent activity",
+                DataPointValueType::String,
+            ),
         ]
     }
 
-    /// A spread across the display widgets rather than the minimum that
+    /// A spread across both binding kinds rather than the minimum that
     /// compiles.
     ///
     /// The load appears three times on purpose — as a tile, a gauge, and a bar
@@ -706,19 +788,28 @@ impl Connector for DebugConnector {
     /// be compared side by side against the same moving number.
     fn default_layout(&self) -> WidgetLayout {
         WidgetLayout::new(vec![
-            WidgetBinding::new(DATA_POINT_LOAD, WidgetType::StatTile),
-            WidgetBinding::new(DATA_POINT_ENABLED, WidgetType::StatusDot),
-            WidgetBinding::new(
+            WidgetBinding::display(DATA_POINT_LOAD, DisplayWidgetType::StatTile),
+            WidgetBinding::display(DATA_POINT_ENABLED, DisplayWidgetType::StatusDot),
+            WidgetBinding::display(
                 DATA_POINT_LOAD_HISTORY,
-                WidgetType::MetricChart {
+                DisplayWidgetType::MetricChart {
                     chart_type: ChartType::Line,
                 },
             ),
-            WidgetBinding::new(DATA_POINT_LOAD, WidgetType::Gauge)
+            WidgetBinding::display(DATA_POINT_LOAD, DisplayWidgetType::Gauge)
                 .with_config(json!({ "min": 0, "max": 100 })),
-            WidgetBinding::new(DATA_POINT_LOAD, WidgetType::ProgressBar)
+            WidgetBinding::display(DATA_POINT_LOAD, DisplayWidgetType::ProgressBar)
                 .with_config(json!({ "min": 0, "max": 100 })),
-            WidgetBinding::new(DATA_POINT_LABEL, WidgetType::StatTile),
+            WidgetBinding::display(DATA_POINT_LABEL, DisplayWidgetType::StatTile),
+            WidgetBinding::display(DATA_POINT_LOG, DisplayWidgetType::LogStream),
+            // Both binding kinds on purpose: a layout that only ever displayed
+            // would not exercise the half of the renderer that has to send an
+            // action, which is the gap the flat binding shape used to hide.
+            WidgetBinding::action(ACTION_SET_ENABLED, ActionWidgetType::Toggle),
+            WidgetBinding::action(ACTION_SET_LOAD, ActionWidgetType::Slider)
+                .with_config(json!({ "min": 0, "max": 100, "step": 1 })),
+            WidgetBinding::action(ACTION_SET_LABEL, ActionWidgetType::TextField),
+            WidgetBinding::action(ACTION_RESTART, ActionWidgetType::Button),
         ])
     }
 }
@@ -772,20 +863,53 @@ mod tests {
         assert_eq!(status.health, HealthState::Degraded);
         // The configured detail is still there...
         assert_eq!(status.details["queueDepth"], json!(7));
-        // ...alongside every data point's current value.
+        // ...alongside every data point's current value, keyed by its own id
+        // and shaped by its declared value type.
         for descriptor in connector.data_points() {
-            assert!(
-                status.details.get(&descriptor.id).is_some(),
-                "status details is missing data point {}",
-                descriptor.id
-            );
+            let value = status.data_point_value(&descriptor.id).unwrap_or_else(|| {
+                panic!("status details is missing data point {}", descriptor.id)
+            });
+            match descriptor.value_type {
+                DataPointValueType::Number => assert!(
+                    value.is_number(),
+                    "{} must be a JSON number, got {value}",
+                    descriptor.id
+                ),
+                DataPointValueType::String => assert!(
+                    value.is_string(),
+                    "{} must be a JSON string, got {value}",
+                    descriptor.id
+                ),
+                DataPointValueType::Bool => assert!(
+                    value.is_boolean(),
+                    "{} must be a JSON boolean, got {value}",
+                    descriptor.id
+                ),
+                DataPointValueType::TimeSeries => {
+                    let samples = value
+                        .as_array()
+                        .unwrap_or_else(|| panic!("{} must be a JSON array", descriptor.id));
+                    assert!(!samples.is_empty());
+                    for sample in samples {
+                        assert!(
+                            sample["value"].is_number(),
+                            "a time series sample needs a numeric `value`, got {sample}"
+                        );
+                        let timestamp = sample["timestamp"]
+                            .as_str()
+                            .expect("a time series sample needs a string `timestamp`");
+                        DateTime::parse_from_rfc3339(timestamp)
+                            .expect("the sample timestamp must be ISO 8601");
+                    }
+                }
+            }
         }
     }
 
     #[tokio::test]
     async fn data_points_cover_every_value_type_and_have_unique_ids() {
         let points = DebugConnector::default().data_points();
-        assert_eq!(points.len(), 4);
+        assert_eq!(points.len(), 5);
 
         let ids: HashSet<&str> = points.iter().map(|p| p.id.as_str()).collect();
         assert_eq!(ids.len(), points.len(), "data point ids must be unique");
@@ -801,54 +925,139 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn the_default_layout_only_binds_data_points_that_exist() {
+    async fn the_log_data_point_is_newline_joined_and_stays_capped() {
         let connector = DebugConnector::default();
-        let ids: HashSet<String> = connector
+
+        let lines = |details: &Value| -> Vec<String> {
+            details[DATA_POINT_LOG]
+                .as_str()
+                .expect("the log data point must be a JSON string")
+                .lines()
+                .map(str::to_string)
+                .collect()
+        };
+
+        let first = connector.status().await.unwrap().details;
+        assert_eq!(lines(&first).len(), 1);
+
+        for _ in 0..(LOG_CAPACITY + 5) {
+            connector.status().await.unwrap();
+        }
+        let later = connector.status().await.unwrap().details;
+        let later_lines = lines(&later);
+        assert_eq!(later_lines.len(), LOG_CAPACITY);
+
+        // Newest last, so a pane scrolled to the bottom shows the latest line.
+        assert_ne!(later_lines.first(), later_lines.last());
+        assert!(later_lines
+            .iter()
+            .all(|line| line.contains("simulated tick")));
+
+        // Nothing here may look like it came from a real service.
+        assert!(!later.to_string().contains(".com"));
+    }
+
+    #[tokio::test]
+    async fn the_default_layout_only_binds_things_that_exist() {
+        let connector = DebugConnector::default();
+        let point_ids: HashSet<String> = connector
             .data_points()
             .into_iter()
             .map(|point| point.id)
             .collect();
+        let action_ids: HashSet<String> = connector
+            .actions()
+            .await
+            .into_iter()
+            .map(|action| action.id)
+            .collect();
 
         let layout = connector.default_layout();
-        assert_eq!(layout.bindings.len(), 6);
+        assert_eq!(layout.bindings.len(), 11);
 
         for binding in &layout.bindings {
-            assert!(
-                ids.contains(&binding.data_point_id),
-                "layout binds unknown data point {}",
-                binding.data_point_id
-            );
-            assert!(
-                binding.config.is_object(),
-                "config must always be an object"
-            );
+            match binding {
+                WidgetBinding::Display {
+                    data_point_id,
+                    config,
+                    ..
+                } => {
+                    assert!(
+                        point_ids.contains(data_point_id),
+                        "layout binds unknown data point {data_point_id}"
+                    );
+                    assert!(config.is_object(), "config must always be an object");
+                }
+                WidgetBinding::Action {
+                    action_id, config, ..
+                } => {
+                    assert!(
+                        action_ids.contains(action_id),
+                        "layout binds unknown action {action_id}"
+                    );
+                    assert!(config.is_object(), "config must always be an object");
+                }
+            }
         }
+    }
 
-        // The three shapes a renderer has to get right first.
-        assert!(layout
+    #[tokio::test]
+    async fn the_default_layout_exercises_both_binding_kinds() {
+        let layout = DebugConnector::default().default_layout();
+
+        // The three display shapes a renderer has to get right first.
+        assert!(layout.bindings.contains(&WidgetBinding::display(
+            DATA_POINT_LOAD,
+            DisplayWidgetType::StatTile
+        )));
+        assert!(layout.bindings.contains(&WidgetBinding::display(
+            DATA_POINT_ENABLED,
+            DisplayWidgetType::StatusDot
+        )));
+        assert!(layout.bindings.contains(&WidgetBinding::display(
+            DATA_POINT_LOAD_HISTORY,
+            DisplayWidgetType::MetricChart {
+                chart_type: ChartType::Line
+            }
+        )));
+        assert!(layout.bindings.contains(&WidgetBinding::display(
+            DATA_POINT_LOG,
+            DisplayWidgetType::LogStream
+        )));
+
+        // ...and at least one control, so the action half of the renderer has
+        // something to be built against.
+        let actions: Vec<&WidgetBinding> = layout
             .bindings
             .iter()
-            .any(|b| b.data_point_id == DATA_POINT_LOAD && b.widget_type == WidgetType::StatTile));
-        assert!(layout.bindings.iter().any(
-            |b| b.data_point_id == DATA_POINT_ENABLED && b.widget_type == WidgetType::StatusDot
-        ));
-        assert!(layout
-            .bindings
-            .iter()
-            .any(|b| b.data_point_id == DATA_POINT_LOAD_HISTORY
-                && b.widget_type
-                    == WidgetType::MetricChart {
-                        chart_type: ChartType::Line
-                    }));
+            .filter(|binding| matches!(binding, WidgetBinding::Action { .. }))
+            .collect();
+        assert!(
+            !actions.is_empty(),
+            "the fixture must ship at least one action binding"
+        );
+        assert!(actions.contains(&&WidgetBinding::action(
+            ACTION_SET_ENABLED,
+            ActionWidgetType::Toggle
+        )));
 
         // The bounded widgets must carry the bounds they need to draw.
-        for binding in layout
-            .bindings
-            .iter()
-            .filter(|b| matches!(b.widget_type, WidgetType::Gauge | WidgetType::ProgressBar))
-        {
-            assert_eq!(binding.config["min"], json!(0));
-            assert_eq!(binding.config["max"], json!(100));
+        for binding in &layout.bindings {
+            let config = match binding {
+                WidgetBinding::Display {
+                    widget_type: DisplayWidgetType::Gauge | DisplayWidgetType::ProgressBar,
+                    config,
+                    ..
+                } => config,
+                WidgetBinding::Action {
+                    widget_type: ActionWidgetType::Slider,
+                    config,
+                    ..
+                } => config,
+                _ => continue,
+            };
+            assert_eq!(config["min"], json!(0));
+            assert_eq!(config["max"], json!(100));
         }
     }
 
@@ -878,11 +1087,23 @@ mod tests {
         for _ in 0..3 {
             connector.status().await.unwrap();
         }
-        let series = connector.status().await.unwrap().details[DATA_POINT_LOAD_HISTORY]
-            .as_array()
-            .expect("a time series")
-            .len();
-        assert_eq!(series, 4);
+        let status = connector.status().await.unwrap();
+        let series = status
+            .data_point_value(DATA_POINT_LOAD_HISTORY)
+            .and_then(Value::as_array)
+            .expect("a time series");
+        assert_eq!(series.len(), 4);
+
+        // Oldest first, so a chart can plot the array in order without sorting.
+        let timestamps: Vec<DateTime<Utc>> = series
+            .iter()
+            .map(|sample| {
+                DateTime::parse_from_rfc3339(sample["timestamp"].as_str().expect("a timestamp"))
+                    .expect("ISO 8601")
+                    .with_timezone(&Utc)
+            })
+            .collect();
+        assert!(timestamps.windows(2).all(|pair| pair[0] <= pair[1]));
 
         for _ in 0..(HISTORY_CAPACITY + 10) {
             connector.status().await.unwrap();

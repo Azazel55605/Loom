@@ -51,7 +51,9 @@ widget layout — so client work does not depend on live infrastructure. See
 **Extended by [0011](./0011-connector-instance-registry.md)**, which adds the
 presentation half of the trait (`display_fields`, `data_points`,
 `default_layout`) and says where connector instances come from. The trait
-defined here is unchanged in kind; 0011 only adds to it.
+defined here is unchanged in kind; 0011 only adds to it. The shapes those
+methods return were then corrected by
+[0014](./0014-widget-binding-model.md).
 
 ## Consequences
 

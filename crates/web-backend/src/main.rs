@@ -989,7 +989,7 @@ mod tests {
             .as_array()
             .expect("array")
             .is_empty());
-        assert_eq!(created["dataPoints"].as_array().expect("array").len(), 4);
+        assert_eq!(created["dataPoints"].as_array().expect("array").len(), 5);
         assert!(!created["defaultLayout"]["bindings"]
             .as_array()
             .expect("array")
@@ -1650,30 +1650,106 @@ mod tests {
         .await;
         assert_eq!(status, StatusCode::BAD_REQUEST, "{too_small:#}");
 
+        // Each binding kind is checked against its own namespace, so a bogus
+        // display binding and a bogus action binding fail for different stated
+        // reasons rather than one catch-all.
+        let placement_body = |bindings: serde_json::Value| {
+            serde_json::json!({
+                "connectorInstanceId": connector_id,
+                "positionX": 0,
+                "positionY": 0,
+                "width": 2,
+                "height": 2,
+                "widgetBindings": bindings,
+            })
+        };
+
         let (status, bad_binding) = send(
             &app.router,
             post_json_auth(
                 &format!("/dashboards/{dashboard_id}/placements"),
                 &owner,
-                serde_json::json!({
-                    "connectorInstanceId": connector_id,
-                    "positionX": 0,
-                    "positionY": 0,
-                    "width": 2,
-                    "height": 2,
-                    "widgetBindings": [{
+                placement_body(serde_json::json!([{
+                    "display": {
                         "dataPointId": "does-not-exist",
                         "widgetType": "statTile",
                         "config": {},
-                    }],
-                }),
+                    }
+                }])),
             ),
         )
         .await;
         assert_eq!(status, StatusCode::BAD_REQUEST, "{bad_binding:#}");
-        assert!(bad_binding["error"]
-            .as_str()
-            .is_some_and(|error| error.contains("does-not-exist")));
+        let message = bad_binding["error"].as_str().unwrap_or_default();
+        assert!(
+            message.contains("unknown data points") && message.contains("does-not-exist"),
+            "{message}"
+        );
+
+        let (status, bad_action) = send(
+            &app.router,
+            post_json_auth(
+                &format!("/dashboards/{dashboard_id}/placements"),
+                &owner,
+                placement_body(serde_json::json!([{
+                    "action": {
+                        "actionId": "not-an-action",
+                        "widgetType": "button",
+                        "config": {},
+                    }
+                }])),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{bad_action:#}");
+        let message = bad_action["error"].as_str().unwrap_or_default();
+        assert!(
+            message.contains("unknown actions") && message.contains("not-an-action"),
+            "{message}"
+        );
+        // An action id is not a data point id: the error has to send the reader
+        // to the right half of the connector.
+        assert!(!message.contains("unknown data points"), "{message}");
+
+        // ...and a layout mixing both kinds, all of them real, is accepted.
+        let mixed_bindings = serde_json::json!([
+            {
+                "display": {
+                    "dataPointId": loom_core::connector::debug::DATA_POINT_LOAD,
+                    "widgetType": "gauge",
+                    "config": { "min": 0, "max": 100 },
+                }
+            },
+            {
+                "action": {
+                    "actionId": loom_core::connector::debug::ACTION_SET_ENABLED,
+                    "widgetType": "toggle",
+                    "config": {},
+                }
+            },
+        ]);
+        let (status, mixed) = send(
+            &app.router,
+            post_json_auth(
+                &format!("/dashboards/{dashboard_id}/placements"),
+                &owner,
+                placement_body(mixed_bindings.clone()),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED, "{mixed:#}");
+        assert_eq!(mixed["widgetBindings"], mixed_bindings);
+
+        let mixed_placement_id = mixed["id"].as_str().expect("a placement id").to_string();
+        let (status, _) = send(
+            &app.router,
+            delete_auth(
+                &format!("/dashboards/{dashboard_id}/placements/{mixed_placement_id}"),
+                &owner,
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::NO_CONTENT);
 
         // A group share applies to every current member, not only the user who
         // happened to identify the group for the test.

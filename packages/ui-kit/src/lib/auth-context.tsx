@@ -69,7 +69,20 @@ export function AuthProvider({
     };
   }, [client]);
 
-  React.useEffect(() => () => connectorSocket.dispose(), [connectorSocket]);
+  // Deliberately **not** disposed from an effect cleanup.
+  //
+  // `dispose()` is terminal — it sets a flag that makes every later
+  // `ensureConnected()` return early — and StrictMode runs an effect's cleanup
+  // between its two development mounts. A `useEffect(() => () =>
+  // connectorSocket.dispose())` therefore killed the socket permanently on the
+  // first render in dev, and every view's `subscribe()` afterwards silently did
+  // nothing: no status ever arrived, with no error to explain it. The same
+  // would happen in production on any remount of this provider.
+  //
+  // Nothing leaks by leaving it alone. The socket closes its connection on its
+  // own once its last listener unsubscribes, and the only other thing
+  // `dispose()` releases is a token-store subscription on an object with
+  // exactly this socket's lifetime.
 
   React.useEffect(() => {
     if (!runtimeReady) return;

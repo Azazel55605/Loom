@@ -48,8 +48,12 @@ not an ACL entry, and one user's pin cannot affect another user.
 
 Placements reference existing connector instances and store validated Core
 `WidgetBinding` values. Editors and owners may change them. Placement creation
-checks the live connector's minimum size and data-point declarations, but it
-performs no connector authorization and grants none.
+checks the live connector's minimum size and, per
+[0014](./0014-widget-binding-model.md), resolves each binding against the
+namespace its tag names — a `display` binding against the connector's data
+points, an `action` binding against its actions. It performs no connector
+authorization and grants none: a viewer may see an action widget and still be
+refused when they press it.
 
 The dashboard ACL and the existing RBAC system remain deliberately orthogonal:
 

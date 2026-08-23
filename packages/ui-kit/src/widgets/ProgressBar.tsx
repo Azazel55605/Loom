@@ -1,0 +1,46 @@
+import { Progress } from "@loom/ui-kit/components/ui/progress";
+import { cn } from "@loom/ui-kit/lib/utils";
+import { configNumber, readNumber, type DisplayWidgetProps } from "@loom/ui-kit/widgets/types";
+
+/**
+ * A bounded numeric reading as a filled bar.
+ *
+ * The bar is a percentage of `config.min`–`config.max` (0–100 by default), but
+ * the *number* shown alongside it is the raw reading with its own unit. A bar
+ * that silently converted 6 GiB of 16 GiB into "37%" and showed only that would
+ * lose the value the connector actually reported.
+ *
+ * A reading outside the configured bounds clamps the bar but not the label, so
+ * a misconfigured `max` looks wrong rather than looking fine.
+ */
+export function ProgressBarWidget({ label, unit, value, config, className }: DisplayWidgetProps) {
+  const reading = readNumber(value);
+  const min = configNumber(config, "min", 0);
+  const max = configNumber(config, "max", 100);
+  const span = max - min;
+
+  const percent =
+    reading === null || span <= 0
+      ? 0
+      : Math.min(100, Math.max(0, ((reading - min) / span) * 100));
+
+  return (
+    <div className={cn("flex min-w-0 flex-col justify-center gap-2", className)}>
+      <div className="flex min-w-0 items-baseline justify-between gap-2">
+        <span className="truncate text-xs text-muted-foreground" title={label}>
+          {label}
+        </span>
+        <span className="shrink-0 text-sm font-medium tabular-nums">
+          {reading === null ? "—" : `${Number.isInteger(reading) ? reading : reading.toFixed(1)}${unit ?? ""}`}
+        </span>
+      </div>
+      <Progress
+        value={percent}
+        aria-label={label}
+        // The raw reading, not the derived percentage: a screen reader should
+        // hear what the connector said.
+        aria-valuetext={reading === null ? "No reading" : `${reading}${unit ?? ""}`}
+      />
+    </div>
+  );
+}

@@ -635,7 +635,7 @@ these shapes:
   "instanceId": "5aa2574d-9ba0-4af8-b7ae-74671fb48777",
   "status": {
     "health": "healthy",
-    "details": { "version": "1.2.3" },
+    "details": { "load": 45.87, "enabled": true, "version": "1.2.3" },
     "lastChecked": "2026-08-21T12:00:00Z"
   }
 }
@@ -743,7 +743,12 @@ Requires a **global** `connectors.view` grant.
         "load": 45.87,
         "label": "debug-fixture",
         "enabled": true,
-        "loadHistory": [42.1, 44.6, 45.87]
+        "log": "2026-08-21T09:20:06.000Z INFO  simulated tick 41 — load 44.6%, enabled\n2026-08-21T09:20:11.000Z WARN  simulated tick 42 — load 45.9%, enabled",
+        "loadHistory": [
+          { "timestamp": "2026-08-21T09:20:01Z", "value": 42.1 },
+          { "timestamp": "2026-08-21T09:20:06Z", "value": 44.6 },
+          { "timestamp": "2026-08-21T09:20:11Z", "value": 45.87 }
+        ]
       },
       "lastChecked": "2026-08-21T09:20:11Z"
     },
@@ -816,10 +821,12 @@ carries, plus what a dashboard placement UI needs.
   ],
   "defaultLayout": {
     "bindings": [
-      { "dataPointId": "load", "widgetType": "statTile", "config": {} },
-      { "dataPointId": "enabled", "widgetType": "statusDot", "config": {} },
-      { "dataPointId": "loadHistory", "widgetType": { "metricChart": { "chartType": "line" } }, "config": {} },
-      { "dataPointId": "load", "widgetType": "gauge", "config": { "min": 0, "max": 100 } }
+      { "display": { "dataPointId": "load", "widgetType": "statTile", "config": {} } },
+      { "display": { "dataPointId": "enabled", "widgetType": "statusDot", "config": {} } },
+      { "display": { "dataPointId": "loadHistory", "widgetType": { "metricChart": { "chartType": "line" } }, "config": {} } },
+      { "display": { "dataPointId": "load", "widgetType": "gauge", "config": { "min": 0, "max": 100 } } },
+      { "display": { "dataPointId": "log", "widgetType": "logStream", "config": {} } },
+      { "action": { "actionId": "set-enabled", "widgetType": "toggle", "config": {} } }
     ]
   }
 }
@@ -1198,15 +1205,27 @@ Editor or Owner.
   "width": 3,
   "height": 2,
   "widgetBindings": [
-    { "dataPointId": "load", "widgetType": "gauge", "config": {} }
+    { "display": { "dataPointId": "load", "widgetType": "gauge", "config": {} } },
+    { "action": { "actionId": "restart", "widgetType": "button", "config": {} } }
   ]
 }
 ```
 
 `widgetBindings` may be omitted, in which case the connector's
 `defaultLayout.bindings` are stored. Width and height must each meet the live
-connector's `metadata.minSize`. Every supplied binding's `dataPointId` must be
-declared by that connector's `dataPoints`; a 400 lists all invalid ids.
+connector's `metadata.minSize`.
+
+Each binding is validated against the namespace its own tag names — see
+[`WidgetLayout`](#widgetlayout):
+
+- a `display` binding's `dataPointId` must be declared by the connector's
+  `dataPoints`;
+- an `action` binding's `actionId` must be declared by the connector's
+  `actions`.
+
+A 400 lists every invalid id, and says which kind each one is, so the two are
+never confused: `widget bindings reference unknown data points: nope; unknown
+actions: also-nope`.
 
 The connector row must exist and its live connector must be available so the
 metadata contract can be validated. No connector ownership or
@@ -1662,7 +1681,16 @@ print_wire_shapes`.
 ```json
 {
   "health": "degraded",
-  "details": { "version": "1.2.3", "queueDepth": 12 },
+  "details": {
+    "load": 62.5,
+    "label": "debug-1",
+    "enabled": true,
+    "loadHistory": [
+      { "timestamp": "2026-08-19T11:59:55Z", "value": 61.2 },
+      { "timestamp": "2026-08-19T12:00:00Z", "value": 62.5 }
+    ],
+    "version": "1.2.3"
+  },
   "lastChecked": "2026-08-19T12:00:00Z"
 }
 ```
@@ -1670,7 +1698,7 @@ print_wire_shapes`.
 | Field | JSON type | Meaning | Nullability |
 | --- | --- | --- | --- |
 | `health` | string | One of `"healthy"`, `"degraded"`, `"down"`, `"unknown"`. | Always present. |
-| `details` | any (usually object) | Connector-specific extras — version strings, queue depths, disk usage. Unstructured on purpose. | Always present; `{}` when there is nothing to report. |
+| `details` | object | The current reading for every data point, keyed by `DataPointDescriptor.id`. | Always present; `{}` only for a connector with no data points and nothing else to report. |
 | `lastChecked` | string | RFC 3339 UTC, `Z`-suffixed. When the reading was actually taken. | Always present. |
 
 `health` is a closed set of four rather than a free-form string because clients
@@ -1678,9 +1706,25 @@ sort, colour, and alert on it. `"unknown"` is distinct from `"down"` so a
 dashboard never reports an outage it has not observed — never-polled is not the
 same as broken.
 
-`details` is deliberately not typed. Forcing every service's telemetry into one
-Rust struct would either bloat it or lose information, so a client that does not
-recognise a particular connector simply ignores this field.
+**`details` is a data-point-keyed object, not a free-form blob.** It is typed
+loosely in Rust for serialization flexibility, but the shape is a contract a
+client may rely on: every id returned by the instance's `dataPoints` appears as
+a key, and each value's JSON shape follows that data point's declared
+`valueType`.
+
+| `valueType` | JSON shape of `details[id]` |
+| --- | --- |
+| `"number"` | a JSON number |
+| `"string"` | a JSON string |
+| `"bool"` | a JSON boolean |
+| `"timeSeries"` | a JSON array of `{ "timestamp": <RFC 3339>, "value": <number> }` objects, **oldest first** |
+
+A connector may include extra keys that are not data points — a version string,
+a queue depth — and a client that does not recognise one ignores it. What it may
+not do is key a data point's value under anything else, because a saved
+`WidgetBinding.display` stores an id and resolves it here on every poll. That is
+precisely why there is no separate "values" endpoint: the status payload pushed
+over [`/ws/connectors`](#get-wsconnectors) is already the render input.
 
 `lastChecked` is part of the **value**, not the response envelope. That is what
 lets a polled or cached reading stay honest about its own age: if the backend
@@ -1809,12 +1853,32 @@ once and re-rendered on every poll without re-reading the schema.
 ```json
 {
   "bindings": [
-    { "dataPointId": "load", "widgetType": "statTile", "config": {} },
-    { "dataPointId": "load", "widgetType": "gauge", "config": { "min": 0, "max": 100 } },
     {
-      "dataPointId": "loadHistory",
-      "widgetType": { "metricChart": { "chartType": "line" } },
-      "config": {}
+      "display": { "dataPointId": "load", "widgetType": "statTile", "config": {} }
+    },
+    {
+      "display": {
+        "dataPointId": "load",
+        "widgetType": "gauge",
+        "config": { "min": 0, "max": 100 }
+      }
+    },
+    {
+      "display": {
+        "dataPointId": "loadHistory",
+        "widgetType": { "metricChart": { "chartType": "line" } },
+        "config": {}
+      }
+    },
+    {
+      "action": { "actionId": "set-enabled", "widgetType": "toggle", "config": {} }
+    },
+    {
+      "action": {
+        "actionId": "set-load",
+        "widgetType": "slider",
+        "config": { "min": 0, "max": 100, "step": 1 }
+      }
     }
   ]
 }
@@ -1824,29 +1888,37 @@ once and re-rendered on every poll without re-reading the schema.
 | --- | --- | --- | --- |
 | `bindings` | array | The widgets, in the connector author's suggested reading order. | Always present; may be empty. |
 
-Each binding:
+**Each binding is externally tagged** — a single-key object whose key is either
+`"display"` or `"action"`, the same shape as `ConnectorError`. Narrow on that
+key, not on the widget type: the two arms carry different id fields because they
+resolve against different things.
+
+`{ "display": … }` — a read-only widget showing one data point:
 
 | Field | JSON type | Meaning | Nullability |
 | --- | --- | --- | --- |
-| `dataPointId` | string | Which `DataPointDescriptor.id` this widget shows — or, for a control widget, which `ConnectorAction.id` it invokes. | Always present. |
-| `widgetType` | string **or** object | See below. | Always present. |
-| `config` | object | Widget-specific extras: `min`/`max` for a gauge or slider, `options` for a selector. Free-form. | Always present; an empty object, never `null`. |
+| `dataPointId` | string | Which `DataPointDescriptor.id` this widget shows. Its current value is `status.details[dataPointId]`. | Always present. |
+| `widgetType` | string **or** object | One of `"statTile"`, `"progressBar"`, `{"metricChart": {"chartType": "pie" \| "bar" \| "line"}}`, `"gauge"`, `"statusDot"`, `"logStream"`. | Always present. |
+| `config` | object | Widget-specific extras: `min`/`max` for a gauge or progress bar. Free-form. | Always present; an empty object, never `null`. |
 
-**`widgetType` is not always a string.** Unit variants serialize as a bare
-string; the one variant carrying data serializes as a single-key object:
+`{ "action": … }` — a control that invokes one action:
+
+| Field | JSON type | Meaning | Nullability |
+| --- | --- | --- | --- |
+| `actionId` | string | Which `ConnectorAction.id` this widget invokes, as passed to [`POST /connectors/{id}/actions/{actionId}`](#post-connectorsidactionsactionid). | Always present. |
+| `widgetType` | string | One of `"button"`, `"toggle"`, `"slider"`, `"textField"`, `"selector"`. | Always present. |
+| `config` | object | Widget-specific extras: `min`/`max`/`step` for a slider, `options` for a selector. Free-form. | Always present; an empty object, never `null`. |
+
+**A display `widgetType` is not always a string.** Unit variants serialize as a
+bare string; the one variant carrying data serializes as a single-key object:
 
 ```json
 "statTile"
 { "metricChart": { "chartType": "line" } }
 ```
 
-This is the same externally-tagged shape as `ConnectorError`, and the same
-warning applies — a client that assumes a string will throw on the chart case.
-
-Display widgets: `"statTile"`, `"progressBar"`, `{"metricChart": {"chartType":
-"pie" | "bar" | "line"}}`, `"gauge"`, `"statusDot"`, `"logStream"`. Control
-widgets, which invoke an action: `"button"`, `"toggle"`, `"slider"`,
-`"textField"`, `"selector"`.
+The same warning as `ConnectorError` applies — a client that assumes a string
+will throw on the chart case. Action widget types are always bare strings.
 
 The layout is a **default, not a mandate**: it is what a user gets when they
 place the connector without configuring anything, and it is theirs to edit

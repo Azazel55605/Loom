@@ -134,3 +134,9 @@ delete every connector on the instance.
 - Deleting an instance cascades to nothing, because nothing references it yet.
   Once dashboards store widget placements against an instance id, that table
   will need an `ON DELETE` decision.
+- The presentation shapes added here were **corrected by
+  [ADR 0014](./0014-widget-binding-model.md)**: `WidgetBinding` became a tagged
+  `Display`/`Action` enum rather than one flat struct, and
+  `ConnectorStatus::details` became a formalized data-point-keyed object rather
+  than a free-form payload. The registry and runtime boundary this ADR draws is
+  unchanged.

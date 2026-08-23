@@ -1,6 +1,8 @@
 import * as React from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { AlertCircle, Grid2X2, Pencil, Share2, Trash2 } from "lucide-react";
+import { GridLayout, useContainerWidth, type Layout, type LayoutItem } from "react-grid-layout";
+import { AlertCircle, Check, LayoutGrid, Pencil, Plus, Share2, Trash2 } from "lucide-react";
+import { toast } from "sonner";
 
 import { Alert, AlertDescription, AlertTitle } from "@loom/ui-kit/components/ui/alert";
 import {
@@ -15,33 +17,90 @@ import {
 } from "@loom/ui-kit/components/ui/alert-dialog";
 import { Badge } from "@loom/ui-kit/components/ui/badge";
 import { Button } from "@loom/ui-kit/components/ui/button";
-import {
-  Card,
-  CardContent,
-  CardDescription,
-  CardHeader,
-  CardTitle,
-} from "@loom/ui-kit/components/ui/card";
+import { Card, CardContent } from "@loom/ui-kit/components/ui/card";
 import { Input } from "@loom/ui-kit/components/ui/input";
 import { Skeleton } from "@loom/ui-kit/components/ui/skeleton";
-import {
-  Tooltip,
-  TooltipContent,
-  TooltipProvider,
-  TooltipTrigger,
-} from "@loom/ui-kit/components/ui/tooltip";
+import { AddPlacementDialog } from "@loom/ui-kit/components/AddPlacementDialog";
 import { DashboardSharesDialog } from "@loom/ui-kit/components/DashboardSharesDialog";
 import { dashboardsQueryKey } from "@loom/ui-kit/components/DashboardSidebar";
+import {
+  DashboardPlacementCard,
+  DRAG_HANDLE_CLASS,
+  type LiveStatus,
+} from "@loom/ui-kit/components/DashboardPlacementCard";
+import { PlacementBindingsDialog } from "@loom/ui-kit/components/PlacementBindingsDialog";
 import type {
-  ConnectorInstanceSummary,
+  DashboardDetail,
+  DashboardPlacement,
   DashboardSummary,
 } from "@loom/ui-kit/lib/api";
-import { useApiClient } from "@loom/ui-kit/lib/api-context";
+import { useApiClient, useConnectorStatusSocket } from "@loom/ui-kit/lib/api-context";
 import { describeConnectorError } from "@loom/ui-kit/lib/connector-error";
 
 const dashboardQueryKey = (dashboardId: string) => ["dashboard", dashboardId] as const;
 
-/** Dashboard detail shell. Grid placement and widgets intentionally follow later. */
+/**
+ * Grid geometry.
+ *
+ * The column count is chosen against what `metadata.minSize` claims to mean:
+ * "the smallest footprint at which this connector is still readable". A
+ * twelve-column grid makes the common declaration of `[2, 2]` one sixth of the
+ * page — far too narrow to read anything — which would quietly turn every
+ * connector's minimum into a lie. Six columns puts that same declaration at a
+ * third of the width, which is a real card, and still divides evenly by two and
+ * three for halves and thirds.
+ *
+ * The row height follows the same logic from the other side: two rows plus the
+ * margin between them is about the height of a card header and a couple of
+ * widgets.
+ */
+const GRID_COLS = 6;
+const GRID_ROW_HEIGHT = 110;
+const GRID_MARGIN: [number, number] = [16, 16];
+
+function layoutFromPlacements(placements: DashboardPlacement[]): Layout {
+  return placements.map((placement) => ({
+    i: placement.id,
+    x: placement.positionX,
+    y: placement.positionY,
+    w: placement.width,
+    h: placement.height,
+    minW: placement.connector.metadata.minSize[0],
+    minH: placement.connector.metadata.minSize[1],
+  }));
+}
+
+/**
+ * One dashboard: its header, and its placements as a drag-and-drop grid.
+ *
+ * ## Read-only by default
+ *
+ * The grid is static until an Owner or Editor turns on **Edit layout**, and a
+ * Viewer never sees that button. This is not only about permissions: a
+ * dashboard is something people look at far more often than they rearrange, and
+ * a grid that is always draggable turns every attempt to click a button into a
+ * chance to move a card. Edit mode also disables the action widgets themselves,
+ * so a grab that lands on a toggle cannot restart a service.
+ *
+ * ## Where live values come from
+ *
+ * One WebSocket subscription for every instance on the dashboard, held here
+ * rather than in each card. The socket reference-counts its subscriptions, so
+ * two placements of the same connector cost one subscription, and the readings
+ * are handed down as props. Only `status` travels this way — the labels, units
+ * and action schemas a binding resolves against come from each card's own
+ * instance-detail query, because those change when a connector is reconfigured
+ * and not on every poll.
+ *
+ * ## What gets persisted, and when
+ *
+ * Only on drag-stop and resize-stop, never per frame. The grid's compactor can
+ * move cards the user did not touch, so the whole layout is compared against
+ * what is stored and every changed placement is PATCHed — persisting just the
+ * dragged card would leave the others showing a position the server does not
+ * have. Local layout state updates immediately so nothing snaps back while the
+ * requests are in flight.
+ */
 export function DashboardView({
   dashboardId,
   onDeleted,
@@ -51,19 +110,56 @@ export function DashboardView({
 }) {
   const api = useApiClient();
   const queryClient = useQueryClient();
+  const connectorSocket = useConnectorStatusSocket();
   const [editingName, setEditingName] = React.useState(false);
   const [name, setName] = React.useState("");
   const [sharesOpen, setSharesOpen] = React.useState(false);
   const [deleteOpen, setDeleteOpen] = React.useState(false);
+  const [addOpen, setAddOpen] = React.useState(false);
+  const [editingLayout, setEditingLayout] = React.useState(false);
+  const [bindingsFor, setBindingsFor] = React.useState<DashboardPlacement | null>(null);
+  const [removing, setRemoving] = React.useState<DashboardPlacement | null>(null);
+  const [live, setLive] = React.useState<Record<string, LiveStatus>>({});
+  const { width, containerRef, mounted } = useContainerWidth();
 
   const dashboard = useQuery({
     queryKey: dashboardQueryKey(dashboardId),
     queryFn: ({ signal }) => api.getDashboard(dashboardId, signal),
   });
 
+  const placements = React.useMemo(
+    () => dashboard.data?.placements ?? [],
+    [dashboard.data],
+  );
+
+  const [layout, setLayout] = React.useState<Layout>([]);
+  React.useEffect(() => {
+    setLayout(layoutFromPlacements(placements));
+  }, [placements]);
+
+  const instanceIds = React.useMemo(
+    () => [...new Set(placements.map((placement) => placement.connector.id))],
+    [placements],
+  );
+
+  React.useEffect(() => {
+    if (instanceIds.length === 0) return;
+    return connectorSocket.subscribe(instanceIds, (update) => {
+      setLive((current) => ({
+        ...current,
+        [update.instanceId]: { status: update.status, statusError: update.statusError },
+      }));
+    });
+  }, [connectorSocket, instanceIds]);
+
   React.useEffect(() => {
     if (!editingName && dashboard.data !== undefined) setName(dashboard.data.name);
   }, [dashboard.data, editingName]);
+
+  const refreshDashboard = React.useCallback(
+    () => queryClient.invalidateQueries({ queryKey: dashboardQueryKey(dashboardId) }),
+    [dashboardId, queryClient],
+  );
 
   const rename = useMutation({
     mutationFn: () => api.renameDashboard(dashboardId, name),
@@ -86,6 +182,62 @@ export function DashboardView({
       onDeleted();
     },
   });
+  const removePlacement = useMutation({
+    mutationFn: (placement: DashboardPlacement) =>
+      api.deleteDashboardPlacement(dashboardId, placement.id),
+    onSuccess: async () => {
+      await refreshDashboard();
+      setRemoving(null);
+    },
+  });
+
+  const persist = React.useCallback(
+    async (next: Layout) => {
+      const stored = new Map(placements.map((placement) => [placement.id, placement]));
+      const moved = next.filter((item) => {
+        const placement = stored.get(item.i);
+        return (
+          placement !== undefined &&
+          (placement.positionX !== item.x ||
+            placement.positionY !== item.y ||
+            placement.width !== item.w ||
+            placement.height !== item.h)
+        );
+      });
+      if (moved.length === 0) return;
+
+      try {
+        await Promise.all(
+          moved.map((item) =>
+            api.updateDashboardPlacement(dashboardId, item.i, {
+              positionX: item.x,
+              positionY: item.y,
+              width: item.w,
+              height: item.h,
+            }),
+          ),
+        );
+      } catch (error) {
+        toast.error("Could not save the layout", {
+          description: describeConnectorError(error),
+        });
+      } finally {
+        // Refetched either way: on success to confirm, and on failure to snap
+        // the grid back to what the server actually holds rather than leaving
+        // it showing a position that was rejected.
+        await refreshDashboard();
+      }
+    },
+    [api, dashboardId, placements, refreshDashboard],
+  );
+
+  const onLayoutSettled = React.useCallback(
+    (next: Layout, _old: LayoutItem | null) => {
+      setLayout(next);
+      void persist(next);
+    },
+    [persist],
+  );
 
   if (dashboard.isPending) return <DashboardViewSkeleton />;
   if (dashboard.isError) {
@@ -98,8 +250,9 @@ export function DashboardView({
     );
   }
 
-  const detail = dashboard.data;
+  const detail: DashboardDetail = dashboard.data;
   const isOwner = detail.role === "owner";
+  const canEdit = isOwner || detail.role === "editor";
 
   return (
     <div className="flex flex-col gap-6">
@@ -168,56 +321,142 @@ export function DashboardView({
           ) : null}
         </div>
 
-        {isOwner ? (
-          <div className="flex items-center justify-end gap-2">
-            <Button type="button" variant="outline" size="sm" onClick={() => setSharesOpen(true)}>
-              <Share2 aria-hidden="true" />
-              Share
-            </Button>
-            <Button type="button" variant="destructive" size="sm" onClick={() => setDeleteOpen(true)}>
-              <Trash2 aria-hidden="true" />
-              Delete
-            </Button>
-          </div>
-        ) : null}
+        <div className="flex flex-wrap items-center justify-end gap-2">
+          {canEdit ? (
+            <>
+              <Button
+                type="button"
+                variant={editingLayout ? "default" : "outline"}
+                size="sm"
+                aria-pressed={editingLayout}
+                onClick={() => setEditingLayout((current) => !current)}
+              >
+                {editingLayout ? <Check aria-hidden="true" /> : <LayoutGrid aria-hidden="true" />}
+                {editingLayout ? "Done" : "Edit layout"}
+              </Button>
+              <Button type="button" variant="outline" size="sm" onClick={() => setAddOpen(true)}>
+                <Plus aria-hidden="true" />
+                Add connector
+              </Button>
+            </>
+          ) : null}
+          {isOwner ? (
+            <>
+              <Button type="button" variant="outline" size="sm" onClick={() => setSharesOpen(true)}>
+                <Share2 aria-hidden="true" />
+                Share
+              </Button>
+              <Button
+                type="button"
+                variant="destructive"
+                size="sm"
+                onClick={() => setDeleteOpen(true)}
+              >
+                <Trash2 aria-hidden="true" />
+                Delete
+              </Button>
+            </>
+          ) : null}
+        </div>
       </div>
 
-      <Alert>
-        <Grid2X2 aria-hidden="true" />
-        <AlertTitle>Grid and widgets are coming next</AlertTitle>
-        <AlertDescription>
-          Placements are shown as a read-only list for now while the dashboard layout system is built.
-        </AlertDescription>
-      </Alert>
+      {editingLayout ? (
+        <Alert>
+          <LayoutGrid aria-hidden="true" />
+          <AlertTitle>Editing the layout</AlertTitle>
+          <AlertDescription>
+            Drag a card by its header to move it, or its bottom-right corner to resize it. Widget
+            controls are disabled while you rearrange.
+          </AlertDescription>
+        </Alert>
+      ) : null}
 
-      {detail.placements.length === 0 ? (
+      {placements.length === 0 ? (
         <Card>
           <CardContent className="flex flex-col items-center gap-3 py-10 text-center">
             <p className="font-medium">No connectors placed on this dashboard yet.</p>
             <p className="max-w-md text-sm text-muted-foreground">
-              Placement editing will arrive with the dashboard grid and widget system.
+              {canEdit
+                ? "Add a connector to start building this dashboard. You choose which of its readings and controls appear."
+                : "Nothing has been placed here yet. Ask the dashboard's owner to add a connector."}
             </p>
-            <TooltipProvider>
-              <Tooltip>
-                <TooltipTrigger asChild>
-                  <span tabIndex={0}>
-                    <Button type="button" disabled>
-                      Add connector
-                    </Button>
-                  </span>
-                </TooltipTrigger>
-                <TooltipContent>Placement editing is coming in the next update.</TooltipContent>
-              </Tooltip>
-            </TooltipProvider>
+            {canEdit ? (
+              <Button type="button" onClick={() => setAddOpen(true)}>
+                <Plus aria-hidden="true" />
+                Add connector
+              </Button>
+            ) : null}
           </CardContent>
         </Card>
       ) : (
-        <div className="flex flex-col gap-4">
-          {detail.placements.map((placement) => (
-            <PlacementSummaryCard key={placement.id} connector={placement.connector} />
-          ))}
+        <div
+          // react-grid-layout 2.x is typed against React 19, where a ref object
+          // is `RefObject<T | null>`; React 18's `ref` prop wants
+          // `RefObject<T>`. The runtime value is identical — React assigns
+          // `.current` either way — so this narrows the types-only difference
+          // rather than asserting anything about the value. Remove when the
+          // clients move to React 19.
+          ref={containerRef as React.RefObject<HTMLDivElement>}
+          className="min-w-0"
+        >
+          {mounted ? (
+            <GridLayout
+              width={width}
+              layout={layout}
+              // Gates the resize grip in CSS. The library keeps rendering the
+              // handle element even with resizing disabled, and a grip that
+              // appears on hover and then refuses to move is worse than no grip
+              // — particularly for a Viewer, who has no way to make it work.
+              className={editingLayout ? "loom-grid-editing" : undefined}
+              gridConfig={{
+                cols: GRID_COLS,
+                rowHeight: GRID_ROW_HEIGHT,
+                margin: GRID_MARGIN,
+              }}
+              // The header is the only drag surface, so a press on a slider or a
+              // button inside a card never becomes a drag.
+              dragConfig={{ enabled: editingLayout, handle: `.${DRAG_HANDLE_CLASS}` }}
+              resizeConfig={{ enabled: editingLayout }}
+              onDragStop={onLayoutSettled}
+              onResizeStop={onLayoutSettled}
+            >
+              {placements.map((placement) => (
+                <div key={placement.id} className="min-w-0">
+                  <DashboardPlacementCard
+                    placement={placement}
+                    live={live[placement.connector.id]}
+                    editing={editingLayout}
+                    onEditBindings={setBindingsFor}
+                    onDelete={setRemoving}
+                  />
+                </div>
+              ))}
+            </GridLayout>
+          ) : (
+            <Skeleton className="h-48 w-full" />
+          )}
         </div>
       )}
+
+      {canEdit ? (
+        <>
+          <AddPlacementDialog
+            dashboardId={detail.id}
+            existingPlacements={placements}
+            open={addOpen}
+            onOpenChange={setAddOpen}
+            onCreated={refreshDashboard}
+          />
+          <PlacementBindingsDialog
+            dashboardId={detail.id}
+            placement={bindingsFor}
+            onOpenChange={(open) => {
+              if (!open) setBindingsFor(null);
+            }}
+            onSaved={refreshDashboard}
+          />
+        </>
+      ) : null}
 
       {isOwner ? (
         <DashboardSharesDialog
@@ -227,6 +466,47 @@ export function DashboardView({
           onOpenChange={setSharesOpen}
         />
       ) : null}
+
+      <AlertDialog
+        open={removing !== null}
+        onOpenChange={(next) => {
+          if (!next) {
+            setRemoving(null);
+            removePlacement.reset();
+          }
+        }}
+      >
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>Remove {removing?.connector.name} from this dashboard?</AlertDialogTitle>
+            <AlertDialogDescription>
+              This removes the card and its widgets. The connector itself, and any other dashboard
+              it appears on, are untouched.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          {removePlacement.isError ? (
+            <Alert variant="destructive">
+              <AlertCircle aria-hidden="true" />
+              <AlertDescription>
+                {describeConnectorError(removePlacement.error)}
+              </AlertDescription>
+            </Alert>
+          ) : null}
+          <AlertDialogFooter>
+            <AlertDialogCancel disabled={removePlacement.isPending}>Cancel</AlertDialogCancel>
+            <AlertDialogAction
+              className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
+              disabled={removePlacement.isPending}
+              onClick={(event) => {
+                event.preventDefault();
+                if (removing !== null) removePlacement.mutate(removing);
+              }}
+            >
+              {removePlacement.isPending ? "Removing…" : "Remove"}
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
 
       <AlertDialog
         open={deleteOpen}
@@ -264,37 +544,6 @@ export function DashboardView({
         </AlertDialogContent>
       </AlertDialog>
     </div>
-  );
-}
-
-function PlacementSummaryCard({ connector }: { connector: ConnectorInstanceSummary }) {
-  const health = connector.status?.health ?? "unknown";
-  return (
-    <Card>
-      <CardHeader className="flex-row items-start justify-between space-y-0">
-        <div className="min-w-0">
-          <CardTitle className="truncate text-base">{connector.name}</CardTitle>
-          <CardDescription>{connector.metadata.name}</CardDescription>
-        </div>
-        <Badge variant={health} className="capitalize">
-          {connector.status === null ? "No reading" : health}
-        </Badge>
-      </CardHeader>
-      <CardContent>
-        {connector.displayFields.length > 0 ? (
-          <dl className="grid gap-2 sm:grid-cols-2">
-            {connector.displayFields.map((field) => (
-              <div key={field.label} className="surface-panel rounded-md border p-3">
-                <dt className="text-xs text-muted-foreground">{field.label}</dt>
-                <dd className="mt-1 text-sm font-medium">{field.value}</dd>
-              </div>
-            ))}
-          </dl>
-        ) : (
-          <p className="text-sm text-muted-foreground">No summary fields reported.</p>
-        )}
-      </CardContent>
-    </Card>
   );
 }
 

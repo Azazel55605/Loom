@@ -141,11 +141,27 @@ pub trait Connector: Send + Sync {
 pub struct ConnectorStatus {
     /// The coarse verdict clients act on.
     pub health: HealthState,
-    /// Connector-specific extras — version strings, queue depths, disk usage.
+    /// The current reading for every data point, keyed by id.
     ///
-    /// Intentionally unstructured: forcing every service's telemetry into one
-    /// Rust struct would either bloat it or lose information. Clients that do
-    /// not recognise a connector simply ignore this.
+    /// Typed as [`Value`] for serialization flexibility, but the shape is not
+    /// free-form and consumers may rely on it: it **MUST** be a JSON object
+    /// keyed by `data_point_id`, matching the ids returned by
+    /// [`Connector::data_points`]. Each value's shape follows that data point's
+    /// declared [`DataPointDescriptor::value_type`]:
+    ///
+    /// | `value_type` | JSON shape |
+    /// | --- | --- |
+    /// | [`Number`](DataPointValueType::Number) | a JSON number |
+    /// | [`String`](DataPointValueType::String) | a JSON string |
+    /// | [`Bool`](DataPointValueType::Bool) | a JSON boolean |
+    /// | [`TimeSeries`](DataPointValueType::TimeSeries) | a JSON array of `{ "timestamp": <ISO 8601>, "value": <number> }` objects, oldest first |
+    ///
+    /// A connector may include extra keys that are not data points — a version
+    /// string, a queue depth — and a client that does not recognise one ignores
+    /// it. What it may not do is key a data point's value under anything but
+    /// that data point's id, because a saved layout stores ids and resolves
+    /// them here on every poll. [`ConnectorStatus::data_point_value`] is the
+    /// intended way to read one.
     pub details: Value,
     /// When this reading was actually taken, so stale data is visible as stale.
     pub last_checked: DateTime<Utc>,
@@ -171,6 +187,20 @@ impl ConnectorStatus {
             details,
             last_checked: Utc::now(),
         }
+    }
+
+    /// The current value of one data point, or `None` if this reading has no
+    /// entry for it.
+    ///
+    /// A convenience over the [`ConnectorStatus::details`] object, and the
+    /// place the keyed-object contract is enforced in practice: a `details`
+    /// payload that is not an object yields `None` for every id rather than
+    /// pretending to have found something. Callers still have to interpret the
+    /// value against the data point's
+    /// [`value_type`](DataPointDescriptor::value_type) — this says what is
+    /// there, not what shape it should have been.
+    pub fn data_point_value(&self, data_point_id: &str) -> Option<&Value> {
+        self.details.as_object()?.get(data_point_id)
     }
 }
 
@@ -416,7 +446,7 @@ impl DataPointDescriptor {
     }
 }
 
-/// Which plot a [`WidgetType::MetricChart`] draws.
+/// Which plot a [`DisplayWidgetType::MetricChart`] draws.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum ChartType {
@@ -428,8 +458,7 @@ pub enum ChartType {
     Line,
 }
 
-/// How a data point is drawn — or, for the input widgets, how an action is
-/// offered.
+/// How a data point is drawn.
 ///
 /// A closed enum rather than a free-form string because the clients have to
 /// render each case, and an unrecognised widget type is a blank space in a
@@ -437,11 +466,11 @@ pub enum ChartType {
 /// therefore deliberately a change to this crate and to every renderer, which
 /// is the honest cost of the guarantee that everything here draws.
 ///
-/// The first six are read-only displays; the last five are controls that
-/// invoke [`Connector::execute_action`].
+/// Read-only: every variant here shows a [`DataPointDescriptor`] and invokes
+/// nothing. The controls live in [`ActionWidgetType`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", rename_all_fields = "camelCase")]
-pub enum WidgetType {
+pub enum DisplayWidgetType {
     /// One prominent number with its label.
     StatTile,
     /// A filled bar for a bounded value; `config` supplies `min`/`max`.
@@ -457,6 +486,17 @@ pub enum WidgetType {
     StatusDot,
     /// A scrolling run of text lines.
     LogStream,
+}
+
+/// How an action is offered.
+///
+/// The counterpart to [`DisplayWidgetType`], and closed for the same reason.
+/// Every variant here invokes [`Connector::execute_action`]; which parameters
+/// it sends is the renderer's business, guided by the action's
+/// [`ConnectorAction::params_schema`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", rename_all_fields = "camelCase")]
+pub enum ActionWidgetType {
     /// A button that triggers a parameterless action.
     Button,
     /// A switch that triggers an action taking a boolean.
@@ -471,42 +511,83 @@ pub enum WidgetType {
     Selector,
 }
 
-/// One data point drawn as one widget.
+/// One widget, and the thing it is wired to.
+///
+/// Split by what the widget binds *to*, not by how it looks: a display widget
+/// reads a [`DataPointDescriptor`], a control widget invokes a
+/// [`ConnectorAction`], and those are different identifier spaces that happen
+/// to both be strings. The earlier flat shape carried one `data_point_id` field
+/// for both, which meant a control binding either named a data point that could
+/// not be invoked or a live action id that no validator could check — see
+/// `docs/adr/0014-widget-binding-model.md`.
+///
+/// Externally tagged, so each value is a single-key object (`{"display": …}`
+/// or `{"action": …}`) — the same shape as [`ConnectorError`] and
+/// [`DisplayWidgetType::MetricChart`].
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct WidgetBinding {
-    /// Which [`DataPointDescriptor::id`] this widget shows — or, for a control
-    /// widget, which [`ConnectorAction::id`] it invokes.
-    pub data_point_id: String,
-    /// How to draw it.
-    pub widget_type: WidgetType,
-    /// Widget-specific extras: `min`/`max` for a [`WidgetType::Gauge`],
-    /// `options` for a [`WidgetType::Selector`], and so on.
-    ///
-    /// Free-form for now, and deliberately so. Every candidate typed
-    /// representation would have to enumerate the settings of every widget in
-    /// one struct before the widgets themselves have been built against real
-    /// connectors, which is the wrong order to design in. A connector that
-    /// needs no extras uses an empty object rather than `null`, so consumers
-    /// can always treat this as an object.
-    pub config: Value,
+#[serde(rename_all = "camelCase", rename_all_fields = "camelCase")]
+pub enum WidgetBinding {
+    /// A read-only widget showing one data point.
+    Display {
+        /// Which [`DataPointDescriptor::id`] this widget shows. Its value
+        /// arrives in [`ConnectorStatus::details`] under this same key.
+        data_point_id: String,
+        /// How to draw it.
+        widget_type: DisplayWidgetType,
+        /// Widget-specific extras: `min`/`max` for a
+        /// [`DisplayWidgetType::Gauge`], and so on.
+        ///
+        /// Free-form for now, and deliberately so. Every candidate typed
+        /// representation would have to enumerate the settings of every widget
+        /// in one struct before the widgets themselves have been built against
+        /// real connectors, which is the wrong order to design in. A binding
+        /// that needs no extras uses an empty object rather than `null`, so
+        /// consumers can always treat this as an object.
+        config: Value,
+    },
+    /// A control that invokes one action.
+    Action {
+        /// Which [`ConnectorAction::id`] this widget invokes, as passed to
+        /// [`Connector::execute_action`].
+        action_id: String,
+        /// How to offer it.
+        widget_type: ActionWidgetType,
+        /// Widget-specific extras: `options` for an
+        /// [`ActionWidgetType::Selector`], `min`/`max`/`step` for a
+        /// [`ActionWidgetType::Slider`]. Same free-form contract as the display
+        /// arm's `config`.
+        config: Value,
+    },
 }
 
 impl WidgetBinding {
-    /// A binding with no extra configuration.
-    pub fn new(data_point_id: impl Into<String>, widget_type: WidgetType) -> Self {
-        Self {
+    /// A display binding with no extra configuration.
+    pub fn display(data_point_id: impl Into<String>, widget_type: DisplayWidgetType) -> Self {
+        Self::Display {
             data_point_id: data_point_id.into(),
             widget_type,
             config: Value::Object(Default::default()),
         }
     }
 
+    /// An action binding with no extra configuration.
+    pub fn action(action_id: impl Into<String>, widget_type: ActionWidgetType) -> Self {
+        Self::Action {
+            action_id: action_id.into(),
+            widget_type,
+            config: Value::Object(Default::default()),
+        }
+    }
+
     /// Attaches widget-specific configuration, for chaining onto
-    /// [`WidgetBinding::new`].
+    /// [`WidgetBinding::display`] or [`WidgetBinding::action`].
     #[must_use]
     pub fn with_config(mut self, config: Value) -> Self {
-        self.config = config;
+        match &mut self {
+            Self::Display { config: slot, .. } | Self::Action { config: slot, .. } => {
+                *slot = config;
+            }
+        }
         self
     }
 }
@@ -656,7 +737,12 @@ mod tests {
     #[async_trait]
     impl Connector for StubConnector {
         async fn status(&self) -> Result<ConnectorStatus, ConnectorError> {
-            Ok(ConnectorStatus::new(self.health, json!({ "stub": true })))
+            // Keyed by this stub's one data point id, per the
+            // `ConnectorStatus::details` contract.
+            Ok(ConnectorStatus::new(
+                self.health,
+                json!({ "reading": 42.0 }),
+            ))
         }
 
         async fn actions(&self) -> Vec<ConnectorAction> {
@@ -701,7 +787,10 @@ mod tests {
         }
 
         fn default_layout(&self) -> WidgetLayout {
-            WidgetLayout::new(vec![WidgetBinding::new("reading", WidgetType::StatTile)])
+            WidgetLayout::new(vec![
+                WidgetBinding::display("reading", DisplayWidgetType::StatTile),
+                WidgetBinding::action("noop", ActionWidgetType::Button),
+            ])
         }
     }
 
@@ -741,16 +830,36 @@ mod tests {
             let data_points = connector.data_points();
             assert!(!data_points.is_empty());
 
-            // Every binding in the shipped layout must name a data point that
-            // actually exists, or the connector ships a dashboard with a hole
-            // in it.
-            let point_ids: Vec<&str> = data_points.iter().map(|dp| dp.id.as_str()).collect();
-            for binding in connector.default_layout().bindings {
+            // `details` is a data-point-keyed object, not a free-form blob:
+            // every declared data point has to resolve to a value in the same
+            // reading, because that is what a widget binding looks up.
+            for point in &data_points {
                 assert!(
-                    point_ids.contains(&binding.data_point_id.as_str()),
-                    "layout binds unknown data point {}",
-                    binding.data_point_id
+                    status.data_point_value(&point.id).is_some(),
+                    "status details is missing data point {}",
+                    point.id
                 );
+            }
+
+            // Every binding in the shipped layout must name something that
+            // actually exists, or the connector ships a dashboard with a hole
+            // in it. Which namespace to check is exactly what the enum split
+            // buys: a display binding resolves against the data points, an
+            // action binding against the action list.
+            let point_ids: Vec<&str> = data_points.iter().map(|dp| dp.id.as_str()).collect();
+            let actions = connector.actions().await;
+            let action_ids: Vec<&str> = actions.iter().map(|a| a.id.as_str()).collect();
+            for binding in connector.default_layout().bindings {
+                match &binding {
+                    WidgetBinding::Display { data_point_id, .. } => assert!(
+                        point_ids.contains(&data_point_id.as_str()),
+                        "layout binds unknown data point {data_point_id}"
+                    ),
+                    WidgetBinding::Action { action_id, .. } => assert!(
+                        action_ids.contains(&action_id.as_str()),
+                        "layout binds unknown action {action_id}"
+                    ),
+                }
             }
         }
 
@@ -936,6 +1045,70 @@ mod tests {
     /// reconstructed from the type definitions. Run with
     /// `cargo test -p loom-core -- --nocapture print_wire_shapes`.
     #[test]
+    fn widget_bindings_serialize_as_externally_tagged_variants() {
+        assert_eq!(
+            serde_json::to_value(WidgetBinding::display(
+                "loadHistory",
+                DisplayWidgetType::MetricChart {
+                    chart_type: ChartType::Line
+                }
+            ))
+            .unwrap(),
+            json!({
+                "display": {
+                    "dataPointId": "loadHistory",
+                    "widgetType": { "metricChart": { "chartType": "line" } },
+                    "config": {}
+                }
+            })
+        );
+        assert_eq!(
+            serde_json::to_value(
+                WidgetBinding::action("set-load", ActionWidgetType::Slider)
+                    .with_config(json!({ "min": 0, "max": 100 }))
+            )
+            .unwrap(),
+            json!({
+                "action": {
+                    "actionId": "set-load",
+                    "widgetType": "slider",
+                    "config": { "min": 0, "max": 100 }
+                }
+            })
+        );
+    }
+
+    #[test]
+    fn widget_bindings_round_trip_through_json() {
+        let layout = WidgetLayout::new(vec![
+            WidgetBinding::display("load", DisplayWidgetType::Gauge)
+                .with_config(json!({ "min": 0, "max": 100 })),
+            WidgetBinding::action("restart", ActionWidgetType::Button),
+        ]);
+        let encoded = serde_json::to_string(&layout).unwrap();
+        assert_eq!(
+            serde_json::from_str::<WidgetLayout>(&encoded).unwrap(),
+            layout
+        );
+    }
+
+    #[test]
+    fn data_point_value_reads_the_keyed_details_object() {
+        let status = ConnectorStatus::new(
+            HealthState::Healthy,
+            json!({ "load": 12.5, "enabled": true }),
+        );
+        assert_eq!(status.data_point_value("load"), Some(&json!(12.5)));
+        assert_eq!(status.data_point_value("enabled"), Some(&json!(true)));
+        assert_eq!(status.data_point_value("missing"), None);
+
+        // A `details` payload that is not an object breaks the contract; the
+        // accessor reports "nothing there" rather than inventing a reading.
+        let malformed = ConnectorStatus::new(HealthState::Unknown, json!("not an object"));
+        assert_eq!(malformed.data_point_value("load"), None);
+    }
+
+    #[test]
     fn print_wire_shapes() {
         let last_checked = Utc.with_ymd_and_hms(2026, 8, 19, 12, 0, 0).unwrap();
         let status = ConnectorStatus {
@@ -976,15 +1149,16 @@ mod tests {
         println!(
             "WidgetLayout =\n{}",
             serde_json::to_string_pretty(&WidgetLayout::new(vec![
-                WidgetBinding::new("load", WidgetType::StatTile),
-                WidgetBinding::new(
+                WidgetBinding::display("load", DisplayWidgetType::StatTile),
+                WidgetBinding::display(
                     "loadHistory",
-                    WidgetType::MetricChart {
+                    DisplayWidgetType::MetricChart {
                         chart_type: ChartType::Line
                     }
                 ),
-                WidgetBinding::new("load", WidgetType::Gauge)
+                WidgetBinding::display("load", DisplayWidgetType::Gauge)
                     .with_config(json!({ "min": 0, "max": 100 })),
+                WidgetBinding::action("set-enabled", ActionWidgetType::Toggle),
             ]))
             .unwrap()
         );

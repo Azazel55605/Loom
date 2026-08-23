@@ -851,25 +851,59 @@ async fn validate_placement(
     let bindings = requested_bindings
         .or(existing_bindings)
         .unwrap_or_else(|| connector.default_layout().bindings);
+    // Each binding kind resolves against its own namespace: a display binding
+    // names a data point, an action binding names an action. They are both
+    // strings and they are not interchangeable, so checking one list for both
+    // would either reject valid action bindings or wave through bindings that
+    // can never fire.
     let data_point_ids: HashSet<String> = connector
         .data_points()
         .into_iter()
         .map(|point| point.id)
         .collect();
-    let mut invalid: Vec<String> = bindings
-        .iter()
-        .filter(|binding| !data_point_ids.contains(&binding.data_point_id))
-        .map(|binding| binding.data_point_id.clone())
+    let action_ids: HashSet<String> = connector
+        .actions()
+        .await
+        .into_iter()
+        .map(|action| action.id)
         .collect();
-    invalid.sort();
-    invalid.dedup();
-    if !invalid.is_empty() {
+
+    let mut unknown_data_points: Vec<&str> = Vec::new();
+    let mut unknown_actions: Vec<&str> = Vec::new();
+    for binding in &bindings {
+        match binding {
+            WidgetBinding::Display { data_point_id, .. }
+                if !data_point_ids.contains(data_point_id) =>
+            {
+                unknown_data_points.push(data_point_id);
+            }
+            WidgetBinding::Action { action_id, .. } if !action_ids.contains(action_id) => {
+                unknown_actions.push(action_id);
+            }
+            _ => {}
+        }
+    }
+    for list in [&mut unknown_data_points, &mut unknown_actions] {
+        list.sort_unstable();
+        list.dedup();
+    }
+
+    if !unknown_data_points.is_empty() || !unknown_actions.is_empty() {
+        // Named separately, because "unknown data point restart" would send
+        // someone looking in the wrong half of the connector.
+        let mut problems: Vec<String> = Vec::new();
+        if !unknown_data_points.is_empty() {
+            problems.push(format!(
+                "unknown data points: {}",
+                unknown_data_points.join(", ")
+            ));
+        }
+        if !unknown_actions.is_empty() {
+            problems.push(format!("unknown actions: {}", unknown_actions.join(", ")));
+        }
         return Err(Box::new(ErrorBody::message(
             StatusCode::BAD_REQUEST,
-            format!(
-                "widget bindings reference unknown data points: {}",
-                invalid.join(", ")
-            ),
+            format!("widget bindings reference {}", problems.join("; ")),
         )));
     }
 
