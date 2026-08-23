@@ -7,7 +7,16 @@ import {
   type LayoutItem,
   type ResponsiveLayouts,
 } from "react-grid-layout";
-import { AlertCircle, Check, LayoutGrid, Pencil, Plus, Share2, Trash2 } from "lucide-react";
+import {
+  AlertCircle,
+  Boxes,
+  Check,
+  LayoutGrid,
+  Pencil,
+  Plus,
+  Share2,
+  Trash2,
+} from "lucide-react";
 import { toast } from "sonner";
 
 import { Alert, AlertDescription, AlertTitle } from "@loom/ui-kit/components/ui/alert";
@@ -24,20 +33,29 @@ import {
 import { Badge } from "@loom/ui-kit/components/ui/badge";
 import { Button } from "@loom/ui-kit/components/ui/button";
 import { Card, CardContent } from "@loom/ui-kit/components/ui/card";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogHeader,
+  DialogTitle,
+} from "@loom/ui-kit/components/ui/dialog";
 import { Input } from "@loom/ui-kit/components/ui/input";
 import { Skeleton } from "@loom/ui-kit/components/ui/skeleton";
 import { AddPlacementDialog } from "@loom/ui-kit/components/AddPlacementDialog";
 import { DashboardSharesDialog } from "@loom/ui-kit/components/DashboardSharesDialog";
 import { dashboardsQueryKey } from "@loom/ui-kit/components/DashboardSidebar";
+import { GroupTile } from "@loom/ui-kit/components/GroupTile";
 import {
-  DashboardPlacementCard,
   DRAG_HANDLE_CLASS,
+  PlacementTile,
   type LiveStatus,
-} from "@loom/ui-kit/components/DashboardPlacementCard";
+} from "@loom/ui-kit/components/PlacementTile";
 import { PlacementBindingsDialog } from "@loom/ui-kit/components/PlacementBindingsDialog";
 import type {
   DashboardDetail,
   DashboardPlacement,
+  DashboardPlacementGroup,
   DashboardSummary,
 } from "@loom/ui-kit/lib/api";
 import { useApiClient, useConnectorStatusSocket } from "@loom/ui-kit/lib/api-context";
@@ -67,67 +85,130 @@ const GRID_BREAKPOINTS = { lg: 768, md: 600, sm: 420, xs: 0 } as const;
 const GRID_COLUMNS = { lg: 6, md: 4, sm: 2, xs: 1 } as const;
 type GridBreakpoint = keyof typeof GRID_BREAKPOINTS;
 
-function layoutFromPlacements(placements: DashboardPlacement[]): Layout {
-  return placements.map((placement) => ({
-    i: placement.id,
-    x: placement.positionX,
-    y: placement.positionY,
-    w: placement.width,
-    h: placement.height,
-    minW: placement.connector.metadata.minSize[0],
-    minH: placement.connector.metadata.minSize[1],
-  }));
+const placementGridKey = (id: string) => `placement-${id}`;
+const groupGridKey = (id: string) => `group-${id}`;
+
+type DashboardGridTile =
+  | { kind: "placement"; placement: DashboardPlacement }
+  | { kind: "group"; group: DashboardPlacementGroup };
+
+function groupMinimumWidth(group: DashboardPlacementGroup, columns = GRID_COLS): number {
+  return Math.min(
+    columns,
+    Math.max(
+      2,
+      group.members.reduce(
+        (width, member) => width + Math.min(member.connector.metadata.minSize[0], columns),
+        0,
+      ),
+    ),
+  );
 }
 
-function scaledLayout(placements: DashboardPlacement[], columns: number): Layout {
-  return placements.map((placement) => {
-    const minimumWidth = Math.min(placement.connector.metadata.minSize[0], columns);
-    const width = Math.min(
-      columns,
-      Math.max(minimumWidth, Math.ceil((placement.width * columns) / GRID_COLS)),
-    );
+function groupMinimumHeight(group: DashboardPlacementGroup): number {
+  return Math.max(2, ...group.members.map((member) => member.connector.metadata.minSize[1]));
+}
+
+function dashboardTiles(
+  placements: DashboardPlacement[],
+  groups: DashboardPlacementGroup[],
+): DashboardGridTile[] {
+  return [
+    ...placements.map((placement): DashboardGridTile => ({ kind: "placement", placement })),
+    ...groups.map((group): DashboardGridTile => ({ kind: "group", group })),
+  ];
+}
+
+function tileGeometry(tile: DashboardGridTile) {
+  if (tile.kind === "placement") {
     return {
-      i: placement.id,
-      x: Math.min(Math.floor((placement.positionX * columns) / GRID_COLS), columns - width),
-      y: placement.positionY,
-      w: width,
-      h: placement.height,
-      minW: minimumWidth,
-      minH: placement.connector.metadata.minSize[1],
+      id: placementGridKey(tile.placement.id),
+      x: tile.placement.positionX,
+      y: tile.placement.positionY,
+      width: tile.placement.width,
+      height: tile.placement.height,
+      minWidth: tile.placement.connector.metadata.minSize[0],
+      minHeight: tile.placement.connector.metadata.minSize[1],
+    };
+  }
+  return {
+    id: groupGridKey(tile.group.id),
+    x: tile.group.positionX,
+    y: tile.group.positionY,
+    width: tile.group.width,
+    height: tile.group.height,
+    minWidth: groupMinimumWidth(tile.group),
+    minHeight: groupMinimumHeight(tile.group),
+  };
+}
+
+function layoutFromTiles(tiles: DashboardGridTile[]): Layout {
+  return tiles.map((tile) => {
+    const geometry = tileGeometry(tile);
+    return {
+      i: geometry.id,
+      x: geometry.x,
+      y: geometry.y,
+      w: geometry.width,
+      h: geometry.height,
+      minW: geometry.minWidth,
+      minH: geometry.minHeight,
     };
   });
 }
 
-function stackedLayout(placements: DashboardPlacement[], columns: number): Layout {
+function scaledLayout(tiles: DashboardGridTile[], columns: number): Layout {
+  return tiles.map((tile) => {
+    const geometry = tileGeometry(tile);
+    const minimumWidth = Math.min(geometry.minWidth, columns);
+    const width = Math.min(
+      columns,
+      Math.max(minimumWidth, Math.ceil((geometry.width * columns) / GRID_COLS)),
+    );
+    return {
+      i: geometry.id,
+      x: Math.min(Math.floor((geometry.x * columns) / GRID_COLS), columns - width),
+      y: geometry.y,
+      w: width,
+      h: geometry.height,
+      minW: minimumWidth,
+      minH: geometry.minHeight,
+    };
+  });
+}
+
+function stackedLayout(tiles: DashboardGridTile[], columns: number): Layout {
   let nextRow = 0;
-  return [...placements]
-    .sort(
-      (left, right) =>
-        left.positionY - right.positionY || left.positionX - right.positionX,
-    )
-    .map((placement) => {
+  return [...tiles]
+    .sort((left, right) => {
+      const leftGeometry = tileGeometry(left);
+      const rightGeometry = tileGeometry(right);
+      return leftGeometry.y - rightGeometry.y || leftGeometry.x - rightGeometry.x;
+    })
+    .map((tile) => {
+      const geometry = tileGeometry(tile);
       const item = {
-        i: placement.id,
+        i: geometry.id,
         x: 0,
         y: nextRow,
         w: columns,
-        h: placement.height,
+        h: geometry.height,
         minW: columns,
-        minH: placement.connector.metadata.minSize[1],
+        minH: geometry.minHeight,
       };
-      nextRow += placement.height;
+      nextRow += geometry.height;
       return item;
     });
 }
 
-function responsiveLayoutsFromPlacements(
-  placements: DashboardPlacement[],
+function responsiveLayoutsFromTiles(
+  tiles: DashboardGridTile[],
 ): ResponsiveLayouts<GridBreakpoint> {
   return {
-    lg: layoutFromPlacements(placements),
-    md: scaledLayout(placements, GRID_COLUMNS.md),
-    sm: stackedLayout(placements, GRID_COLUMNS.sm),
-    xs: stackedLayout(placements, GRID_COLUMNS.xs),
+    lg: layoutFromTiles(tiles),
+    md: scaledLayout(tiles, GRID_COLUMNS.md),
+    sm: stackedLayout(tiles, GRID_COLUMNS.sm),
+    xs: stackedLayout(tiles, GRID_COLUMNS.xs),
   };
 }
 
@@ -185,6 +266,9 @@ export function DashboardView({
   const [deleteOpen, setDeleteOpen] = React.useState(false);
   const [addOpen, setAddOpen] = React.useState(false);
   const [editingLayout, setEditingLayout] = React.useState(false);
+  const [grouping, setGrouping] = React.useState(false);
+  const [selectedPlacementIds, setSelectedPlacementIds] = React.useState<string[]>([]);
+  const [addingToGroup, setAddingToGroup] = React.useState<DashboardPlacement | null>(null);
   const [bindingsFor, setBindingsFor] = React.useState<DashboardPlacement | null>(null);
   const [removing, setRemoving] = React.useState<DashboardPlacement | null>(null);
   const [live, setLive] = React.useState<Record<string, LiveStatus>>({});
@@ -197,29 +281,35 @@ export function DashboardView({
     queryFn: ({ signal }) => api.getDashboard(dashboardId, signal),
   });
 
-  // Standalone placements only. `dashboard.data.placementGroups` — several
-  // placements combined into one wider tile — is **not rendered yet**: the
-  // backend and the API contract for grouping exist, the grid rendering for it
-  // does not, and nothing in this app can create a group in the meantime. When
-  // it lands it belongs here, as a second kind of grid item beside these, not
-  // as a flattening of groups back into loose placements.
   const placements = React.useMemo(
     () => dashboard.data?.placements ?? [],
     [dashboard.data],
   );
+  const placementGroups = React.useMemo(
+    () => dashboard.data?.placementGroups ?? [],
+    [dashboard.data],
+  );
+  const tiles = React.useMemo(
+    () => dashboardTiles(placements, placementGroups),
+    [placementGroups, placements],
+  );
+  const allPlacements = React.useMemo(
+    () => [...placements, ...placementGroups.flatMap((group) => group.members)],
+    [placementGroups, placements],
+  );
 
   const responsiveLayouts = React.useMemo(
-    () => responsiveLayoutsFromPlacements(placements),
-    [placements],
+    () => responsiveLayoutsFromTiles(tiles),
+    [tiles],
   );
 
   const instanceIds = React.useMemo(
-    () => [...new Set(placements.map((placement) => placement.connector.id))],
-    [placements],
+    () => [...new Set(allPlacements.map((placement) => placement.connector.id))],
+    [allPlacements],
   );
 
   React.useEffect(() => {
-    if (dashboard.data === undefined || placements.length === 0) return;
+    if (dashboard.data === undefined || tiles.length === 0) return;
     // The first render returns DashboardViewSkeleton before the measured grid
     // container exists. useContainerWidth's mount effect therefore observes a
     // null ref and cannot mark itself mounted. Measure again once the dashboard
@@ -227,7 +317,20 @@ export function DashboardView({
     // cold direct navigation stays on the grid skeleton until the view is
     // unmounted and revisited with dashboard detail already in React Query.
     measureWidth();
-  }, [dashboard.data, measureWidth, placements.length]);
+  }, [dashboard.data, measureWidth, tiles.length]);
+
+  React.useEffect(() => {
+    if (editingLayout && placements.length >= 2) return;
+    setGrouping(false);
+    setSelectedPlacementIds([]);
+  }, [editingLayout, placements.length]);
+
+  React.useEffect(() => {
+    setEditingLayout(false);
+    setGrouping(false);
+    setSelectedPlacementIds([]);
+    setAddingToGroup(null);
+  }, [dashboardId]);
 
   React.useEffect(() => {
     if (instanceIds.length === 0) return;
@@ -277,41 +380,114 @@ export function DashboardView({
       setRemoving(null);
     },
   });
+  const createGroup = useMutation({
+    mutationFn: () => {
+      const selected = selectedPlacementIds
+        .map((id) => placements.find((placement) => placement.id === id))
+        .filter((placement): placement is DashboardPlacement => placement !== undefined);
+      if (selected.length < 2) throw new Error("select at least two placements");
+
+      const left = Math.min(...selected.map((placement) => placement.positionX));
+      const top = Math.min(...selected.map((placement) => placement.positionY));
+      const right = Math.max(
+        ...selected.map((placement) => placement.positionX + placement.width),
+      );
+      const bottom = Math.max(
+        ...selected.map((placement) => placement.positionY + placement.height),
+      );
+      const minimumWidth = Math.min(
+        GRID_COLS,
+        selected.reduce(
+          (sum, placement) => sum + placement.connector.metadata.minSize[0],
+          0,
+        ),
+      );
+      const width = Math.min(GRID_COLS, Math.max(minimumWidth, right - left));
+      const positionX = Math.min(left, GRID_COLS - width);
+      const height = Math.max(
+        bottom - top,
+        ...selected.map((placement) => placement.connector.metadata.minSize[1]),
+      );
+
+      return api.createDashboardPlacementGroup(dashboardId, {
+        placementIds: selected.map((placement) => placement.id),
+        positionX,
+        positionY: top,
+        width,
+        height,
+      });
+    },
+    onSuccess: async () => {
+      setGrouping(false);
+      setSelectedPlacementIds([]);
+      await refreshDashboard();
+    },
+    onError: (error) => {
+      toast.error("Could not create the group", {
+        description: describeConnectorError(error),
+      });
+    },
+  });
+  const addToGroup = useMutation({
+    mutationFn: (groupId: string) => {
+      if (addingToGroup === null) throw new Error("no placement selected");
+      return api.addDashboardPlacementGroupMember(
+        dashboardId,
+        groupId,
+        addingToGroup.id,
+      );
+    },
+    onSuccess: async () => {
+      await refreshDashboard();
+      setAddingToGroup(null);
+    },
+    onError: (error) => {
+      toast.error("Could not add the tile to that group", {
+        description: describeConnectorError(error),
+      });
+    },
+  });
 
   const persist = React.useCallback(
     async (next: Layout, breakpoint: GridBreakpoint) => {
-      const stored = new Map(placements.map((placement) => [placement.id, placement]));
+      const stored = new Map(tiles.map((tile) => [tileGeometry(tile).id, tile]));
       // The API stores one canonical layout. At narrower breakpoints the grid
       // is derived from it, so preserve desktop x/width while still allowing
       // touch users to adjust vertical order and height.
       const canonical = next.map((item) => {
-        const placement = stored.get(item.i);
-        return breakpoint === "lg" || placement === undefined
-          ? item
-          : { ...item, x: placement.positionX, w: placement.width };
+        const tile = stored.get(item.i);
+        if (breakpoint === "lg" || tile === undefined) return item;
+        const geometry = tileGeometry(tile);
+        return { ...item, x: geometry.x, w: geometry.width };
       });
       const moved = canonical.filter((item) => {
-        const placement = stored.get(item.i);
+        const tile = stored.get(item.i);
+        if (tile === undefined) return false;
+        const geometry = tileGeometry(tile);
         return (
-          placement !== undefined &&
-          (placement.positionX !== item.x ||
-            placement.positionY !== item.y ||
-            placement.width !== item.w ||
-            placement.height !== item.h)
+          geometry.x !== item.x ||
+          geometry.y !== item.y ||
+          geometry.width !== item.w ||
+          geometry.height !== item.h
         );
       });
       if (moved.length === 0) return;
 
       try {
         await Promise.all(
-          moved.map((item) =>
-            api.updateDashboardPlacement(dashboardId, item.i, {
+          moved.map((item) => {
+            const tile = stored.get(item.i);
+            if (tile === undefined) return Promise.resolve();
+            const geometry = {
               positionX: item.x,
               positionY: item.y,
               width: item.w,
               height: item.h,
-            }),
-          ),
+            };
+            return tile.kind === "placement"
+              ? api.updateDashboardPlacement(dashboardId, tile.placement.id, geometry)
+              : api.updateDashboardPlacementGroup(dashboardId, tile.group.id, geometry);
+          }),
         );
       } catch (error) {
         toast.error("Could not save the layout", {
@@ -324,7 +500,7 @@ export function DashboardView({
         await refreshDashboard();
       }
     },
-    [api, dashboardId, placements, refreshDashboard],
+    [api, dashboardId, refreshDashboard, tiles],
   );
 
   const onLayoutSettled = React.useCallback(
@@ -424,11 +600,31 @@ export function DashboardView({
                 variant={editingLayout ? "default" : "outline"}
                 size="sm"
                 aria-pressed={editingLayout}
-                onClick={() => setEditingLayout((current) => !current)}
+                onClick={() => {
+                  setEditingLayout((current) => !current);
+                  setGrouping(false);
+                  setSelectedPlacementIds([]);
+                }}
               >
                 {editingLayout ? <Check aria-hidden="true" /> : <LayoutGrid aria-hidden="true" />}
                 {editingLayout ? "Done" : "Edit layout"}
               </Button>
+              {editingLayout && placements.length >= 2 ? (
+                <Button
+                  type="button"
+                  variant={grouping ? "secondary" : "outline"}
+                  size="sm"
+                  aria-pressed={grouping}
+                  onClick={() => {
+                    setGrouping((current) => !current);
+                    setSelectedPlacementIds([]);
+                    createGroup.reset();
+                  }}
+                >
+                  <Boxes data-icon="inline-start" aria-hidden="true" />
+                  {grouping ? "Cancel grouping" : "Group tiles"}
+                </Button>
+              ) : null}
               <Button type="button" variant="outline" size="sm" onClick={() => setAddOpen(true)}>
                 <Plus aria-hidden="true" />
                 Add connector
@@ -457,16 +653,33 @@ export function DashboardView({
 
       {editingLayout ? (
         <Alert>
-          <LayoutGrid aria-hidden="true" />
-          <AlertTitle>Editing the layout</AlertTitle>
+          {grouping ? <Boxes aria-hidden="true" /> : <LayoutGrid aria-hidden="true" />}
+          <AlertTitle>{grouping ? "Choose tiles to group" : "Editing the layout"}</AlertTitle>
           <AlertDescription>
-            Drag a card by its header to move it, or its bottom-right corner to resize it. Widget
-            controls are disabled while you rearrange.
+            {grouping
+              ? "Select at least two standalone tiles. Their selection order becomes their order inside the group."
+              : "Drag a card by its header to move it, or its bottom-right corner to resize it. Widget controls are disabled while you rearrange."}
           </AlertDescription>
         </Alert>
       ) : null}
 
-      {placements.length === 0 ? (
+      {grouping ? (
+        <div className="pointer-events-none sticky bottom-4 z-20 flex justify-center px-4">
+          <Button
+            type="button"
+            className="pointer-events-auto shadow-lg"
+            disabled={selectedPlacementIds.length < 2 || createGroup.isPending}
+            onClick={() => createGroup.mutate()}
+          >
+            <Boxes data-icon="inline-start" aria-hidden="true" />
+            {createGroup.isPending
+              ? "Creating group…"
+              : `Group ${selectedPlacementIds.length} ${selectedPlacementIds.length === 1 ? "tile" : "tiles"}`}
+          </Button>
+        </div>
+      ) : null}
+
+      {tiles.length === 0 ? (
         <Card>
           <CardContent className="flex flex-col items-center gap-3 py-10 text-center">
             <p className="font-medium">No connectors placed on this dashboard yet.</p>
@@ -509,19 +722,49 @@ export function DashboardView({
               className={editingLayout ? "loom-grid-editing" : undefined}
               // The header is the only drag surface, so a press on a slider or a
               // button inside a card never becomes a drag.
-              dragConfig={{ enabled: editingLayout, handle: `.${DRAG_HANDLE_CLASS}` }}
-              resizeConfig={{ enabled: editingLayout }}
+              dragConfig={{
+                enabled: editingLayout && !grouping,
+                handle: `.${DRAG_HANDLE_CLASS}`,
+                cancel: ".loom-grid-control",
+              }}
+              resizeConfig={{ enabled: editingLayout && !grouping }}
               onDragStop={onLayoutSettled}
               onResizeStop={onLayoutSettled}
             >
               {placements.map((placement) => (
-                <div key={placement.id} className="min-w-0">
-                  <DashboardPlacementCard
+                <div key={placementGridKey(placement.id)} className="min-w-0">
+                  <PlacementTile
                     placement={placement}
                     live={live[placement.connector.id]}
                     editing={editingLayout}
                     onEditBindings={setBindingsFor}
                     onDelete={setRemoving}
+                    grouping={grouping}
+                    selected={selectedPlacementIds.includes(placement.id)}
+                    onSelectedChange={(selected) => {
+                      setSelectedPlacementIds((current) =>
+                        selected
+                          ? current.includes(placement.id)
+                            ? current
+                            : [...current, placement.id]
+                          : current.filter((id) => id !== placement.id),
+                      );
+                    }}
+                    onAddToGroup={
+                      !grouping && placementGroups.length > 0 ? setAddingToGroup : undefined
+                    }
+                  />
+                </div>
+              ))}
+              {placementGroups.map((group) => (
+                <div key={groupGridKey(group.id)} className="min-w-0">
+                  <GroupTile
+                    dashboardId={dashboardId}
+                    group={group}
+                    live={live}
+                    editing={editingLayout}
+                    onEditBindings={setBindingsFor}
+                    onChanged={refreshDashboard}
                   />
                 </div>
               ))}
@@ -537,6 +780,7 @@ export function DashboardView({
           <AddPlacementDialog
             dashboardId={detail.id}
             existingPlacements={placements}
+            existingPlacementGroups={placementGroups}
             open={addOpen}
             onOpenChange={setAddOpen}
             onCreated={refreshDashboard}
@@ -560,6 +804,49 @@ export function DashboardView({
           onOpenChange={setSharesOpen}
         />
       ) : null}
+
+      <Dialog
+        open={addingToGroup !== null}
+        onOpenChange={(open) => {
+          if (!open) {
+            setAddingToGroup(null);
+            addToGroup.reset();
+          }
+        }}
+      >
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>Add {addingToGroup?.connector.name} to a group</DialogTitle>
+            <DialogDescription>
+              Choose the composite tile this placement should join. It is appended after the
+              current last member.
+            </DialogDescription>
+          </DialogHeader>
+          <div className="flex flex-col gap-2">
+            {placementGroups.map((group) => {
+              const firstName = group.members[0]?.connector.name ?? "Unnamed connector";
+              return (
+                <Button
+                  key={group.id}
+                  type="button"
+                  variant="outline"
+                  className="h-auto justify-start whitespace-normal py-3 text-left"
+                  disabled={addToGroup.isPending}
+                  onClick={() => addToGroup.mutate(group.id)}
+                >
+                  <span>
+                    <span className="block font-medium">Group of {group.members.length}</span>
+                    <span className="block text-xs text-muted-foreground">
+                      {firstName}
+                      {group.members.length > 1 ? " + others" : ""}
+                    </span>
+                  </span>
+                </Button>
+              );
+            })}
+          </div>
+        </DialogContent>
+      </Dialog>
 
       <AlertDialog
         open={removing !== null}

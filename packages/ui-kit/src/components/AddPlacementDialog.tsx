@@ -22,7 +22,11 @@ import {
 } from "@loom/ui-kit/components/ui/select";
 import { Skeleton } from "@loom/ui-kit/components/ui/skeleton";
 import { PlacementBindingEditor } from "@loom/ui-kit/components/PlacementBindingEditor";
-import type { DashboardPlacement, WidgetBinding } from "@loom/ui-kit/lib/api";
+import type {
+  DashboardPlacement,
+  DashboardPlacementGroup,
+  WidgetBinding,
+} from "@loom/ui-kit/lib/api";
 import { useApiClient } from "@loom/ui-kit/lib/api-context";
 import { describeConnectorError } from "@loom/ui-kit/lib/connector-error";
 
@@ -35,10 +39,19 @@ import { describeConnectorError } from "@loom/ui-kit/lib/connector-error";
  * a placement that turned up in a surprising gap would be harder to find than
  * one that turned up at the bottom.
  */
-function nextFreeRow(placements: DashboardPlacement[]): number {
-  return placements.reduce(
-    (lowest, placement) => Math.max(lowest, placement.positionY + placement.height),
-    0,
+function nextFreeRow(
+  placements: DashboardPlacement[],
+  placementGroups: DashboardPlacementGroup[],
+): number {
+  return Math.max(
+    placements.reduce(
+      (lowest, placement) => Math.max(lowest, placement.positionY + placement.height),
+      0,
+    ),
+    placementGroups.reduce(
+      (lowest, group) => Math.max(lowest, group.positionY + group.height),
+      0,
+    ),
   );
 }
 
@@ -58,12 +71,14 @@ function nextFreeRow(placements: DashboardPlacement[]): number {
 export function AddPlacementDialog({
   dashboardId,
   existingPlacements,
+  existingPlacementGroups = [],
   open,
   onOpenChange,
   onCreated,
 }: {
   dashboardId: string;
   existingPlacements: DashboardPlacement[];
+  existingPlacementGroups?: DashboardPlacementGroup[];
   open: boolean;
   onOpenChange: (open: boolean) => void;
   onCreated: () => void | Promise<void>;
@@ -110,7 +125,7 @@ export function AddPlacementDialog({
       return api.createDashboardPlacement(dashboardId, {
         connectorInstanceId: connector.id,
         positionX: 0,
-        positionY: nextFreeRow(existingPlacements),
+        positionY: nextFreeRow(existingPlacements, existingPlacementGroups),
         width,
         height,
         widgetBindings: bindings,
