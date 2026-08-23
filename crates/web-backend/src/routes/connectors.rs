@@ -488,6 +488,15 @@ pub async fn delete_instance(
         state.connectors.remove(&uuid).await;
     }
 
+    // Placements cascade away with the instance, and a cascade cannot know that
+    // a dashboard tile group is only a group while it has two members. Without
+    // this, deleting a connector could leave a one-member group standing on
+    // someone else's dashboard — a tile that cannot be dragged and has no
+    // remaining reason to exist. See `dashboards::dissolve_undersized_groups`.
+    if let Err(error) = super::dashboards::dissolve_undersized_groups(&state.pool).await {
+        return internal_error("dissolving undersized placement groups", error);
+    }
+
     StatusCode::NO_CONTENT.into_response()
 }
 

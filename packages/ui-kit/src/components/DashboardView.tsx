@@ -197,6 +197,12 @@ export function DashboardView({
     queryFn: ({ signal }) => api.getDashboard(dashboardId, signal),
   });
 
+  // Standalone placements only. `dashboard.data.placementGroups` — several
+  // placements combined into one wider tile — is **not rendered yet**: the
+  // backend and the API contract for grouping exist, the grid rendering for it
+  // does not, and nothing in this app can create a group in the meantime. When
+  // it lands it belongs here, as a second kind of grid item beside these, not
+  // as a flattening of groups back into loose placements.
   const placements = React.useMemo(
     () => dashboard.data?.placements ?? [],
     [dashboard.data],

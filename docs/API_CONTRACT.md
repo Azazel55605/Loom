@@ -1038,11 +1038,14 @@ use dashboard detail paths to enumerate private dashboard ids.
 
 Role ordering is `owner > editor > viewer`:
 
-| Role | View | Pin for self | Add/edit/remove placements | Rename/delete/share |
+| Role | View | Pin for self | Add/edit/remove placements and groups | Rename/delete/share |
 | --- | --- | --- | --- | --- |
 | owner | yes | yes | yes | yes |
 | editor | yes | yes | yes | no |
 | viewer | yes | yes | no | no |
+
+Combining placements into one tile is a layout edit and sits in the same column
+as the rest of them — see [Placement groups](#placement-groups).
 
 ### `GET /dashboards`
 
@@ -1080,8 +1083,16 @@ Creates a dashboard owned by the caller.
 
 ### `GET /dashboards/{id}`
 
-Requires Viewer or better. Returns the resolved owner, caller's effective role,
-and every placement:
+Requires Viewer or better. Returns the resolved owner, the caller's effective
+role, and the dashboard's tiles **in two lists**: `placements` holds the
+standalone ones and `placementGroups` holds the combined ones, each with its
+ordered members.
+
+The split is done here rather than left to the client. A single flat array with
+a `groupId` on each entry would make every client re-derive the same partition
+and the same member ordering, and get one of them wrong in a different way each
+time. A placement that is a member of a group appears **only** inside that
+group, never in `placements`.
 
 ```json
 {
@@ -1119,12 +1130,41 @@ and every placement:
       "positionY": 0,
       "width": 2,
       "height": 2,
+      "positionX": 0,
+      "positionY": 0,
+      "width": 2,
+      "height": 2,
       "widgetBindings": [],
-      "createdAt": "2026-08-21T18:00:00+00:00"
+      "createdAt": "2026-08-21T18:00:00+00:00",
+      "groupId": null
+    }
+  ],
+  "placementGroups": [
+    {
+      "id": "3d6c1f0a-2b1e-4f8c-9a77-0d2b6f4e1c33",
+      "positionX": 0,
+      "positionY": 2,
+      "width": 6,
+      "height": 3,
+      "createdAt": "2026-08-21T18:10:00+00:00",
+      "members": [
+        { "id": "…", "connector": { "…": "…" }, "groupId": "3d6c1f0a-2b1e-4f8c-9a77-0d2b6f4e1c33", "…": "…" },
+        { "id": "…", "connector": { "…": "…" }, "groupId": "3d6c1f0a-2b1e-4f8c-9a77-0d2b6f4e1c33", "…": "…" }
+      ]
     }
   ]
 }
 ```
+
+| Field | JSON type | Meaning | Nullability |
+| --- | --- | --- | --- |
+| `placements` | array | Standalone placements only. | Always present; may be empty. |
+| `placementGroups` | array | Combined tiles. See [Placement groups](#placement-groups). | Always present; may be empty. |
+
+A member is a placement object exactly as `placements` holds one, including its
+own `positionX`/`positionY`/`width`/`height` — see
+[Placement groups](#placement-groups) for why those are still there and what
+they mean while grouped. `members` is ordered; render it in the order given.
 
 `connector` is exactly the cached summary builder used by
 `GET /connector-instances`; failed and unloaded connectors therefore keep the
@@ -1276,10 +1316,199 @@ create. Returns the updated placement on 200, 403 for insufficient role, 404
 when the placement does not belong to this dashboard, and 400 for validation
 failure.
 
+This endpoint works on a **grouped** placement too, and what it edits then is
+the standalone geometry the placement will return to when it is ungrouped — not
+where it sits inside its group. See [Placement groups](#placement-groups).
+
 ### `DELETE /dashboards/{id}/placements/{placementId}`
 
 Editor or Owner. Returns 204, 403 for insufficient role, or 404 when the
 placement does not belong to this dashboard.
+
+**Deleting a group member can dissolve its group.** If the deletion leaves a
+placement group with fewer than two members, that group is removed and its
+remaining member returns to standalone. See
+[auto-dissolve](#a-group-below-two-members-dissolves).
+
+## Placement groups
+
+Several placements combined into one wider tile. Grouping is **retroactive**
+(nothing at placement-creation time decides it), **connector-agnostic** (members
+need not share a type, or anything else), and holds **any number of members from
+two upward** — nothing in the model is pairwise.
+
+Every endpoint below requires **Editor or Owner** on the dashboard, exactly like
+the placement endpoints. There is no permission key: grouping is a layout edit,
+and layout edits are an ACL question — see
+[`0013`](./adr/0013-dashboard-sharing-model.md) and
+[`0015`](./adr/0015-dashboard-tile-grouping.md).
+
+### A member keeps its own position and size
+
+A group has its own `positionX`/`positionY`/`width`/`height`, and **that box is
+what the grid lays out**. A member's own four geometry fields are still returned
+and are still writable, but they are **ignored for grid rendering** while it is
+grouped.
+
+They are not cleared, and that is deliberate: ungrouping is a write of `null` to
+two columns, after which every placement renders standalone again exactly where
+and at what size it was before it was grouped. Grouping is therefore an
+experiment a user can undo, not a decision that costs them their layout.
+
+The consequence worth knowing: for a grouped placement those fields are
+stale-by-design. Do not use them to position a member inside its group.
+
+### A group below two members dissolves
+
+**If a group's membership drops below two, the group is deleted and any
+remaining member returns to standalone.** A group of one is the placement it
+contains with an extra layer of indirection, so it is not allowed to exist.
+
+This means **removing one member of a pair un-groups both placements and
+destroys the tile** — including the placement that was not named in the request.
+
+Membership can fall below two through three routes, and the rule holds on all
+of them:
+
+| How | Endpoint |
+| --- | --- |
+| A member is removed from the group | `DELETE …/placement-groups/{groupId}/members/{placementId}` |
+| A member placement is deleted outright | `DELETE …/placements/{placementId}` |
+| The connector instance behind a member is deleted, cascading its placements away | `DELETE /connector-instances/{id}` |
+
+Because a dissolve can change tiles the caller did not ask about, the two
+deleting endpoints return **204 with no body**. Re-read `GET /dashboards/{id}`
+rather than trying to patch local state from the response.
+
+### Member ordering
+
+`members` is ordered, and `POST` sets the initial order from the order of
+`placementIds`. Ordering is a sort key, not an index: removing a member leaves a
+gap, and adding one appends past the current last member rather than filling
+that gap. Only the relative order is ever meaningful.
+
+### `POST /dashboards/{id}/placement-groups`
+
+Editor or Owner. Combines existing placements into a new tile.
+
+```json
+{
+  "placementIds": [
+    "cab30488-a7b8-4746-95b3-4a5fbfbb0e94",
+    "7f2e9d10-3c4b-4a58-8e6f-1b0d2c3a4e5f"
+  ],
+  "positionX": 0,
+  "positionY": 2,
+  "width": 6,
+  "height": 3
+}
+```
+
+| Field | JSON type | Meaning |
+| --- | --- | --- |
+| `placementIds` | array | **At least two**, each once, each a placement on this dashboard, none already in a group. Their order becomes the initial member order. |
+| `positionX`, `positionY` | integer | The tile's grid position. |
+| `width`, `height` | integer | The tile's grid size. Both at least 1. |
+
+**Response 201** — the created group, in the same shape `placementGroups`
+carries in dashboard detail, members resolved.
+
+Every rejection below is a 400, because every one of them is a failure of the
+request body rather than a missing resource at the URL. Each names the offending
+ids, since "some placements cannot be grouped" is not actionable on its own.
+
+| Status | Meaning |
+| --- | --- |
+| 201 | Group created. |
+| 400 | Fewer than two ids, a repeated id, an id that is not a placement on this dashboard, an id already in a group, or a `width`/`height` below 1. |
+| 403 | Caller is not an Editor or Owner. |
+
+### `PATCH /dashboards/{id}/placement-groups/{groupId}`
+
+Editor or Owner. Moves or resizes the tile, reorders its members, or both. Every
+field is optional; an omitted one is left alone, and an empty body is a no-op.
+
+```json
+{
+  "positionX": 2,
+  "height": 4,
+  "memberOrder": [
+    "7f2e9d10-3c4b-4a58-8e6f-1b0d2c3a4e5f",
+    "cab30488-a7b8-4746-95b3-4a5fbfbb0e94"
+  ]
+}
+```
+
+`memberOrder` must name **exactly** the current membership — the same ids, each
+once, nothing added and nothing missing. Reordering is not a back door for
+joining or leaving a group: those have their own endpoints, with their own
+validation and, in the leaving case, a cascade this endpoint must not silently
+trigger.
+
+**Response 200** — the updated group with its members in the new order.
+
+| Status | Meaning |
+| --- | --- |
+| 200 | Updated. |
+| 400 | `memberOrder` does not match current membership, or `width`/`height` below 1. |
+| 403 | Caller is not an Editor or Owner. |
+| 404 | No such group on this dashboard. |
+
+### `POST /dashboards/{id}/placement-groups/{groupId}/members`
+
+Editor or Owner. Appends one standalone placement after the current last member.
+
+```json
+{ "placementId": "9c8b7a65-4321-4f0e-9d8c-7b6a5f4e3d2c" }
+```
+
+A placement already in **another** group is refused rather than moved: leaving a
+group can dissolve it, and a request that says "add" must not be the thing that
+destroys a different tile. Ungroup it first.
+
+**Response 200** — the updated group, members resolved.
+
+| Status | Meaning |
+| --- | --- |
+| 200 | Added. |
+| 400 | `placementId` is not a placement on this dashboard, or is already in a group. |
+| 403 | Caller is not an Editor or Owner. |
+| 404 | No such group on this dashboard. |
+
+### `DELETE /dashboards/{id}/placement-groups/{groupId}/members/{placementId}`
+
+Editor or Owner. Removes one member, returning it to standalone at its preserved
+position and size.
+
+**This can delete the group.** If the removal leaves fewer than two members, the
+group is dissolved: any remaining member is also returned to standalone and the
+group row is deleted. See [auto-dissolve](#a-group-below-two-members-dissolves).
+
+**Response 204** — no body, because a dissolve may have changed placements the
+caller did not name. Re-read the dashboard.
+
+| Status | Meaning |
+| --- | --- |
+| 204 | Removed; the group may no longer exist. |
+| 403 | Caller is not an Editor or Owner. |
+| 404 | No such group on this dashboard, or that placement is not one of its members. |
+
+### `DELETE /dashboards/{id}/placement-groups/{groupId}`
+
+Editor or Owner. Splits the tile apart in one action: **every** member returns to
+standalone at its preserved position and size, and the group row is deleted.
+**No placement is deleted.**
+
+Distinct from removing members one at a time, which for a group of three would
+take two requests and dissolve the group on the second anyway.
+
+**Response 204** — no body.
+
+| Status | Meaning |
+| --- | --- |
+| 204 | Group deleted; every member is standalone again. |
+| 403 | Caller is not an Editor or Owner. |
+| 404 | No such group on this dashboard. |
 
 ## Account
 

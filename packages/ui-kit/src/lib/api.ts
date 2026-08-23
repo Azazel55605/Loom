@@ -324,6 +324,15 @@ export type DashboardOwner = {
 export type DashboardPlacement = {
   id: string;
   connector: ConnectorInstanceSummary;
+  /**
+   * The placement's **standalone** geometry.
+   *
+   * When `groupId` is set these four are still returned and still writable, but
+   * they are **not** where the placement sits on the grid — its group's box is.
+   * They are preserved so that ungrouping puts the placement back exactly where
+   * it was, which is what makes grouping something a user can undo. Do not use
+   * them to position a member inside its group.
+   */
   positionX: number;
   positionY: number;
   width: number;
@@ -331,6 +340,30 @@ export type DashboardPlacement = {
   widgetBindings: WidgetBinding[];
   /** RFC 3339. */
   createdAt: string;
+  /** The group this placement belongs to, or `null` when it stands alone. */
+  groupId: string | null;
+};
+
+/**
+ * Several placements combined into one wider tile.
+ *
+ * Any number of members from two upward, of any connector types — nothing here
+ * is pairwise. A group with fewer than two members cannot exist: the backend
+ * dissolves it, returning the survivor to standalone. See
+ * `docs/adr/0015-dashboard-tile-grouping.md`.
+ */
+export type DashboardPlacementGroup = {
+  id: string;
+  /** The tile's own grid box. **This** is what the grid lays out; a member's
+   *  own position and size are ignored while it is grouped. */
+  positionX: number;
+  positionY: number;
+  width: number;
+  height: number;
+  /** RFC 3339. */
+  createdAt: string;
+  /** Two or more, in the order they should be drawn. */
+  members: DashboardPlacement[];
 };
 
 /** `GET /dashboards/{id}`. */
@@ -341,7 +374,37 @@ export type DashboardDetail = {
   role: DashboardRole;
   /** RFC 3339. */
   createdAt: string;
+  /**
+   * **Standalone placements only.** A placement that is a member of a group is
+   * in that group's `members` and is not repeated here, so rendering
+   * `placements` plus `placementGroups` draws every tile exactly once and
+   * neither list has to be filtered against the other.
+   */
   placements: DashboardPlacement[];
+  placementGroups: DashboardPlacementGroup[];
+};
+
+/** `POST /dashboards/{id}/placement-groups` body — Editor or Owner. */
+export type CreateDashboardPlacementGroupRequest = {
+  /** At least two, each once, each a standalone placement on this dashboard.
+   *  This order becomes the initial member order. */
+  placementIds: string[];
+  positionX: number;
+  positionY: number;
+  width: number;
+  height: number;
+};
+
+/** `PATCH /dashboards/{id}/placement-groups/{groupId}` body. Every field is
+ *  optional; an omitted one is left alone. */
+export type UpdateDashboardPlacementGroupRequest = {
+  positionX?: number;
+  positionY?: number;
+  width?: number;
+  height?: number;
+  /** Must name **exactly** the current membership — same ids, each once.
+   *  Reordering cannot add or remove members; those are their own requests. */
+  memberOrder?: string[];
 };
 
 export type DashboardShareTargetType = "user" | "group";
@@ -1236,6 +1299,91 @@ function deleteDashboardPlacement(
   );
 }
 
+/** `POST /dashboards/{id}/placement-groups` — Editor or Owner. */
+function createDashboardPlacementGroup(
+  runtime: ApiRuntime,
+  id: string,
+  data: CreateDashboardPlacementGroupRequest,
+  signal?: AbortSignal,
+): Promise<DashboardPlacementGroup> {
+  return authorizedRequest<DashboardPlacementGroup>(
+    runtime,
+    `/dashboards/${encodeURIComponent(id)}/placement-groups`,
+    { method: "POST", body: data, signal },
+  );
+}
+
+/** `PATCH /dashboards/{id}/placement-groups/{groupId}` — move, resize, and/or
+ *  reorder members. */
+function updateDashboardPlacementGroup(
+  runtime: ApiRuntime,
+  id: string,
+  groupId: string,
+  data: UpdateDashboardPlacementGroupRequest,
+  signal?: AbortSignal,
+): Promise<DashboardPlacementGroup> {
+  return authorizedRequest<DashboardPlacementGroup>(
+    runtime,
+    `/dashboards/${encodeURIComponent(id)}/placement-groups/${encodeURIComponent(groupId)}`,
+    { method: "PATCH", body: data, signal },
+  );
+}
+
+/** `POST /dashboards/{id}/placement-groups/{groupId}/members` — appends one
+ *  standalone placement after the current last member. */
+function addDashboardPlacementGroupMember(
+  runtime: ApiRuntime,
+  id: string,
+  groupId: string,
+  placementId: string,
+  signal?: AbortSignal,
+): Promise<DashboardPlacementGroup> {
+  return authorizedRequest<DashboardPlacementGroup>(
+    runtime,
+    `/dashboards/${encodeURIComponent(id)}/placement-groups/${encodeURIComponent(groupId)}/members`,
+    { method: "POST", body: { placementId }, signal },
+  );
+}
+
+/**
+ * `DELETE /dashboards/{id}/placement-groups/{groupId}/members/{placementId}`.
+ *
+ * **This can dissolve the group.** If the removal leaves fewer than two
+ * members, the group is deleted and its remaining member also returns to
+ * standalone — so a placement the caller did not name can change. Nothing is
+ * returned for that reason; refetch the dashboard rather than patching local
+ * state.
+ */
+function deleteDashboardPlacementGroupMember(
+  runtime: ApiRuntime,
+  id: string,
+  groupId: string,
+  placementId: string,
+  signal?: AbortSignal,
+): Promise<void> {
+  return authorizedRequest<void>(
+    runtime,
+    `/dashboards/${encodeURIComponent(id)}/placement-groups/${encodeURIComponent(groupId)}` +
+      `/members/${encodeURIComponent(placementId)}`,
+    { method: "DELETE", signal },
+  );
+}
+
+/** `DELETE /dashboards/{id}/placement-groups/{groupId}` — splits the tile
+ *  apart. Every member returns to standalone; no placement is deleted. */
+function deleteDashboardPlacementGroup(
+  runtime: ApiRuntime,
+  id: string,
+  groupId: string,
+  signal?: AbortSignal,
+): Promise<void> {
+  return authorizedRequest<void>(
+    runtime,
+    `/dashboards/${encodeURIComponent(id)}/placement-groups/${encodeURIComponent(groupId)}`,
+    { method: "DELETE", signal },
+  );
+}
+
 /* -------------------------------------------------------------------------- */
 /* Administration                                                              */
 /* -------------------------------------------------------------------------- */
@@ -1649,6 +1797,31 @@ export function createApiClient(options: {
       data: UpdateDashboardPlacementRequest,
       signal?: AbortSignal,
     ) => updateDashboardPlacement(runtime, id, placementId, data, signal),
+    createDashboardPlacementGroup: (
+      id: string,
+      data: CreateDashboardPlacementGroupRequest,
+      signal?: AbortSignal,
+    ) => createDashboardPlacementGroup(runtime, id, data, signal),
+    updateDashboardPlacementGroup: (
+      id: string,
+      groupId: string,
+      data: UpdateDashboardPlacementGroupRequest,
+      signal?: AbortSignal,
+    ) => updateDashboardPlacementGroup(runtime, id, groupId, data, signal),
+    addDashboardPlacementGroupMember: (
+      id: string,
+      groupId: string,
+      placementId: string,
+      signal?: AbortSignal,
+    ) => addDashboardPlacementGroupMember(runtime, id, groupId, placementId, signal),
+    deleteDashboardPlacementGroupMember: (
+      id: string,
+      groupId: string,
+      placementId: string,
+      signal?: AbortSignal,
+    ) => deleteDashboardPlacementGroupMember(runtime, id, groupId, placementId, signal),
+    deleteDashboardPlacementGroup: (id: string, groupId: string, signal?: AbortSignal) =>
+      deleteDashboardPlacementGroup(runtime, id, groupId, signal),
     deleteDashboardPlacement: (id: string, placementId: string, signal?: AbortSignal) =>
       deleteDashboardPlacement(runtime, id, placementId, signal),
     getUsers: (signal?: AbortSignal) => getUsers(runtime, signal),

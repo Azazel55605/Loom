@@ -122,6 +122,22 @@ pub fn routes() -> Router<AppState> {
             "/dashboards/{id}/placements/{placement_id}",
             patch(dashboards::update_placement).delete(dashboards::delete_placement),
         )
+        .route(
+            "/dashboards/{id}/placement-groups",
+            post(dashboards::create_placement_group),
+        )
+        .route(
+            "/dashboards/{id}/placement-groups/{group_id}",
+            patch(dashboards::update_placement_group).delete(dashboards::delete_placement_group),
+        )
+        .route(
+            "/dashboards/{id}/placement-groups/{group_id}/members",
+            post(dashboards::add_placement_group_member),
+        )
+        .route(
+            "/dashboards/{id}/placement-groups/{group_id}/members/{placement_id}",
+            axum::routing::delete(dashboards::delete_placement_group_member),
+        )
         .route("/users", get(users::list_users).post(users::create_user))
         .route(
             "/users/{id}",

@@ -1901,6 +1901,771 @@ mod tests {
     }
 
     /* ---------------------------------------------------------------- */
+    /* Dashboard tile grouping                                           */
+    /* ---------------------------------------------------------------- */
+
+    /// A dashboard with `count` debug-connector placements on it, and the ids
+    /// needed to talk about them.
+    ///
+    /// Each placement gets a distinct position and size, because the whole
+    /// claim of the grouping model is that a member's own geometry survives
+    /// being grouped — identical boxes would let a bug that resets them pass.
+    async fn dashboard_with_placements(
+        app: &TestApp,
+        token: &str,
+        count: usize,
+    ) -> (String, Vec<String>) {
+        let (status, created) = send(
+            &app.router,
+            post_json_auth(
+                "/dashboards",
+                token,
+                serde_json::json!({ "name": "Grouping" }),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED, "{created:#}");
+        let dashboard_id = created["id"].as_str().expect("dashboard id").to_owned();
+
+        let mut placement_ids = Vec::with_capacity(count);
+        for index in 0..count {
+            // A separate connector instance each time: grouping must not care
+            // what a member is connected to, and reusing one instance would
+            // leave "works across connector types" untested.
+            let connector_id =
+                create_debug_instance(&app.router, token, &format!("Fixture {index}")).await;
+            let (status, placement) = send(
+                &app.router,
+                post_json_auth(
+                    &format!("/dashboards/{dashboard_id}/placements"),
+                    token,
+                    serde_json::json!({
+                        "connectorInstanceId": connector_id,
+                        "positionX": index as i64,
+                        "positionY": index as i64 * 2,
+                        "width": 2 + index as i64,
+                        "height": 2,
+                    }),
+                ),
+            )
+            .await;
+            assert_eq!(status, StatusCode::CREATED, "{placement:#}");
+            assert_eq!(placement["groupId"], serde_json::Value::Null);
+            placement_ids.push(placement["id"].as_str().expect("placement id").to_owned());
+        }
+
+        (dashboard_id, placement_ids)
+    }
+
+    async fn dashboard_detail(app: &TestApp, token: &str, dashboard_id: &str) -> serde_json::Value {
+        let (status, detail) = send(
+            &app.router,
+            get_with_auth(&format!("/dashboards/{dashboard_id}"), &bearer(token)),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{detail:#}");
+        detail
+    }
+
+    /// The ids in `detail.placements`, i.e. everything currently standalone.
+    fn standalone_ids(detail: &serde_json::Value) -> Vec<String> {
+        detail["placements"]
+            .as_array()
+            .expect("placements array")
+            .iter()
+            .map(|placement| placement["id"].as_str().expect("id").to_owned())
+            .collect()
+    }
+
+    fn member_ids_of(group: &serde_json::Value) -> Vec<String> {
+        group["members"]
+            .as_array()
+            .expect("members array")
+            .iter()
+            .map(|member| member["id"].as_str().expect("id").to_owned())
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn placements_can_be_grouped_reordered_and_split_apart() {
+        let app = test_app().await;
+        let (owner, _) = setup_and_login(&app.router).await;
+        let (dashboard_id, placements) = dashboard_with_placements(&app, &owner, 3).await;
+
+        // Geometry before grouping, so the round trip can be checked exactly.
+        let before = dashboard_detail(&app, &owner, &dashboard_id).await;
+        let original: std::collections::HashMap<String, serde_json::Value> = before["placements"]
+            .as_array()
+            .expect("placements")
+            .iter()
+            .map(|placement| {
+                (
+                    placement["id"].as_str().expect("id").to_owned(),
+                    serde_json::json!([
+                        placement["positionX"],
+                        placement["positionY"],
+                        placement["width"],
+                        placement["height"],
+                    ]),
+                )
+            })
+            .collect();
+        assert_eq!(original.len(), 3);
+
+        // Three members, not two: nothing in the model may assume a pair.
+        let (status, group) = send(
+            &app.router,
+            post_json_auth(
+                &format!("/dashboards/{dashboard_id}/placement-groups"),
+                &owner,
+                serde_json::json!({
+                    "placementIds": [&placements[2], &placements[0], &placements[1]],
+                    "positionX": 0,
+                    "positionY": 0,
+                    "width": 6,
+                    "height": 3,
+                }),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED, "{group:#}");
+        let group_id = group["id"].as_str().expect("group id").to_owned();
+        // Member order is the order the request listed, not creation order.
+        assert_eq!(
+            member_ids_of(&group),
+            vec![
+                placements[2].clone(),
+                placements[0].clone(),
+                placements[1].clone()
+            ]
+        );
+        assert_eq!(group["width"], 6);
+
+        // The detail response separates the two kinds of tile.
+        let detail = dashboard_detail(&app, &owner, &dashboard_id).await;
+        assert!(
+            standalone_ids(&detail).is_empty(),
+            "every placement is grouped, so none should be listed standalone: {detail:#}"
+        );
+        let groups = detail["placementGroups"].as_array().expect("groups");
+        assert_eq!(groups.len(), 1);
+        assert_eq!(
+            member_ids_of(&groups[0]),
+            vec![
+                placements[2].clone(),
+                placements[0].clone(),
+                placements[1].clone()
+            ]
+        );
+        // Each member still carries its own untouched geometry, and says which
+        // group it is in.
+        for member in groups[0]["members"].as_array().expect("members") {
+            let id = member["id"].as_str().expect("id");
+            assert_eq!(member["groupId"], group_id.as_str());
+            assert_eq!(
+                serde_json::json!([
+                    member["positionX"],
+                    member["positionY"],
+                    member["width"],
+                    member["height"],
+                ]),
+                original[id],
+                "grouping must not disturb a member's own geometry"
+            );
+        }
+
+        // Reorder, and move the tile in the same request.
+        let (status, reordered) = send(
+            &app.router,
+            patch_json_auth(
+                &format!("/dashboards/{dashboard_id}/placement-groups/{group_id}"),
+                &owner,
+                serde_json::json!({
+                    "positionX": 2,
+                    "height": 4,
+                    "memberOrder": [&placements[1], &placements[2], &placements[0]],
+                }),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{reordered:#}");
+        assert_eq!(reordered["positionX"], 2);
+        assert_eq!(reordered["height"], 4);
+        assert_eq!(reordered["width"], 6, "an absent field must be left alone");
+        assert_eq!(
+            member_ids_of(&reordered),
+            vec![
+                placements[1].clone(),
+                placements[2].clone(),
+                placements[0].clone()
+            ]
+        );
+
+        // The reorder is persisted, not just reflected in the response body.
+        let detail = dashboard_detail(&app, &owner, &dashboard_id).await;
+        assert_eq!(
+            member_ids_of(&detail["placementGroups"][0]),
+            vec![
+                placements[1].clone(),
+                placements[2].clone(),
+                placements[0].clone()
+            ]
+        );
+
+        // Explicit split: every member returns to standalone at once.
+        let (status, _) = send(
+            &app.router,
+            delete_auth(
+                &format!("/dashboards/{dashboard_id}/placement-groups/{group_id}"),
+                &owner,
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::NO_CONTENT);
+
+        let detail = dashboard_detail(&app, &owner, &dashboard_id).await;
+        assert!(detail["placementGroups"]
+            .as_array()
+            .expect("groups")
+            .is_empty());
+        let mut restored = standalone_ids(&detail);
+        restored.sort();
+        let mut expected = placements.clone();
+        expected.sort();
+        assert_eq!(restored, expected, "no placement may be lost by ungrouping");
+
+        // Lossless: every placement is back exactly where it was.
+        for placement in detail["placements"].as_array().expect("placements") {
+            let id = placement["id"].as_str().expect("id");
+            assert_eq!(placement["groupId"], serde_json::Value::Null);
+            assert_eq!(
+                serde_json::json!([
+                    placement["positionX"],
+                    placement["positionY"],
+                    placement["width"],
+                    placement["height"],
+                ]),
+                original[id],
+                "ungrouping must restore the preserved geometry exactly"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn a_group_refuses_membership_it_cannot_honour() {
+        let app = test_app().await;
+        let (owner, _) = setup_and_login(&app.router).await;
+        let (dashboard_id, placements) = dashboard_with_placements(&app, &owner, 3).await;
+        let groups_url = format!("/dashboards/{dashboard_id}/placement-groups");
+        let box_fields =
+            serde_json::json!({ "positionX": 0, "positionY": 0, "width": 4, "height": 2 });
+        let with_ids = |ids: serde_json::Value| {
+            let mut body = box_fields.clone();
+            body["placementIds"] = ids;
+            body
+        };
+
+        // A group of one is the placement it contains.
+        let (status, body) = send(
+            &app.router,
+            post_json_auth(
+                &groups_url,
+                &owner,
+                with_ids(serde_json::json!([&placements[0]])),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{body:#}");
+        assert!(body["error"]
+            .as_str()
+            .is_some_and(|error| error.contains("at least 2")));
+
+        // ...and neither is a group of one placement listed twice.
+        let (status, body) = send(
+            &app.router,
+            post_json_auth(
+                &groups_url,
+                &owner,
+                with_ids(serde_json::json!([&placements[0], &placements[0]])),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{body:#}");
+        assert!(body["error"]
+            .as_str()
+            .is_some_and(|error| error.contains("repeats")));
+
+        // An id that is not a placement on this dashboard.
+        let (status, body) = send(
+            &app.router,
+            post_json_auth(
+                &groups_url,
+                &owner,
+                with_ids(serde_json::json!([&placements[0], "not-a-placement"])),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{body:#}");
+        assert!(body["error"]
+            .as_str()
+            .is_some_and(|error| error.contains("not-a-placement")));
+
+        // A degenerate box.
+        let (status, body) = send(
+            &app.router,
+            post_json_auth(
+                &groups_url,
+                &owner,
+                serde_json::json!({
+                    "placementIds": [&placements[0], &placements[1]],
+                    "positionX": 0,
+                    "positionY": 0,
+                    "width": 0,
+                    "height": 2,
+                }),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{body:#}");
+
+        // Now make a real group, and try to take a member of it into another.
+        let (status, first) = send(
+            &app.router,
+            post_json_auth(
+                &groups_url,
+                &owner,
+                with_ids(serde_json::json!([&placements[0], &placements[1]])),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED, "{first:#}");
+        let first_group = first["id"].as_str().expect("group id").to_owned();
+
+        let (status, body) = send(
+            &app.router,
+            post_json_auth(
+                &groups_url,
+                &owner,
+                with_ids(serde_json::json!([&placements[1], &placements[2]])),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{body:#}");
+        let error = body["error"].as_str().expect("error");
+        assert!(
+            error.contains(&placements[1]) && error.contains("already in a group"),
+            "the refusal must name the offending placement: {error}"
+        );
+        assert!(
+            !error.contains(&placements[2]),
+            "an innocent id must not be named: {error}"
+        );
+
+        // The same rule on the add-member endpoint: a placement in another
+        // group must be ungrouped first, never silently moved.
+        let (status, second) = send(
+            &app.router,
+            post_json_auth(
+                &groups_url,
+                &owner,
+                serde_json::json!({
+                    "placementIds": [&placements[2], &placements[0]],
+                    "positionX": 0,
+                    "positionY": 4,
+                    "width": 4,
+                    "height": 2,
+                }),
+            ),
+        )
+        .await;
+        assert_eq!(
+            status,
+            StatusCode::BAD_REQUEST,
+            "placements[0] is spoken for: {second:#}"
+        );
+
+        let (status, body) = send(
+            &app.router,
+            post_json_auth(
+                &format!("{groups_url}/{first_group}/members"),
+                &owner,
+                serde_json::json!({ "placementId": &placements[1] }),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{body:#}");
+
+        // memberOrder must name exactly the current membership.
+        for bad_order in [
+            serde_json::json!([&placements[0]]),
+            serde_json::json!([&placements[0], &placements[0]]),
+            serde_json::json!([&placements[0], &placements[2]]),
+        ] {
+            let (status, body) = send(
+                &app.router,
+                patch_json_auth(
+                    &format!("{groups_url}/{first_group}"),
+                    &owner,
+                    serde_json::json!({ "memberOrder": bad_order }),
+                ),
+            )
+            .await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{body:#}");
+        }
+
+        // An unknown group id is a 404 on every group-scoped route.
+        let missing = format!("{groups_url}/00000000-0000-4000-8000-0000000000ff");
+        for request in [
+            patch_json_auth(&missing, &owner, serde_json::json!({ "width": 3 })),
+            post_json_auth(
+                &format!("{missing}/members"),
+                &owner,
+                serde_json::json!({ "placementId": &placements[2] }),
+            ),
+            delete_auth(&missing, &owner),
+            delete_auth(&format!("{missing}/members/{}", placements[2]), &owner),
+        ] {
+            let (status, body) = send(&app.router, request).await;
+            assert_eq!(status, StatusCode::NOT_FOUND, "{body:#}");
+        }
+    }
+
+    /// The auto-dissolve cascade, which is the least obvious behaviour here:
+    /// removing one member of a pair destroys the tile and un-groups the
+    /// placement that was *not* named in the request.
+    #[tokio::test]
+    async fn removing_a_member_from_a_pair_dissolves_the_whole_group() {
+        let app = test_app().await;
+        let (owner, _) = setup_and_login(&app.router).await;
+        let (dashboard_id, placements) = dashboard_with_placements(&app, &owner, 2).await;
+        let groups_url = format!("/dashboards/{dashboard_id}/placement-groups");
+
+        let before = dashboard_detail(&app, &owner, &dashboard_id).await;
+        let original = before["placements"].clone();
+
+        let (status, group) = send(
+            &app.router,
+            post_json_auth(
+                &groups_url,
+                &owner,
+                serde_json::json!({
+                    "placementIds": [&placements[0], &placements[1]],
+                    "positionX": 1,
+                    "positionY": 1,
+                    "width": 4,
+                    "height": 2,
+                }),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED, "{group:#}");
+        let group_id = group["id"].as_str().expect("group id").to_owned();
+
+        // Remove one. The other was not mentioned and is un-grouped anyway.
+        let (status, _) = send(
+            &app.router,
+            delete_auth(
+                &format!("{groups_url}/{group_id}/members/{}", placements[0]),
+                &owner,
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::NO_CONTENT);
+
+        let detail = dashboard_detail(&app, &owner, &dashboard_id).await;
+        assert!(
+            detail["placementGroups"]
+                .as_array()
+                .expect("groups")
+                .is_empty(),
+            "a group of one must not survive: {detail:#}"
+        );
+        let mut restored = standalone_ids(&detail);
+        restored.sort();
+        let mut expected = placements.clone();
+        expected.sort();
+        assert_eq!(restored, expected);
+
+        // Both are back exactly as they were, including the one that stayed
+        // behind — its geometry was preserved through a membership it never
+        // asked to leave.
+        // Compared as whole objects, not field by field: anything the round
+        // trip disturbed shows up, including a field this test does not know
+        // to look at.
+        fn by_id(list: &mut serde_json::Value) {
+            list.as_array_mut()
+                .expect("array")
+                .sort_by(|left, right| left["id"].as_str().cmp(&right["id"].as_str()));
+        }
+        let mut after = detail["placements"].clone();
+        let mut before_sorted = original;
+        by_id(&mut after);
+        by_id(&mut before_sorted);
+        assert_eq!(after, before_sorted);
+
+        // The group row itself is gone, not merely emptied.
+        let (groups_left,): (i64,) = sqlx::query_as(
+            "SELECT COUNT(*) FROM dashboard_placement_groups WHERE dashboard_id = ?",
+        )
+        .bind(&dashboard_id)
+        .fetch_one(&app.pool)
+        .await
+        .expect("group count");
+        assert_eq!(groups_left, 0);
+    }
+
+    #[tokio::test]
+    async fn removing_a_member_from_a_trio_leaves_the_group_standing() {
+        let app = test_app().await;
+        let (owner, _) = setup_and_login(&app.router).await;
+        let (dashboard_id, placements) = dashboard_with_placements(&app, &owner, 4).await;
+        let groups_url = format!("/dashboards/{dashboard_id}/placement-groups");
+
+        let (status, group) = send(
+            &app.router,
+            post_json_auth(
+                &groups_url,
+                &owner,
+                serde_json::json!({
+                    "placementIds": [&placements[0], &placements[1], &placements[2]],
+                    "positionX": 0,
+                    "positionY": 0,
+                    "width": 6,
+                    "height": 2,
+                }),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED, "{group:#}");
+        let group_id = group["id"].as_str().expect("group id").to_owned();
+
+        // Three down to two: still a group.
+        let (status, _) = send(
+            &app.router,
+            delete_auth(
+                &format!("{groups_url}/{group_id}/members/{}", placements[1]),
+                &owner,
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::NO_CONTENT);
+
+        let detail = dashboard_detail(&app, &owner, &dashboard_id).await;
+        let groups = detail["placementGroups"].as_array().expect("groups");
+        assert_eq!(groups.len(), 1, "{detail:#}");
+        assert_eq!(
+            member_ids_of(&groups[0]),
+            vec![placements[0].clone(), placements[2].clone()],
+            "the survivors keep their relative order"
+        );
+        let mut standalone = standalone_ids(&detail);
+        standalone.sort();
+        let mut expected = vec![placements[1].clone(), placements[3].clone()];
+        expected.sort();
+        assert_eq!(standalone, expected);
+
+        // Add the removed one back — appended last, not restored to the middle.
+        let (status, grown) = send(
+            &app.router,
+            post_json_auth(
+                &format!("{groups_url}/{group_id}/members"),
+                &owner,
+                serde_json::json!({ "placementId": &placements[1] }),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{grown:#}");
+        assert_eq!(
+            member_ids_of(&grown),
+            vec![
+                placements[0].clone(),
+                placements[2].clone(),
+                placements[1].clone()
+            ],
+            "a removal leaves a gap in group_order; appending must clear it"
+        );
+
+        // Two down to one *by the same route* does dissolve.
+        for placement in [&placements[1], &placements[2]] {
+            let (status, _) = send(
+                &app.router,
+                delete_auth(
+                    &format!("{groups_url}/{group_id}/members/{placement}"),
+                    &owner,
+                ),
+            )
+            .await;
+            assert_eq!(status, StatusCode::NO_CONTENT);
+        }
+        let detail = dashboard_detail(&app, &owner, &dashboard_id).await;
+        assert!(detail["placementGroups"]
+            .as_array()
+            .expect("groups")
+            .is_empty());
+        assert_eq!(standalone_ids(&detail).len(), 4);
+    }
+
+    /// A group can lose a member without anyone touching a group endpoint. The
+    /// below-two rule has to hold on those routes too, or one-member groups
+    /// accumulate on real dashboards.
+    #[tokio::test]
+    async fn deleting_a_placement_or_its_connector_also_dissolves_an_undersized_group() {
+        let app = test_app().await;
+        let (owner, _) = setup_and_login(&app.router).await;
+
+        for route in ["placement", "connector"] {
+            let (dashboard_id, placements) = dashboard_with_placements(&app, &owner, 2).await;
+            let (status, group) = send(
+                &app.router,
+                post_json_auth(
+                    &format!("/dashboards/{dashboard_id}/placement-groups"),
+                    &owner,
+                    serde_json::json!({
+                        "placementIds": [&placements[0], &placements[1]],
+                        "positionX": 0,
+                        "positionY": 0,
+                        "width": 4,
+                        "height": 2,
+                    }),
+                ),
+            )
+            .await;
+            assert_eq!(status, StatusCode::CREATED, "{group:#}");
+
+            let detail = dashboard_detail(&app, &owner, &dashboard_id).await;
+            let connector_id = detail["placementGroups"][0]["members"][0]["connector"]["id"]
+                .as_str()
+                .expect("connector id")
+                .to_owned();
+
+            let request = if route == "placement" {
+                delete_auth(
+                    &format!("/dashboards/{dashboard_id}/placements/{}", placements[0]),
+                    &owner,
+                )
+            } else {
+                delete_auth(&format!("/connector-instances/{connector_id}"), &owner)
+            };
+            let (status, _) = send(&app.router, request).await;
+            assert_eq!(status, StatusCode::NO_CONTENT, "deleting via {route}");
+
+            let detail = dashboard_detail(&app, &owner, &dashboard_id).await;
+            assert!(
+                detail["placementGroups"]
+                    .as_array()
+                    .expect("groups")
+                    .is_empty(),
+                "deleting via {route} left an undersized group: {detail:#}"
+            );
+            assert_eq!(
+                standalone_ids(&detail).len(),
+                1,
+                "the surviving placement must be standalone again: {detail:#}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn placement_group_endpoints_need_the_editor_role() {
+        let app = test_app().await;
+        let (owner, _) = setup_and_login(&app.router).await;
+        let (dashboard_id, placements) = dashboard_with_placements(&app, &owner, 3).await;
+        let groups_url = format!("/dashboards/{dashboard_id}/placement-groups");
+
+        let editor = user_with_grants(&app.router, &owner, "editor", serde_json::json!([])).await;
+        let viewer = user_with_grants(&app.router, &owner, "viewer", serde_json::json!([])).await;
+        for (token, role) in [(&editor, "edit"), (&viewer, "view")] {
+            let target_id = current_user_id(&app.router, token).await;
+            let (status, share) = send(
+                &app.router,
+                post_json_auth(
+                    &format!("/dashboards/{dashboard_id}/shares"),
+                    &owner,
+                    serde_json::json!({
+                        "targetType": "user",
+                        "targetId": target_id,
+                        "role": role,
+                    }),
+                ),
+            )
+            .await;
+            assert_eq!(status, StatusCode::CREATED, "{share:#}");
+        }
+
+        // The editor can do all of it. Dashboard grouping is an ACL question,
+        // not an RBAC one: this user holds no `connectors.*` grant at all.
+        let (status, group) = send(
+            &app.router,
+            post_json_auth(
+                &groups_url,
+                &editor,
+                serde_json::json!({
+                    "placementIds": [&placements[0], &placements[1]],
+                    "positionX": 0,
+                    "positionY": 0,
+                    "width": 4,
+                    "height": 2,
+                }),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED, "{group:#}");
+        let group_id = group["id"].as_str().expect("group id").to_owned();
+
+        // The viewer can do none of it, and the refusal is 403 rather than 404
+        // — they can see this group, they simply may not change it.
+        for request in [
+            post_json_auth(
+                &groups_url,
+                &viewer,
+                serde_json::json!({
+                    "placementIds": [&placements[0], &placements[2]],
+                    "positionX": 0,
+                    "positionY": 0,
+                    "width": 4,
+                    "height": 2,
+                }),
+            ),
+            patch_json_auth(
+                &format!("{groups_url}/{group_id}"),
+                &viewer,
+                serde_json::json!({ "width": 5 }),
+            ),
+            post_json_auth(
+                &format!("{groups_url}/{group_id}/members"),
+                &viewer,
+                serde_json::json!({ "placementId": &placements[2] }),
+            ),
+            delete_auth(
+                &format!("{groups_url}/{group_id}/members/{}", placements[0]),
+                &viewer,
+            ),
+            delete_auth(&format!("{groups_url}/{group_id}"), &viewer),
+        ] {
+            let (status, body) = send(&app.router, request).await;
+            assert_eq!(status, StatusCode::FORBIDDEN, "{body:#}");
+        }
+
+        // A viewer still *reads* the grouping, and nothing above changed it.
+        let detail = dashboard_detail(&app, &viewer, &dashboard_id).await;
+        let groups = detail["placementGroups"].as_array().expect("groups");
+        assert_eq!(groups.len(), 1);
+        assert_eq!(groups[0]["width"], 4);
+        assert_eq!(
+            member_ids_of(&groups[0]),
+            vec![placements[0].clone(), placements[1].clone()]
+        );
+
+        // The editor finishes what the viewer could not start.
+        let (status, _) = send(
+            &app.router,
+            delete_auth(&format!("{groups_url}/{group_id}"), &editor),
+        )
+        .await;
+        assert_eq!(status, StatusCode::NO_CONTENT);
+    }
+
+    /* ---------------------------------------------------------------- */
     /* Permission enforcement                                            */
     /* ---------------------------------------------------------------- */
 

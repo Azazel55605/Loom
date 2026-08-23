@@ -5,7 +5,7 @@
 //! access-token claims. The caller still needs a valid JWT to identify them,
 //! but no `dashboards.*` permission exists or should be invented.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
@@ -42,11 +42,33 @@ struct DashboardRow {
 struct PlacementRow {
     id: String,
     connector_instance_id: String,
+    /// Retained while the placement is grouped, and not read by the renderer
+    /// then — the group's bounding box governs instead. This is the geometry
+    /// the placement returns to when it is ungrouped, which is what makes
+    /// ungrouping lossless.
     position_x: i64,
     position_y: i64,
     width: i64,
     height: i64,
     widget_bindings: String,
+    created_at: String,
+    /// `NULL` for a standalone placement. Set together with the row's
+    /// `group_order` or not at all — the table's CHECK constraint enforces
+    /// that, so this one column is enough to tell membership.
+    ///
+    /// `group_order` itself is deliberately not a field here: it is a sort key
+    /// the queries order by, never a value any Rust code compares.
+    group_id: Option<String>,
+}
+
+/// The stored columns of one placement group.
+#[derive(Debug, sqlx::FromRow)]
+struct PlacementGroupRow {
+    id: String,
+    position_x: i64,
+    position_y: i64,
+    width: i64,
+    height: i64,
     created_at: String,
 }
 
@@ -122,7 +144,12 @@ struct DashboardDetail {
     owner: DashboardOwner,
     role: DashboardRole,
     created_at: String,
+    /// **Standalone placements only.** A placement that is a member of a group
+    /// appears under `placement_groups`, never here, so a client renders one
+    /// list of tiles without having to reconstruct the grouping itself.
     placements: Vec<PlacementResponse>,
+    /// One entry per group, each carrying its ordered members.
+    placement_groups: Vec<PlacementGroupResponse>,
 }
 
 #[derive(Debug, Serialize)]
@@ -130,12 +157,34 @@ struct DashboardDetail {
 struct PlacementResponse {
     id: String,
     connector: ConnectorInstanceResponse,
+    /// The placement's *standalone* geometry. Ignored by the grid while this
+    /// placement is a group member, and preserved so ungrouping restores it.
     position_x: i64,
     position_y: i64,
     width: i64,
     height: i64,
     widget_bindings: Vec<WidgetBinding>,
     created_at: String,
+    /// The group this placement belongs to, or `null` when it stands alone.
+    /// Redundant for a member nested under its own group, and load-bearing for
+    /// the single-placement bodies that `POST` and `PATCH .../placements`
+    /// return, where there is no surrounding structure to say so.
+    group_id: Option<String>,
+}
+
+/// One combined tile: a box on the grid plus the placements drawn inside it.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct PlacementGroupResponse {
+    id: String,
+    position_x: i64,
+    position_y: i64,
+    width: i64,
+    height: i64,
+    created_at: String,
+    /// Two or more, in `group_order`. A group never has fewer — see
+    /// `dissolve_undersized_groups`.
+    members: Vec<PlacementResponse>,
 }
 
 #[derive(Debug, Serialize)]
@@ -178,6 +227,39 @@ pub(super) struct CreatePlacementRequest {
     width: i64,
     height: i64,
     widget_bindings: Option<Vec<WidgetBinding>>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(super) struct CreatePlacementGroupRequest {
+    /// At least two, all on this dashboard, none already grouped. Order here
+    /// becomes the initial `group_order`.
+    placement_ids: Vec<String>,
+    position_x: i64,
+    position_y: i64,
+    width: i64,
+    height: i64,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(super) struct UpdatePlacementGroupRequest {
+    position_x: Option<i64>,
+    position_y: Option<i64>,
+    width: Option<i64>,
+    height: Option<i64>,
+    /// Reorders the existing members. Must name exactly the current
+    /// membership — no additions, no removals, no duplicates. Adding and
+    /// removing members are their own endpoints, so a reorder that silently
+    /// did either would be a second way to do something with different
+    /// validation and a different cascade.
+    member_order: Option<Vec<String>>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(super) struct AddPlacementGroupMemberRequest {
+    placement_id: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -605,6 +687,9 @@ pub(super) async fn create_placement(
         height: request.height,
         widget_bindings: serialized,
         created_at,
+        // A new placement always stands alone. Grouping is a separate,
+        // retroactive action — see `create_placement_group`.
+        group_id: None,
     };
     match placement_response(&state, row).await {
         Ok(response) => (StatusCode::CREATED, Json(response)).into_response(),
@@ -626,7 +711,7 @@ pub(super) async fn update_placement(
 
     let existing = sqlx::query_as::<_, PlacementRow>(
         "SELECT id, connector_instance_id, position_x, position_y, width, height, \
-                widget_bindings, created_at \
+                widget_bindings, created_at, group_id \
          FROM dashboard_placements WHERE id = ? AND dashboard_id = ?",
     )
     .bind(&placement_id)
@@ -720,13 +805,614 @@ pub(super) async fn delete_placement(
         .execute(&state.pool)
         .await;
     match deleted {
-        Ok(result) if result.rows_affected() == 0 => ErrorBody::message(
-            StatusCode::NOT_FOUND,
-            format!("no such dashboard placement: {placement_id}"),
-        ),
-        Ok(_) => StatusCode::NO_CONTENT.into_response(),
-        Err(error) => internal_error("deleting a dashboard placement", error),
+        Ok(result) if result.rows_affected() == 0 => {
+            return ErrorBody::message(
+                StatusCode::NOT_FOUND,
+                format!("no such dashboard placement: {placement_id}"),
+            )
+        }
+        Ok(_) => {}
+        Err(error) => return internal_error("deleting a dashboard placement", error),
     }
+
+    // Deleting a placement is one of the ways a group loses a member, so the
+    // below-two rule applies here exactly as it does on the group's own member
+    // endpoint. Removing half of a pair through this route and through that one
+    // must leave the same dashboard behind.
+    if let Err(error) = dissolve_undersized_groups(&state.pool).await {
+        return internal_error("dissolving an undersized placement group", error);
+    }
+
+    StatusCode::NO_CONTENT.into_response()
+}
+
+/* ------------------------------------------------------------------ */
+/* Placement groups                                                    */
+/* ------------------------------------------------------------------ */
+
+/// `POST /dashboards/{id}/placement-groups` — Editor or Owner.
+///
+/// Combines two or more existing placements into one tile. Retroactive by
+/// design: nothing about how a placement was created decides whether it can be
+/// grouped later, and members need not share a connector type — the group
+/// knows only that it holds placements.
+///
+/// Members keep their own `positionX`/`positionY`/`width`/`height`. Those are
+/// ignored by the grid while grouped and are what each placement returns to
+/// when it is ungrouped, which is what makes grouping a reversible experiment
+/// rather than a decision.
+///
+/// Rejects, all as 400 because all of them are failures of the request body:
+/// fewer than two ids, a repeated id, an id that is not a placement on this
+/// dashboard, or an id already in a group. The last names the offenders — "a
+/// placement can only be in one group" is not actionable without knowing which.
+pub(super) async fn create_placement_group(
+    caller: AuthenticatedUser,
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Json(request): Json<CreatePlacementGroupRequest>,
+) -> Response {
+    if let Err(response) = require_role(&state.pool, caller.id(), &id, DashboardRole::Editor).await
+    {
+        return *response;
+    }
+
+    if let Some(response) = reject_bad_box(request.width, request.height) {
+        return response;
+    }
+
+    let mut seen: HashSet<&str> = HashSet::new();
+    let mut duplicates: Vec<&str> = Vec::new();
+    for placement_id in &request.placement_ids {
+        if !seen.insert(placement_id.as_str()) {
+            duplicates.push(placement_id);
+        }
+    }
+    if !duplicates.is_empty() {
+        duplicates.sort_unstable();
+        duplicates.dedup();
+        return bad_request(format!(
+            "placementIds repeats {}; a placement can appear in a group once",
+            duplicates.join(", ")
+        ));
+    }
+
+    // A group of one is the placement it contains, drawn with an extra layer of
+    // indirection. Refused here rather than tolerated, because the alternative
+    // is a tile whose behaviour differs from a standalone placement in no
+    // observable way and which the auto-dissolve rule would delete anyway.
+    if request.placement_ids.len() < 2 {
+        return bad_request("a placement group needs at least 2 placements");
+    }
+
+    let (unknown, already_grouped) =
+        match classify_candidates(&state, &id, &request.placement_ids).await {
+            Ok(split) => split,
+            Err(response) => return *response,
+        };
+    if let Some(response) = reject_unusable_candidates(&unknown, &already_grouped) {
+        return response;
+    }
+
+    let group_id = Uuid::new_v4().to_string();
+    let created_at = Utc::now().to_rfc3339();
+
+    // One transaction: a group row whose members were not all updated is a
+    // group that is instantly undersized, and a half-written membership is
+    // exactly the state the auto-dissolve rule exists to make impossible.
+    let mut tx = match state.pool.begin().await {
+        Ok(tx) => tx,
+        Err(error) => return internal_error("starting a placement group transaction", error),
+    };
+
+    if let Err(error) = sqlx::query(
+        "INSERT INTO dashboard_placement_groups \
+         (id, dashboard_id, position_x, position_y, width, height, created_at) \
+         VALUES (?, ?, ?, ?, ?, ?, ?)",
+    )
+    .bind(&group_id)
+    .bind(&id)
+    .bind(request.position_x)
+    .bind(request.position_y)
+    .bind(request.width)
+    .bind(request.height)
+    .bind(&created_at)
+    .execute(&mut *tx)
+    .await
+    {
+        return internal_error("creating a placement group", error);
+    }
+
+    // Input order is the initial order. No collision is possible: every one of
+    // these placements was just confirmed ungrouped.
+    for (index, placement_id) in request.placement_ids.iter().enumerate() {
+        if let Err(error) = sqlx::query(
+            "UPDATE dashboard_placements SET group_id = ?, group_order = ? \
+             WHERE id = ? AND dashboard_id = ?",
+        )
+        .bind(&group_id)
+        .bind(index as i64)
+        .bind(placement_id)
+        .bind(&id)
+        .execute(&mut *tx)
+        .await
+        {
+            return internal_error("adding a placement to its group", error);
+        }
+    }
+
+    if let Err(error) = tx.commit().await {
+        return internal_error("committing a placement group", error);
+    }
+
+    match group_response(&state, &id, &group_id).await {
+        Ok(Some(group)) => (StatusCode::CREATED, Json(group)).into_response(),
+        Ok(None) => internal_error("reloading a placement group", sqlx::Error::RowNotFound),
+        Err(response) => *response,
+    }
+}
+
+/// `PATCH /dashboards/{id}/placement-groups/{group_id}` — Editor or Owner.
+///
+/// Moves or resizes the group tile itself, and/or reorders its members. Every
+/// field is optional; an empty body is a no-op that returns the group as it
+/// stands.
+///
+/// `memberOrder` must name **exactly** the current membership — same ids, no
+/// duplicates, nothing added, nothing missing. Reordering is not a back door
+/// for joining or leaving a group: those have their own endpoints, with their
+/// own validation and, in the leaving case, a cascade this one must not
+/// silently trigger.
+pub(super) async fn update_placement_group(
+    caller: AuthenticatedUser,
+    State(state): State<AppState>,
+    Path((id, group_id)): Path<(String, String)>,
+    Json(request): Json<UpdatePlacementGroupRequest>,
+) -> Response {
+    if let Err(response) = require_role(&state.pool, caller.id(), &id, DashboardRole::Editor).await
+    {
+        return *response;
+    }
+
+    let existing = match load_group_row(&state, &id, &group_id).await {
+        Ok(Some(row)) => row,
+        Ok(None) => return no_such_group(&group_id),
+        Err(response) => return *response,
+    };
+
+    let width = request.width.unwrap_or(existing.width);
+    let height = request.height.unwrap_or(existing.height);
+    if let Some(response) = reject_bad_box(width, height) {
+        return response;
+    }
+    let position_x = request.position_x.unwrap_or(existing.position_x);
+    let position_y = request.position_y.unwrap_or(existing.position_y);
+
+    let reorder = match request.member_order {
+        None => None,
+        Some(requested) => {
+            let current = match member_ids(&state, &group_id).await {
+                Ok(ids) => ids,
+                Err(response) => return *response,
+            };
+            let requested_set: HashSet<&str> = requested.iter().map(String::as_str).collect();
+            let current_set: HashSet<&str> = current.iter().map(String::as_str).collect();
+            if requested.len() != requested_set.len() || requested_set != current_set {
+                return bad_request(format!(
+                    "memberOrder must list exactly the group's current {} member(s), each once",
+                    current.len()
+                ));
+            }
+            Some(requested)
+        }
+    };
+
+    let mut tx = match state.pool.begin().await {
+        Ok(tx) => tx,
+        Err(error) => return internal_error("starting a placement group transaction", error),
+    };
+
+    if let Err(error) = sqlx::query(
+        "UPDATE dashboard_placement_groups \
+         SET position_x = ?, position_y = ?, width = ?, height = ? \
+         WHERE id = ? AND dashboard_id = ?",
+    )
+    .bind(position_x)
+    .bind(position_y)
+    .bind(width)
+    .bind(height)
+    .bind(&group_id)
+    .bind(&id)
+    .execute(&mut *tx)
+    .await
+    {
+        return internal_error("updating a placement group", error);
+    }
+
+    if let Some(order) = reorder {
+        // Two passes, because `(group_id, group_order)` is uniquely indexed and
+        // that index is checked per statement, not at commit. Any permutation
+        // that is not the identity would collide part-way through a single
+        // pass. The interim values are negative, which the final 0..n-1 values
+        // can never be, so the two passes cannot collide with each other.
+        for (index, placement_id) in order.iter().enumerate() {
+            if let Err(error) = sqlx::query(
+                "UPDATE dashboard_placements SET group_order = ? WHERE id = ? AND group_id = ?",
+            )
+            .bind(-(index as i64) - 1)
+            .bind(placement_id)
+            .bind(&group_id)
+            .execute(&mut *tx)
+            .await
+            {
+                return internal_error("reordering placement group members", error);
+            }
+        }
+        for (index, placement_id) in order.iter().enumerate() {
+            if let Err(error) = sqlx::query(
+                "UPDATE dashboard_placements SET group_order = ? WHERE id = ? AND group_id = ?",
+            )
+            .bind(index as i64)
+            .bind(placement_id)
+            .bind(&group_id)
+            .execute(&mut *tx)
+            .await
+            {
+                return internal_error("reordering placement group members", error);
+            }
+        }
+    }
+
+    if let Err(error) = tx.commit().await {
+        return internal_error("committing a placement group update", error);
+    }
+
+    match group_response(&state, &id, &group_id).await {
+        Ok(Some(group)) => Json(group).into_response(),
+        Ok(None) => no_such_group(&group_id),
+        Err(response) => *response,
+    }
+}
+
+/// `POST /dashboards/{id}/placement-groups/{group_id}/members` — Editor or Owner.
+///
+/// Appends one standalone placement to the group, after the current last
+/// member. A placement already in *another* group is refused rather than
+/// moved: leaving a group can dissolve it, and a request that says "add" should
+/// not be the thing that deletes a different tile. Ungroup it first.
+pub(super) async fn add_placement_group_member(
+    caller: AuthenticatedUser,
+    State(state): State<AppState>,
+    Path((id, group_id)): Path<(String, String)>,
+    Json(request): Json<AddPlacementGroupMemberRequest>,
+) -> Response {
+    if let Err(response) = require_role(&state.pool, caller.id(), &id, DashboardRole::Editor).await
+    {
+        return *response;
+    }
+
+    match load_group_row(&state, &id, &group_id).await {
+        Ok(Some(_)) => {}
+        Ok(None) => return no_such_group(&group_id),
+        Err(response) => return *response,
+    }
+
+    let candidates = std::slice::from_ref(&request.placement_id);
+    let (unknown, already_grouped) = match classify_candidates(&state, &id, candidates).await {
+        Ok(split) => split,
+        Err(response) => return *response,
+    };
+    if let Some(response) = reject_unusable_candidates(&unknown, &already_grouped) {
+        return response;
+    }
+
+    // Append past the current maximum rather than at the member count: removals
+    // leave gaps, and `count` would land on an order that is already taken.
+    let next_order = sqlx::query_scalar::<_, Option<i64>>(
+        "SELECT MAX(group_order) FROM dashboard_placements WHERE group_id = ?",
+    )
+    .bind(&group_id)
+    .fetch_one(&state.pool)
+    .await;
+    let next_order = match next_order {
+        Ok(highest) => highest.unwrap_or(-1) + 1,
+        Err(error) => return internal_error("reading placement group ordering", error),
+    };
+
+    if let Err(error) = sqlx::query(
+        "UPDATE dashboard_placements SET group_id = ?, group_order = ? \
+         WHERE id = ? AND dashboard_id = ?",
+    )
+    .bind(&group_id)
+    .bind(next_order)
+    .bind(&request.placement_id)
+    .bind(&id)
+    .execute(&state.pool)
+    .await
+    {
+        return internal_error("adding a placement to its group", error);
+    }
+
+    match group_response(&state, &id, &group_id).await {
+        Ok(Some(group)) => Json(group).into_response(),
+        Ok(None) => no_such_group(&group_id),
+        Err(response) => *response,
+    }
+}
+
+/// `DELETE /dashboards/{id}/placement-groups/{group_id}/members/{placement_id}`
+/// — Editor or Owner.
+///
+/// Removes one member. Its `group_id`/`group_order` are cleared and it returns
+/// to standalone at the position and size it has been carrying all along.
+///
+/// # This can delete the group
+///
+/// **If the removal leaves the group with fewer than two members, the group is
+/// dissolved outright**: any remaining member is also returned to standalone
+/// and the group row is deleted. Removing one member of a pair therefore
+/// un-groups *both* placements and destroys the tile, which is not what
+/// "remove a member" sounds like — it is what it has to mean, because a group
+/// of one is not a group.
+///
+/// So the response is 204 and carries nothing. A caller cannot patch its local
+/// state from a body here: the number of tiles on the dashboard may have
+/// changed, and a placement it was not asking about may have moved. Re-read
+/// `GET /dashboards/{id}`.
+pub(super) async fn delete_placement_group_member(
+    caller: AuthenticatedUser,
+    State(state): State<AppState>,
+    Path((id, group_id, placement_id)): Path<(String, String, String)>,
+) -> Response {
+    if let Err(response) = require_role(&state.pool, caller.id(), &id, DashboardRole::Editor).await
+    {
+        return *response;
+    }
+
+    // Scoped to the dashboard *and* the group, so a placement that exists but
+    // is not in this group is a 404 on this URL rather than a silent no-op.
+    let removed = sqlx::query(
+        "UPDATE dashboard_placements SET group_id = NULL, group_order = NULL \
+         WHERE id = ? AND dashboard_id = ? AND group_id = ?",
+    )
+    .bind(&placement_id)
+    .bind(&id)
+    .bind(&group_id)
+    .execute(&state.pool)
+    .await;
+    match removed {
+        Ok(result) if result.rows_affected() == 0 => {
+            return ErrorBody::message(
+                StatusCode::NOT_FOUND,
+                format!("placement {placement_id} is not a member of group {group_id}"),
+            )
+        }
+        Ok(_) => {}
+        Err(error) => return internal_error("removing a placement group member", error),
+    }
+
+    if let Err(error) = dissolve_undersized_groups(&state.pool).await {
+        return internal_error("dissolving an undersized placement group", error);
+    }
+
+    StatusCode::NO_CONTENT.into_response()
+}
+
+/// `DELETE /dashboards/{id}/placement-groups/{group_id}` — Editor or Owner.
+///
+/// Splits the tile apart in one action: every member returns to standalone at
+/// its preserved position and size, and the group row is deleted. No placement
+/// is deleted.
+///
+/// Distinct from removing members one at a time, which for a group of three
+/// would take two requests and dissolve the group on the second anyway.
+pub(super) async fn delete_placement_group(
+    caller: AuthenticatedUser,
+    State(state): State<AppState>,
+    Path((id, group_id)): Path<(String, String)>,
+) -> Response {
+    if let Err(response) = require_role(&state.pool, caller.id(), &id, DashboardRole::Editor).await
+    {
+        return *response;
+    }
+
+    match load_group_row(&state, &id, &group_id).await {
+        Ok(Some(_)) => {}
+        Ok(None) => return no_such_group(&group_id),
+        Err(response) => return *response,
+    }
+
+    let mut tx = match state.pool.begin().await {
+        Ok(tx) => tx,
+        Err(error) => return internal_error("starting a placement group transaction", error),
+    };
+
+    // Membership first. The foreign key has no `ON DELETE` action, so deleting
+    // the group while a member still references it fails rather than orphaning
+    // anything — the order of these two statements is load-bearing.
+    if let Err(error) = sqlx::query(
+        "UPDATE dashboard_placements SET group_id = NULL, group_order = NULL WHERE group_id = ?",
+    )
+    .bind(&group_id)
+    .execute(&mut *tx)
+    .await
+    {
+        return internal_error("ungrouping placements", error);
+    }
+    if let Err(error) =
+        sqlx::query("DELETE FROM dashboard_placement_groups WHERE id = ? AND dashboard_id = ?")
+            .bind(&group_id)
+            .bind(&id)
+            .execute(&mut *tx)
+            .await
+    {
+        return internal_error("deleting a placement group", error);
+    }
+
+    if let Err(error) = tx.commit().await {
+        return internal_error("committing a placement group deletion", error);
+    }
+
+    StatusCode::NO_CONTENT.into_response()
+}
+
+/// Deletes every group left with fewer than two members, returning each
+/// survivor to standalone.
+///
+/// The rule is enforced here, in one place, rather than at each call site,
+/// because membership can fall below two through more than the obvious route:
+///
+/// - a member is removed from the group;
+/// - a member placement is deleted from the dashboard outright;
+/// - the **connector instance** behind a member is deleted, which cascades its
+///   placements away without this module being involved at all.
+///
+/// That last one is why `connectors::delete_instance` calls this too. A rule
+/// that held on two of its three paths would leave one-member groups on real
+/// dashboards, and they would be invisible until someone wondered why a tile
+/// could not be dragged.
+///
+/// Returns the number of groups dissolved, which is only used by tests — the
+/// endpoints treat "nothing to do" and "cleaned something up" identically.
+pub(super) async fn dissolve_undersized_groups(pool: &SqlitePool) -> Result<u64, sqlx::Error> {
+    let undersized = sqlx::query_scalar::<_, String>(
+        "SELECT g.id FROM dashboard_placement_groups g \
+         LEFT JOIN dashboard_placements p ON p.group_id = g.id \
+         GROUP BY g.id HAVING COUNT(p.id) < 2",
+    )
+    .fetch_all(pool)
+    .await?;
+
+    if undersized.is_empty() {
+        return Ok(0);
+    }
+
+    let mut tx = pool.begin().await?;
+    for group_id in &undersized {
+        sqlx::query(
+            "UPDATE dashboard_placements SET group_id = NULL, group_order = NULL \
+             WHERE group_id = ?",
+        )
+        .bind(group_id)
+        .execute(&mut *tx)
+        .await?;
+        sqlx::query("DELETE FROM dashboard_placement_groups WHERE id = ?")
+            .bind(group_id)
+            .execute(&mut *tx)
+            .await?;
+    }
+    tx.commit().await?;
+
+    Ok(undersized.len() as u64)
+}
+
+/// Sorts requested placement ids into "not a placement on this dashboard" and
+/// "already in a group", for the two endpoints that take them from a body.
+async fn classify_candidates<'a>(
+    state: &AppState,
+    dashboard_id: &str,
+    placement_ids: &'a [String],
+) -> RouteResult<(Vec<&'a str>, Vec<&'a str>)> {
+    let mut unknown = Vec::new();
+    let mut already_grouped = Vec::new();
+
+    // One query per id rather than a built-up `IN (?, ?, …)`. A group is a
+    // handful of tiles, and interpolating a list into SQL to save a few
+    // round-trips on a request that happens when a person clicks a button is
+    // not a trade worth making.
+    for placement_id in placement_ids {
+        let existing = sqlx::query_scalar::<_, Option<String>>(
+            "SELECT group_id FROM dashboard_placements WHERE id = ? AND dashboard_id = ?",
+        )
+        .bind(placement_id)
+        .bind(dashboard_id)
+        .fetch_optional(&state.pool)
+        .await
+        .map_err(|error| Box::new(internal_error("checking a placement's group", error)))?;
+
+        match existing {
+            None => unknown.push(placement_id.as_str()),
+            Some(Some(_)) => already_grouped.push(placement_id.as_str()),
+            Some(None) => {}
+        }
+    }
+
+    Ok((unknown, already_grouped))
+}
+
+/// The shared 400 for ids that cannot be grouped. Both lists are named, because
+/// "some placements are unusable" sends the caller looking through all of them.
+fn reject_unusable_candidates(unknown: &[&str], already_grouped: &[&str]) -> Option<Response> {
+    let mut problems: Vec<String> = Vec::new();
+    if !unknown.is_empty() {
+        problems.push(format!(
+            "not placements on this dashboard: {}",
+            unknown.join(", ")
+        ));
+    }
+    if !already_grouped.is_empty() {
+        problems.push(format!(
+            "already in a group: {} (ungroup first — a placement can be in one group at a time)",
+            already_grouped.join(", ")
+        ));
+    }
+    (!problems.is_empty()).then(|| bad_request(problems.join("; ")))
+}
+
+/// Rejects a non-positive tile. The table CHECKs this too; catching it here is
+/// what makes it a 400 naming the field instead of a 500 naming a constraint.
+fn reject_bad_box(width: i64, height: i64) -> Option<Response> {
+    (width < 1 || height < 1)
+        .then(|| bad_request("a placement group's width and height must both be at least 1"))
+}
+
+async fn load_group_row(
+    state: &AppState,
+    dashboard_id: &str,
+    group_id: &str,
+) -> RouteResult<Option<PlacementGroupRow>> {
+    sqlx::query_as::<_, PlacementGroupRow>(
+        "SELECT id, position_x, position_y, width, height, created_at \
+         FROM dashboard_placement_groups WHERE id = ? AND dashboard_id = ?",
+    )
+    .bind(group_id)
+    .bind(dashboard_id)
+    .fetch_optional(&state.pool)
+    .await
+    .map_err(|error| Box::new(internal_error("loading a placement group", error)))
+}
+
+/// The group's current members, in order.
+async fn member_ids(state: &AppState, group_id: &str) -> RouteResult<Vec<String>> {
+    sqlx::query_scalar::<_, String>(
+        "SELECT id FROM dashboard_placements WHERE group_id = ? ORDER BY group_order",
+    )
+    .bind(group_id)
+    .fetch_all(&state.pool)
+    .await
+    .map_err(|error| Box::new(internal_error("listing placement group members", error)))
+}
+
+/// Rebuilds one group's full response, members included.
+///
+/// Goes back through `load_placements` rather than assembling the group from
+/// what the handler already had in hand: the response a mutation returns and
+/// the response a subsequent `GET` returns are then the same code, so they
+/// cannot disagree about ordering or about which placements are members.
+async fn group_response(
+    state: &AppState,
+    dashboard_id: &str,
+    group_id: &str,
+) -> RouteResult<Option<PlacementGroupResponse>> {
+    let (_, groups) = load_placements(state, dashboard_id).await?;
+    Ok(groups.into_iter().find(|group| group.id == group_id))
+}
+
+fn no_such_group(group_id: &str) -> Response {
+    ErrorBody::message(
+        StatusCode::NOT_FOUND,
+        format!("no such dashboard placement group: {group_id}"),
+    )
 }
 
 async fn dashboard_detail(state: &AppState, id: &str, role: DashboardRole) -> Response {
@@ -743,8 +1429,8 @@ async fn dashboard_detail(state: &AppState, id: &str, role: DashboardRole) -> Re
         Err(error) => return internal_error("loading a dashboard", error),
     };
 
-    let placements = match load_placements(state, id).await {
-        Ok(placements) => placements,
+    let (placements, placement_groups) = match load_placements(state, id).await {
+        Ok(split) => split,
         Err(response) => return *response,
     };
     Json(DashboardDetail {
@@ -757,30 +1443,71 @@ async fn dashboard_detail(state: &AppState, id: &str, role: DashboardRole) -> Re
         role,
         created_at: row.created_at,
         placements,
+        placement_groups,
     })
     .into_response()
 }
 
+/// Loads one dashboard's tiles, already separated into standalone placements
+/// and groups.
+///
+/// The split happens here rather than in the client because the server is the
+/// only party that knows it: a flat array plus a `groupId` on each entry would
+/// make every client re-derive the same partition, and get the member ordering
+/// wrong in a different way each time.
 async fn load_placements(
     state: &AppState,
     dashboard_id: &str,
-) -> RouteResult<Vec<PlacementResponse>> {
+) -> RouteResult<(Vec<PlacementResponse>, Vec<PlacementGroupResponse>)> {
+    // Standalone placements keep the ordering they have always had.
+    // `group_order` is the tiebreak for members and is NULL here, so one query
+    // serves both: the ordering clause is simply inert for the standalone half.
     let rows = sqlx::query_as::<_, PlacementRow>(
         "SELECT id, connector_instance_id, position_x, position_y, width, height, \
-                widget_bindings, created_at \
+                widget_bindings, created_at, group_id \
          FROM dashboard_placements WHERE dashboard_id = ? \
-         ORDER BY position_y, position_x, created_at",
+         ORDER BY group_order, position_y, position_x, created_at",
     )
     .bind(dashboard_id)
     .fetch_all(&state.pool)
     .await
     .map_err(|error| Box::new(internal_error("listing dashboard placements", error)))?;
 
-    let mut placements = Vec::with_capacity(rows.len());
+    let group_rows = sqlx::query_as::<_, PlacementGroupRow>(
+        "SELECT id, position_x, position_y, width, height, created_at \
+         FROM dashboard_placement_groups WHERE dashboard_id = ? \
+         ORDER BY position_y, position_x, created_at",
+    )
+    .bind(dashboard_id)
+    .fetch_all(&state.pool)
+    .await
+    .map_err(|error| Box::new(internal_error("listing dashboard placement groups", error)))?;
+
+    let mut standalone = Vec::new();
+    let mut members: HashMap<String, Vec<PlacementResponse>> = HashMap::new();
     for row in rows {
-        placements.push(placement_response(state, row).await?);
+        let group_id = row.group_id.clone();
+        let placement = placement_response(state, row).await?;
+        match group_id {
+            Some(group_id) => members.entry(group_id).or_default().push(placement),
+            None => standalone.push(placement),
+        }
     }
-    Ok(placements)
+
+    let groups = group_rows
+        .into_iter()
+        .map(|group| PlacementGroupResponse {
+            members: members.remove(&group.id).unwrap_or_default(),
+            id: group.id,
+            position_x: group.position_x,
+            position_y: group.position_y,
+            width: group.width,
+            height: group.height,
+            created_at: group.created_at,
+        })
+        .collect();
+
+    Ok((standalone, groups))
 }
 
 async fn placement_response(state: &AppState, row: PlacementRow) -> RouteResult<PlacementResponse> {
@@ -804,6 +1531,7 @@ async fn placement_response(state: &AppState, row: PlacementRow) -> RouteResult<
         height: row.height,
         widget_bindings: bindings,
         created_at: row.created_at,
+        group_id: row.group_id,
     })
 }
 
