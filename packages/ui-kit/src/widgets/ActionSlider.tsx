@@ -1,9 +1,14 @@
 import * as React from "react";
 
 import { Label } from "@loom/ui-kit/components/ui/label";
+import { Skeleton } from "@loom/ui-kit/components/ui/skeleton";
 import { Slider } from "@loom/ui-kit/components/ui/slider";
 import { cn } from "@loom/ui-kit/lib/utils";
 import { configNumber, configString, type ActionWidgetProps } from "@loom/ui-kit/widgets/types";
+
+export function ActionSliderSkeleton({ className }: { className?: string }) {
+  return <div className={cn("space-y-2", className)}><div className="flex justify-between"><Skeleton className="h-3 w-20" /><Skeleton className="h-4 w-6" /></div><Skeleton className="h-4 w-full rounded-full" /></div>;
+}
 
 /**
  * A slider that runs an action with a number.

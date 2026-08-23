@@ -282,6 +282,15 @@ standard build and CI do this automatically):
 pnpm --filter mobile android:configure
 ```
 
+The configure step installs Loom's legacy, round, and adaptive launcher icons
+and removes the unused Android/Tauri template artwork. It also applies Android's
+four-way `fullUser` orientation mode while respecting the device rotation-lock
+setting. Finally, it removes the previous generated debug APK before packaging;
+otherwise repeated incremental Gradle builds can retain an unreferenced copy of
+the native library and nearly double the artifact size. Android's version code
+must be incremented through `versions.json` for each distributed APK so package
+installers do not reuse metadata cached for an older build.
+
 The policy permits HTTP because a user-selected homelab server may not have
 TLS, and trusts both system CAs and CAs the device owner explicitly installed.
 It does not bypass certificate or hostname verification. Prefer HTTPS whenever

@@ -9,8 +9,10 @@ import {
   type PermissionGrant,
 } from "@loom/ui-kit/lib/api";
 import { ApiClientProvider } from "@loom/ui-kit/lib/api-context";
+import { BootErrorScreen, BootScreen } from "@loom/ui-kit/components/BootScreen";
 import { ConnectorStatusSocket } from "@loom/ui-kit/lib/connector-socket";
 import type { StoredTokens, TokenStorageAdapter } from "@loom/ui-kit/lib/token-store";
+import { useConnectionBootstrap } from "@loom/ui-kit/lib/use-connection-bootstrap";
 import type { WebSocketTransport } from "@loom/ui-kit/lib/websocket-transport";
 
 const PROACTIVE_REFRESH_BUFFER_MS = 60_000;
@@ -41,12 +43,16 @@ export function AuthProvider({
   httpTransport,
   webSocketTransport,
   tokenStorage,
+  bootstrapBaseUrl,
+  onChangeServer,
   children,
 }: {
   baseUrlProvider: BaseUrlProvider;
   httpTransport?: HttpTransport;
   webSocketTransport: WebSocketTransport;
   tokenStorage: TokenStorageAdapter;
+  bootstrapBaseUrl: string;
+  onChangeServer?: () => void | Promise<void>;
   children: React.ReactNode;
 }) {
   const [client] = React.useState(() =>
@@ -56,6 +62,11 @@ export function AuthProvider({
     () => new ConnectorStatusSocket(client, webSocketTransport),
   );
   const [runtimeReady, setRuntimeReady] = React.useState(false);
+  const healthCheck = React.useCallback(
+    async (signal?: AbortSignal) => (await client.getHealth(signal)).status === "ok",
+    [client],
+  );
+  const bootstrap = useConnectionBootstrap(bootstrapBaseUrl, healthCheck);
   const session = React.useSyncExternalStore<StoredTokens | null>(
     client.tokenStore.subscribe,
     client.tokenStore.getSnapshot,
@@ -66,13 +77,14 @@ export function AuthProvider({
 
   React.useEffect(() => {
     let cancelled = false;
+    if (bootstrap.phase !== "connected") return;
     void client.initialize().finally(() => {
       if (!cancelled) setRuntimeReady(true);
     });
     return () => {
       cancelled = true;
     };
-  }, [client]);
+  }, [bootstrap.phase, client]);
 
   // Deliberately **not** disposed from an effect cleanup.
   //
@@ -172,6 +184,20 @@ export function AuthProvider({
     }),
     [session, user, isRestoring, signIn, signOut, refresh],
   );
+
+  if (bootstrap.phase === "idle" || bootstrap.phase === "checking") {
+    return <BootScreen baseUrl={bootstrapBaseUrl} />;
+  }
+  if (bootstrap.phase === "error") {
+    return (
+      <BootErrorScreen
+        baseUrl={bootstrapBaseUrl}
+        message={bootstrap.error}
+        onRetry={bootstrap.retry}
+        onChangeServer={onChangeServer}
+      />
+    );
+  }
 
   return (
     <ApiClientProvider client={client} connectorSocket={connectorSocket}>

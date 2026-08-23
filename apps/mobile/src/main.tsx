@@ -5,6 +5,9 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import App from "@/App";
 import { AccentThemeProvider } from "@loom/ui-kit/components/AccentThemeProvider";
 import "@loom/ui-kit/styles.css";
+import "@/mobile.css";
+
+document.documentElement.classList.add("mobile-platform");
 
 const queryClient = new QueryClient({
   defaultOptions: {

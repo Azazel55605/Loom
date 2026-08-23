@@ -1,9 +1,14 @@
 import { cn } from "@loom/ui-kit/lib/utils";
+import { Skeleton } from "@loom/ui-kit/components/ui/skeleton";
 import {
   configStringMap,
   formatReading,
   type DisplayWidgetProps,
 } from "@loom/ui-kit/widgets/types";
+
+export function StatusDotSkeleton({ className }: { className?: string }) {
+  return <div className={cn("space-y-2", className)}><div className="flex items-center gap-2"><Skeleton className="h-3 w-3 rounded-full" /><Skeleton className="h-4 w-20" /></div><Skeleton className="h-3 w-14" /></div>;
+}
 
 /** The tokens a `config.colorMap` entry may name. Deliberately the status
  *  palette and nothing else: a dot is a status indicator, and letting a binding

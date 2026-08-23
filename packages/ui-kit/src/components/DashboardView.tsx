@@ -188,7 +188,9 @@ export function DashboardView({
   const [bindingsFor, setBindingsFor] = React.useState<DashboardPlacement | null>(null);
   const [removing, setRemoving] = React.useState<DashboardPlacement | null>(null);
   const [live, setLive] = React.useState<Record<string, LiveStatus>>({});
-  const { width, containerRef, mounted } = useContainerWidth({ measureBeforeMount: true });
+  const { width, containerRef, mounted, measureWidth } = useContainerWidth({
+    measureBeforeMount: true,
+  });
 
   const dashboard = useQuery({
     queryKey: dashboardQueryKey(dashboardId),
@@ -209,6 +211,17 @@ export function DashboardView({
     () => [...new Set(placements.map((placement) => placement.connector.id))],
     [placements],
   );
+
+  React.useEffect(() => {
+    if (dashboard.data === undefined || placements.length === 0) return;
+    // The first render returns DashboardViewSkeleton before the measured grid
+    // container exists. useContainerWidth's mount effect therefore observes a
+    // null ref and cannot mark itself mounted. Measure again once the dashboard
+    // response has caused that container to enter the DOM; without this, a
+    // cold direct navigation stays on the grid skeleton until the view is
+    // unmounted and revisited with dashboard detail already in React Query.
+    measureWidth();
+  }, [dashboard.data, measureWidth, placements.length]);
 
   React.useEffect(() => {
     if (instanceIds.length === 0) return;

@@ -99,7 +99,7 @@ export function AppShell({
 
   return (
     <div className="app-canvas min-h-screen bg-background text-foreground">
-      <header className="surface-elevated sticky top-0 z-10 border-b border-border">
+      <header className="app-header surface-elevated sticky top-0 z-10 border-b border-border">
         <div className="flex h-14 w-full items-center gap-3 px-4">
           {sidebar === undefined ? null : (
             <>
@@ -156,15 +156,30 @@ export function AppShell({
         </div>
       </header>
 
+      {sidebar === undefined ? null : (
+        <Button
+          type="button"
+          variant="secondary"
+          size="icon"
+          className="mobile-landscape-navigation-trigger hidden"
+          aria-label="Open navigation"
+          aria-expanded={mobileSidebarOpen}
+          aria-controls="mobile-app-sidebar"
+          onClick={() => setMobileSidebarOpen(true)}
+        >
+          <Menu aria-hidden="true" />
+        </Button>
+      )}
+
       {sidebar === undefined ? (
         <main className="mx-auto w-full max-w-5xl px-4 py-8">{children}</main>
       ) : (
-        <div className="flex w-full md:min-h-[calc(100vh-3.5rem)]">
+        <div className="app-shell-body flex w-full md:min-h-[calc(100vh-3.5rem)]">
           <Sheet open={mobileSidebarOpen} onOpenChange={setMobileSidebarOpen}>
             <SheetContent
               id="mobile-app-sidebar"
               side="left"
-              className="flex w-[min(20rem,85vw)] flex-col p-0 md:hidden"
+              className="mobile-app-navigation-sheet flex w-[min(20rem,85vw)] flex-col p-0 md:hidden"
             >
               <SheetTitle className="sr-only">Navigation</SheetTitle>
               <div className="min-h-0 flex-1 overflow-y-auto pt-12">{sidebar}</div>
@@ -181,7 +196,7 @@ export function AppShell({
           >
             {sidebarCollapsed ? null : sidebar}
           </aside>
-          <main className="min-w-0 flex-1">
+          <main className="app-shell-main min-w-0 flex-1">
             <div className="mx-auto w-full max-w-7xl px-4 py-8 md:px-6">{children}</div>
           </main>
         </div>

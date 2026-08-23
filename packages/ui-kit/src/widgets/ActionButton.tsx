@@ -6,9 +6,14 @@ import {
   takesParameters,
 } from "@loom/ui-kit/components/ActionParamsDialog";
 import { Button } from "@loom/ui-kit/components/ui/button";
+import { Skeleton } from "@loom/ui-kit/components/ui/skeleton";
 import { cn } from "@loom/ui-kit/lib/utils";
 import type { ConnectorAction } from "@loom/ui-kit/lib/api";
 import type { ActionWidgetProps } from "@loom/ui-kit/widgets/types";
+
+export function ActionButtonSkeleton({ className }: { className?: string }) {
+  return <Skeleton className={cn("h-9 w-full", className)} />;
+}
 
 /**
  * A control that runs one action.

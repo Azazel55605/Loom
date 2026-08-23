@@ -1,5 +1,6 @@
 import { cva, type VariantProps } from "class-variance-authority";
 
+import { Skeleton } from "@loom/ui-kit/components/ui/skeleton";
 import { cn } from "@loom/ui-kit/lib/utils";
 import { formatReading, type DisplayWidgetProps } from "@loom/ui-kit/widgets/types";
 
@@ -13,6 +14,10 @@ const statTileValue = cva("font-semibold leading-none tracking-tight tabular-num
   },
   defaultVariants: { size: "md" },
 });
+
+export function StatTileSkeleton({ className }: { className?: string }) {
+  return <div className={cn("space-y-2", className)}><Skeleton className="h-8 w-24" /><Skeleton className="h-3 w-16" /></div>;
+}
 
 /**
  * One reading, shown large, with its label underneath.
@@ -33,14 +38,15 @@ export function StatTileWidget({
   unit,
   value,
   className,
+  size,
 }: DisplayWidgetProps & VariantProps<typeof statTileValue>) {
   const text = formatReading(value);
-  const size = value === undefined || text.length > 12 ? "sm" : "md";
+  const resolvedSize = size ?? (value === undefined || text.length > 12 ? "sm" : "md");
 
   return (
     <div className={cn("flex min-w-0 flex-col justify-center gap-1", className)}>
       <div className="flex min-w-0 items-baseline gap-1">
-        <span className={cn(statTileValue({ size }), "truncate")} title={text}>
+        <span className={cn(statTileValue({ size: resolvedSize }), "truncate")} title={text}>
           {text}
         </span>
         {unit && value !== undefined ? (

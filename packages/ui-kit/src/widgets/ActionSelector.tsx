@@ -1,6 +1,7 @@
 import * as React from "react";
 
 import { Label } from "@loom/ui-kit/components/ui/label";
+import { Skeleton } from "@loom/ui-kit/components/ui/skeleton";
 import {
   Select,
   SelectContent,
@@ -14,6 +15,10 @@ import {
   configStringArray,
   type ActionWidgetProps,
 } from "@loom/ui-kit/widgets/types";
+
+export function ActionSelectorSkeleton({ className }: { className?: string }) {
+  return <div className={cn("space-y-2", className)}><Skeleton className="h-3 w-20" /><Skeleton className="h-9 w-full" /></div>;
+}
 
 /**
  * A dropdown that runs an action with one of a fixed set of strings.

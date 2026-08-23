@@ -8,7 +8,7 @@ import { AccentThemeProvider } from "@loom/ui-kit/components/AccentThemeProvider
 import { Toaster } from "@loom/ui-kit/components/ui/sonner";
 import { AuthProvider } from "@loom/ui-kit/lib/auth-context";
 import "@loom/ui-kit/styles.css";
-import { webBaseUrlProvider } from "@/adapters/webBaseUrlProvider";
+import { webBaseUrl, webBaseUrlProvider } from "@/adapters/webBaseUrlProvider";
 import { webTokenStorage } from "@/adapters/webTokenStorage";
 import { webWebSocketTransport } from "@/adapters/webWebSocketTransport";
 
@@ -35,6 +35,7 @@ ReactDOM.createRoot(document.getElementById("root")!).render(
         <BrowserRouter>
           <AuthProvider
             baseUrlProvider={webBaseUrlProvider}
+            bootstrapBaseUrl={webBaseUrl}
             tokenStorage={webTokenStorage}
             webSocketTransport={webWebSocketTransport}
           >

@@ -1,9 +1,14 @@
 import * as React from "react";
 
 import { Label } from "@loom/ui-kit/components/ui/label";
+import { Skeleton } from "@loom/ui-kit/components/ui/skeleton";
 import { Switch } from "@loom/ui-kit/components/ui/switch";
 import { cn } from "@loom/ui-kit/lib/utils";
 import { configString, type ActionWidgetProps } from "@loom/ui-kit/widgets/types";
+
+export function ActionToggleSkeleton({ className }: { className?: string }) {
+  return <div className={cn("flex items-center justify-between gap-3", className)}><Skeleton className="h-4 w-24" /><Skeleton className="h-6 w-11 rounded-full" /></div>;
+}
 
 /**
  * A switch that runs an action with a boolean.

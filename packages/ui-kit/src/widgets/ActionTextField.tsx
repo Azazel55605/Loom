@@ -4,8 +4,13 @@ import { Loader2, SendHorizontal } from "lucide-react";
 import { Button } from "@loom/ui-kit/components/ui/button";
 import { Input } from "@loom/ui-kit/components/ui/input";
 import { Label } from "@loom/ui-kit/components/ui/label";
+import { Skeleton } from "@loom/ui-kit/components/ui/skeleton";
 import { cn } from "@loom/ui-kit/lib/utils";
 import { configString, type ActionWidgetProps } from "@loom/ui-kit/widgets/types";
+
+export function ActionTextFieldSkeleton({ className }: { className?: string }) {
+  return <div className={cn("space-y-2", className)}><Skeleton className="h-3 w-20" /><div className="flex gap-2"><Skeleton className="h-9 flex-1" /><Skeleton className="h-9 w-9" /></div></div>;
+}
 
 /**
  * A text input that runs an action with a string.

@@ -39,7 +39,7 @@
     "shortDescription": "Modular homelab management platform",
     "longDescription": "Loom is a modular, extensible homelab management platform. This mobile client connects to a Loom server over its HTTP API.",
     "android": {
-      "versionCode": 1
+      "versionCode": 3
     }
   }
 }

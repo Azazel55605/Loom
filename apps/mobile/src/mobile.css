@@ -1,0 +1,87 @@
+.mobile-platform {
+  /* Android WebView can briefly report zero safe-area values while rotating.
+     Loom always leaves the system bars visible, so reserve their minimum
+     touch-safe height while still accepting a larger cutout-provided inset. */
+  --mobile-safe-area-top: max(env(safe-area-inset-top, 0px), 1.5rem);
+  --mobile-safe-area-right: env(safe-area-inset-right, 0px);
+  --mobile-safe-area-bottom: max(env(safe-area-inset-bottom, 0px), 1.5rem);
+  --mobile-safe-area-left: env(safe-area-inset-left, 0px);
+
+  min-height: 100%;
+}
+
+.mobile-platform body {
+  box-sizing: border-box;
+  min-height: 100dvh;
+  padding: var(--mobile-safe-area-top) var(--mobile-safe-area-right)
+    var(--mobile-safe-area-bottom) var(--mobile-safe-area-left);
+}
+
+.mobile-platform #root {
+  min-height: calc(
+    100dvh - var(--mobile-safe-area-top) - var(--mobile-safe-area-bottom)
+  );
+}
+
+/* Shared full-screen states otherwise add the system-bar insets on top of a
+   full viewport and leave an unnecessary page-length overflow. */
+.mobile-platform #root > .min-h-screen {
+  min-height: calc(
+    100dvh - var(--mobile-safe-area-top) - var(--mobile-safe-area-bottom)
+  );
+}
+
+/* Sticky positioning and Radix portals use viewport coordinates rather than
+   the body's padded content box, so they need the same inset explicitly. */
+.mobile-platform .app-canvas > header {
+  top: var(--mobile-safe-area-top);
+}
+
+.mobile-platform #mobile-app-sidebar {
+  top: var(--mobile-safe-area-top);
+  bottom: var(--mobile-safe-area-bottom);
+  height: auto;
+}
+
+.mobile-platform [role="dialog"]:not(#mobile-app-sidebar) {
+  max-width: calc(
+    100vw - var(--mobile-safe-area-left) - var(--mobile-safe-area-right)
+  );
+  max-height: calc(
+    100dvh - var(--mobile-safe-area-top) - var(--mobile-safe-area-bottom)
+  );
+  overflow-y: auto;
+}
+
+/* A phone turned sideways is wide enough to cross Tailwind's desktop `md`
+   breakpoint but does not have the vertical room for desktop chrome. Tablets
+   remain unchanged because their landscape viewport is taller than 600px. */
+@media (orientation: landscape) and (max-height: 600px) {
+  .mobile-platform .app-header,
+  .mobile-platform #app-sidebar {
+    display: none;
+  }
+
+  .mobile-platform .app-shell-body {
+    min-height: calc(
+      100dvh - var(--mobile-safe-area-top) - var(--mobile-safe-area-bottom)
+    );
+  }
+
+  .mobile-platform .app-shell-main > div {
+    max-width: none;
+    padding-top: 0.75rem;
+  }
+
+  .mobile-platform .mobile-landscape-navigation-trigger {
+    position: fixed;
+    top: calc(var(--mobile-safe-area-top) + 0.5rem);
+    left: calc(var(--mobile-safe-area-left) + 0.5rem);
+    z-index: 40;
+    display: inline-flex;
+  }
+
+  .mobile-platform #mobile-app-sidebar {
+    display: flex;
+  }
+}

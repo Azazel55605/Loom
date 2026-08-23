@@ -29,6 +29,7 @@ import {
 import { LoginPage } from "@/pages/LoginPage";
 import { SetupPage } from "@/pages/SetupPage";
 import { Alert, AlertDescription, AlertTitle } from "@loom/ui-kit/components/ui/alert";
+import { BootScreen } from "@loom/ui-kit/components/BootScreen";
 import { Button } from "@loom/ui-kit/components/ui/button";
 import {
   ConnectToServer,
@@ -75,7 +76,7 @@ export default function App({ queryClient }: { queryClient: QueryClient }) {
 
   React.useEffect(loadServer, [loadServer]);
 
-  if (server.kind === "loading") return null;
+  if (server.kind === "loading") return <BootScreen baseUrl="" />;
 
   if (server.kind === "error") {
     return (
@@ -125,12 +126,26 @@ export default function App({ queryClient }: { queryClient: QueryClient }) {
   };
 
   const connectionKey = `${server.connection.baseUrl}|${server.connection.allowInvalidCertificates}`;
+  const chooseAnotherServer = async () => {
+    await desktopTokenStorage.clearTokens();
+    await desktopBaseUrlProvider.setConnection({
+      baseUrl: "",
+      allowInvalidCertificates: false,
+    });
+    queryClient.clear();
+    setServer({
+      kind: "ready",
+      connection: { baseUrl: "", allowInvalidCertificates: false },
+    });
+  };
 
   return (
     <HashRouter>
       <AuthProvider
         key={connectionKey}
         baseUrlProvider={desktopBaseUrlProvider}
+        bootstrapBaseUrl={server.connection.baseUrl}
+        onChangeServer={chooseAnotherServer}
         httpTransport={createDesktopHttpTransport(
           server.connection.allowInvalidCertificates,
         )}

@@ -1,5 +1,6 @@
 import { cva, type VariantProps } from "class-variance-authority";
 
+import { Skeleton } from "@loom/ui-kit/components/ui/skeleton";
 import { cn } from "@loom/ui-kit/lib/utils";
 import { configNumber, readNumber, type DisplayWidgetProps } from "@loom/ui-kit/widgets/types";
 
@@ -13,6 +14,10 @@ const gaugeRoot = cva("flex min-w-0 flex-col items-center justify-center", {
   },
   defaultVariants: { size: "md" },
 });
+
+export function GaugeSkeleton({ className }: { className?: string }) {
+  return <div className={cn("flex flex-col items-center gap-2", className)}><Skeleton className="h-28 w-28 rounded-full" /><Skeleton className="h-3 w-20" /></div>;
+}
 
 /** Degrees of sweep. A 270° dial leaves a gap at the bottom, so the two ends of
  *  the scale are visually distinct rather than meeting in a closed ring. */

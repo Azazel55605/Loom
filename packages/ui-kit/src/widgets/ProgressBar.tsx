@@ -1,6 +1,11 @@
 import { Progress } from "@loom/ui-kit/components/ui/progress";
+import { Skeleton } from "@loom/ui-kit/components/ui/skeleton";
 import { cn } from "@loom/ui-kit/lib/utils";
 import { configNumber, readNumber, type DisplayWidgetProps } from "@loom/ui-kit/widgets/types";
+
+export function ProgressBarSkeleton({ className }: { className?: string }) {
+  return <div className={cn("space-y-2", className)}><div className="flex justify-between"><Skeleton className="h-3 w-20" /><Skeleton className="h-4 w-10" /></div><Skeleton className="h-4 w-full rounded-full" /></div>;
+}
 
 /**
  * A bounded numeric reading as a filled bar.

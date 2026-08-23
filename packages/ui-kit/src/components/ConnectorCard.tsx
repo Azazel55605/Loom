@@ -18,7 +18,7 @@ import {
   ActionParamsDialog,
   takesParameters,
 } from "@loom/ui-kit/components/ActionParamsDialog";
-import { Skeleton } from "@loom/ui-kit/components/ui/skeleton";
+import { ActionButtonSkeleton } from "@loom/ui-kit/widgets/ActionButton";
 import {
   ApiError,
   SessionExpiredError,
@@ -261,8 +261,8 @@ export function ConnectorCard({
             // Only this row. The card above it is already showing real data and
             // must not appear to reload.
             <>
-              <Skeleton className="h-8 w-20" />
-              <Skeleton className="h-8 w-16" />
+              <ActionButtonSkeleton className="w-20" />
+              <ActionButtonSkeleton className="w-16" />
             </>
           ) : (
             actions.map((action) => {

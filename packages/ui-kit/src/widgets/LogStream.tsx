@@ -1,7 +1,12 @@
 import * as React from "react";
 
+import { Skeleton } from "@loom/ui-kit/components/ui/skeleton";
 import { cn } from "@loom/ui-kit/lib/utils";
 import { configNumber, type DisplayWidgetProps } from "@loom/ui-kit/widgets/types";
+
+export function LogStreamSkeleton({ className, expanded = false }: { className?: string; expanded?: boolean }) {
+  return <div className={cn("flex flex-col gap-2", expanded ? "min-h-[20rem]" : "min-h-[8rem]", className)}><Skeleton className="h-3 w-20" /><div className="surface-panel flex flex-1 flex-col gap-2 rounded-md border p-3"><Skeleton className="h-3 w-full" /><Skeleton className="h-3 w-5/6" /><Skeleton className="h-3 w-3/4" /></div></div>;
+}
 
 /** Below this many pixels from the bottom, the pane is treated as "following"
  *  and re-pins itself on the next update. Above it, the reader has scrolled up
@@ -23,7 +28,7 @@ const FOLLOW_THRESHOLD_PX = 24;
  * animates every frame is unreadable, and this is one of the places where
  * motion communicates nothing.
  */
-export function LogStreamWidget({ label, value, config, className }: DisplayWidgetProps) {
+export function LogStreamWidget({ label, value, config, className, expanded = false }: DisplayWidgetProps & { expanded?: boolean }) {
   const scroller = React.useRef<HTMLDivElement>(null);
   const wasAtBottom = React.useRef(true);
 
@@ -58,7 +63,7 @@ export function LogStreamWidget({ label, value, config, className }: DisplayWidg
         // demand, it just does not interrupt.
         aria-live="off"
         tabIndex={0}
-        className="surface-panel min-h-0 flex-1 overflow-auto rounded-md border p-2 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+        className={cn("surface-panel min-h-0 flex-1 overflow-auto rounded-md border p-2 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring", expanded && "min-h-[20rem]")}
       >
         {visible.length === 0 ? (
           <p className="text-xs text-muted-foreground">Nothing reported yet.</p>

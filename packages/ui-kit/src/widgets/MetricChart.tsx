@@ -1,9 +1,14 @@
 import * as React from "react";
 
 import { cn } from "@loom/ui-kit/lib/utils";
+import { Skeleton } from "@loom/ui-kit/components/ui/skeleton";
 import type { ChartType } from "@loom/ui-kit/lib/api";
 import { ChartPlaceholder } from "@loom/ui-kit/widgets/ChartPlaceholder";
 import type { DisplayWidgetProps } from "@loom/ui-kit/widgets/types";
+
+export function MetricChartSkeleton({ className, expanded = false }: { className?: string; expanded?: boolean }) {
+  return <div className={cn("flex flex-col gap-2", expanded ? "min-h-[18rem]" : "min-h-[8rem]", className)}><Skeleton className="h-3 w-24" /><ChartPlaceholder label="Loading chart" loading /></div>;
+}
 
 /**
  * The chart library, loaded on demand.
@@ -55,13 +60,14 @@ export function MetricChartWidget({
   config,
   chartType,
   className,
-}: DisplayWidgetProps & { chartType: ChartType }) {
+  expanded = false,
+}: DisplayWidgetProps & { chartType: ChartType; expanded?: boolean }) {
   return (
     <div className={cn("flex min-h-0 min-w-0 flex-col gap-1", className)}>
       <span className="truncate text-xs text-muted-foreground" title={label}>
         {label}
       </span>
-      <div className="min-h-[6rem] flex-1">
+      <div className={cn("flex-1", expanded ? "min-h-[18rem]" : "min-h-[6rem]")}>
         <React.Suspense fallback={<ChartPlaceholder label="Loading chart…" />}>
           <MetricChartCanvas
             label={label}

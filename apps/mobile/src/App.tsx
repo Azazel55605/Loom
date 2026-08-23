@@ -33,6 +33,7 @@ import {
   type ServerConnection,
 } from "@loom/ui-kit/components/ConnectToServer";
 import { Alert, AlertDescription, AlertTitle } from "@loom/ui-kit/components/ui/alert";
+import { BootScreen } from "@loom/ui-kit/components/BootScreen";
 import { Button } from "@loom/ui-kit/components/ui/button";
 import { Toaster } from "@loom/ui-kit/components/ui/sonner";
 import { AuthProvider, useAuth } from "@loom/ui-kit/lib/auth-context";
@@ -78,7 +79,7 @@ export default function App({ queryClient }: { queryClient: QueryClient }) {
 
   React.useEffect(loadServer, [loadServer]);
 
-  if (server.kind === "loading") return null;
+  if (server.kind === "loading") return <BootScreen baseUrl="" />;
 
   if (server.kind === "error") {
     return (
@@ -128,12 +129,26 @@ export default function App({ queryClient }: { queryClient: QueryClient }) {
   };
 
   const connectionKey = `${server.connection.baseUrl}|${server.connection.allowInvalidCertificates}`;
+  const chooseAnotherServer = async () => {
+    await mobileTokenStorage.clearTokens();
+    await mobileBaseUrlProvider.setConnection({
+      baseUrl: "",
+      allowInvalidCertificates: false,
+    });
+    queryClient.clear();
+    setServer({
+      kind: "ready",
+      connection: { baseUrl: "", allowInvalidCertificates: false },
+    });
+  };
 
   return (
     <HashRouter>
       <AuthProvider
         key={connectionKey}
         baseUrlProvider={mobileBaseUrlProvider}
+        bootstrapBaseUrl={server.connection.baseUrl}
+        onChangeServer={chooseAnotherServer}
         httpTransport={createMobileHttpTransport(
           server.connection.allowInvalidCertificates,
         )}

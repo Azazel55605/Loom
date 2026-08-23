@@ -4,6 +4,7 @@ import { AlertCircle, GripVertical, Maximize2, Pencil, Trash2 } from "lucide-rea
 import { toast } from "sonner";
 
 import { Alert, AlertDescription } from "@loom/ui-kit/components/ui/alert";
+import { ConnectorDetailModal } from "@loom/ui-kit/components/ConnectorDetailModal";
 import { Badge } from "@loom/ui-kit/components/ui/badge";
 import { Button } from "@loom/ui-kit/components/ui/button";
 import { Card, CardContent, CardHeader } from "@loom/ui-kit/components/ui/card";
@@ -20,6 +21,7 @@ import { useAuth } from "@loom/ui-kit/lib/auth-context";
 import { cn } from "@loom/ui-kit/lib/utils";
 import { describeConnectorError } from "@loom/ui-kit/lib/connector-error";
 import { hasPermission, PERMISSION_KEYS } from "@loom/ui-kit/lib/permissions";
+import { useRetainedStatusDetails } from "@loom/ui-kit/lib/use-retained-status-details";
 import { renderWidget } from "@loom/ui-kit/widgets/renderWidget";
 
 /** The live reading for one instance, as pushed over the status socket. */
@@ -74,6 +76,7 @@ export function DashboardPlacementCard({
   const api = useApiClient();
   const { user } = useAuth();
   const instance = placement.connector;
+  const [detailOpen, setDetailOpen] = React.useState(false);
 
   // Visibility only. **Not a security boundary**: the backend checks
   // `connectors.control` on every action request, scoped to this instance id,
@@ -132,12 +135,18 @@ export function DashboardPlacementCard({
   const status = live?.status ?? instance.status;
   const statusError = live === undefined ? instance.statusError : live.statusError;
   const health = status?.health ?? "unknown";
-  const details =
+  const currentDetails =
     typeof status?.details === "object" && status.details !== null && !Array.isArray(status.details)
       ? (status.details as Record<string, unknown>)
       : {};
+  const details = useRetainedStatusDetails(instance.id, currentDetails);
+
+  if (detail.isPending) {
+    return <DashboardPlacementCardSkeleton placement={placement} />;
+  }
 
   return (
+    <>
     <Card className="flex h-full flex-col overflow-hidden">
       <CardHeader
         className={cn(
@@ -196,12 +205,8 @@ export function DashboardPlacementCard({
               size="icon"
               className="h-7 w-7"
               aria-label={`Expand ${instance.name}`}
-              // Stubbed deliberately. A focused popout is a real feature with
-              // its own questions — what it shows beyond the card, whether it
-              // is routable — and a half-built modal would be worse than an
-              // honest "not yet".
-              disabled
-              title="A focused view is coming in a later update."
+              onClick={() => setDetailOpen(true)}
+              title={`Open ${instance.name} details`}
             >
               <Maximize2 aria-hidden="true" />
             </Button>
@@ -217,12 +222,7 @@ export function DashboardPlacementCard({
           </Alert>
         ) : null}
 
-        {detail.isPending ? (
-          <div className="flex flex-col gap-3">
-            <Skeleton className="h-10 w-full" />
-            <Skeleton className="h-10 w-2/3" />
-          </div>
-        ) : detail.isError ? (
+        {detail.isError ? (
           <Alert variant="destructive">
             <AlertCircle aria-hidden="true" />
             <AlertDescription>{describeConnectorError(detail.error)}</AlertDescription>
@@ -258,6 +258,24 @@ export function DashboardPlacementCard({
             ))}
           </div>
         )}
+      </CardContent>
+    </Card>
+    <ConnectorDetailModal placement={placement} open={detailOpen} onOpenChange={setDetailOpen} />
+    </>
+  );
+}
+
+function DashboardPlacementCardSkeleton({ placement }: { placement: DashboardPlacement }) {
+  return (
+    <Card className="flex h-full flex-col overflow-hidden" aria-label="Loading connector placement">
+      <CardHeader className="flex-row items-center justify-between space-y-0 gap-2 py-3">
+        <div className="space-y-2"><Skeleton className="h-4 w-28" /><Skeleton className="h-3 w-20" /></div>
+        <Skeleton className="h-6 w-16 rounded-full" />
+      </CardHeader>
+      <CardContent className="grid flex-1 gap-4 [grid-template-columns:repeat(auto-fit,minmax(9rem,1fr))]">
+        {Array.from({ length: Math.max(1, placement.widgetBindings.length) }, (_, index) => (
+          <Skeleton key={index} className="h-20 w-full" />
+        ))}
       </CardContent>
     </Card>
   );

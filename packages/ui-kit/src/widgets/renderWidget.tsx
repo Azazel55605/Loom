@@ -5,17 +5,17 @@ import type {
   DataPointDescriptor,
   WidgetBinding,
 } from "@loom/ui-kit/lib/api";
-import { GaugeWidget } from "@loom/ui-kit/widgets/Gauge";
-import { LogStreamWidget } from "@loom/ui-kit/widgets/LogStream";
-import { MetricChartWidget } from "@loom/ui-kit/widgets/MetricChart";
-import { ProgressBarWidget } from "@loom/ui-kit/widgets/ProgressBar";
-import { StatTileWidget } from "@loom/ui-kit/widgets/StatTile";
-import { StatusDotWidget } from "@loom/ui-kit/widgets/StatusDot";
-import { ActionButtonWidget } from "@loom/ui-kit/widgets/ActionButton";
-import { ActionSelectorWidget } from "@loom/ui-kit/widgets/ActionSelector";
-import { ActionSliderWidget } from "@loom/ui-kit/widgets/ActionSlider";
-import { ActionTextFieldWidget } from "@loom/ui-kit/widgets/ActionTextField";
-import { ActionToggleWidget } from "@loom/ui-kit/widgets/ActionToggle";
+import { GaugeSkeleton, GaugeWidget } from "@loom/ui-kit/widgets/Gauge";
+import { LogStreamSkeleton, LogStreamWidget } from "@loom/ui-kit/widgets/LogStream";
+import { MetricChartSkeleton, MetricChartWidget } from "@loom/ui-kit/widgets/MetricChart";
+import { ProgressBarSkeleton, ProgressBarWidget } from "@loom/ui-kit/widgets/ProgressBar";
+import { StatTileSkeleton, StatTileWidget } from "@loom/ui-kit/widgets/StatTile";
+import { StatusDotSkeleton, StatusDotWidget } from "@loom/ui-kit/widgets/StatusDot";
+import { ActionButtonSkeleton, ActionButtonWidget } from "@loom/ui-kit/widgets/ActionButton";
+import { ActionSelectorSkeleton, ActionSelectorWidget } from "@loom/ui-kit/widgets/ActionSelector";
+import { ActionSliderSkeleton, ActionSliderWidget } from "@loom/ui-kit/widgets/ActionSlider";
+import { ActionTextFieldSkeleton, ActionTextFieldWidget } from "@loom/ui-kit/widgets/ActionTextField";
+import { ActionToggleSkeleton, ActionToggleWidget } from "@loom/ui-kit/widgets/ActionToggle";
 import { soleParameterName } from "@loom/ui-kit/widgets/compatibility";
 import type { WidgetExecute } from "@loom/ui-kit/widgets/types";
 
@@ -29,12 +29,13 @@ export type RenderWidgetOptions = {
   /** The connector's declared data points, for labels and units. */
   dataPoints: DataPointDescriptor[];
   /** The connector's declared actions, for labels and parameter schemas. */
-  actions: ConnectorAction[];
+  actions?: ConnectorAction[];
   onExecute: WidgetExecute;
   /** Disables every control. Set for a viewer without `connectors.control`.
    *  Visibility only — the backend re-checks each request. */
   disabled?: boolean;
   className?: string;
+  size?: "compact" | "expanded";
 };
 
 /**
@@ -64,6 +65,7 @@ export function renderWidget({
   onExecute,
   disabled,
   className,
+  size = "compact",
 }: RenderWidgetOptions) {
   if ("display" in binding) {
     const { dataPointId, widgetType, config } = binding.display;
@@ -80,21 +82,32 @@ export function renderWidget({
       className,
     };
 
+    if (shared.value === undefined) {
+      if (typeof widgetType !== "string") return <MetricChartSkeleton className={className} expanded={size === "expanded"} />;
+      switch (widgetType) {
+        case "statTile": return <StatTileSkeleton className={className} />;
+        case "progressBar": return <ProgressBarSkeleton className={className} />;
+        case "gauge": return <GaugeSkeleton className={className} />;
+        case "statusDot": return <StatusDotSkeleton className={className} />;
+        case "logStream": return <LogStreamSkeleton className={className} expanded={size === "expanded"} />;
+      }
+    }
+
     if (typeof widgetType !== "string") {
-      return <MetricChartWidget {...shared} chartType={widgetType.metricChart.chartType} />;
+      return <MetricChartWidget {...shared} chartType={widgetType.metricChart.chartType} expanded={size === "expanded"} />;
     }
 
     switch (widgetType) {
       case "statTile":
-        return <StatTileWidget {...shared} />;
+        return <StatTileWidget {...shared} size={size === "expanded" ? "lg" : undefined} />;
       case "progressBar":
         return <ProgressBarWidget {...shared} />;
       case "gauge":
-        return <GaugeWidget {...shared} />;
+        return <GaugeWidget {...shared} size={size === "expanded" ? "lg" : undefined} />;
       case "statusDot":
         return <StatusDotWidget {...shared} />;
       case "logStream":
-        return <LogStreamWidget {...shared} />;
+        return <LogStreamWidget {...shared} expanded={size === "expanded"} />;
       default:
         // Unreachable while the union and this switch agree. Kept because they
         // are updated in different repositories' worth of code — Core adds the
@@ -105,6 +118,15 @@ export function renderWidget({
   }
 
   const { actionId, widgetType, config } = binding.action;
+  if (actions === undefined) {
+    switch (widgetType) {
+      case "button": return <ActionButtonSkeleton className={className} />;
+      case "toggle": return <ActionToggleSkeleton className={className} />;
+      case "slider": return <ActionSliderSkeleton className={className} />;
+      case "textField": return <ActionTextFieldSkeleton className={className} />;
+      case "selector": return <ActionSelectorSkeleton className={className} />;
+    }
+  }
   const action = actions.find((candidate) => candidate.id === actionId);
   if (action === undefined) {
     return <MissingBinding what="action" id={actionId} className={className} />;
