@@ -33,6 +33,11 @@ const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 // string.
 const TARGETS = {
   core: [{ path: "crates/core/Cargo.toml", kind: "cargo" }],
+  // A connector versions independently of the platform on purpose: its
+  // `ConnectorMetadata.version` is published in the API so a client can tell
+  // which revision of an integration produced a reading, and an integration is
+  // revised far more often than Loom is released. See docs/API_CONTRACT.md.
+  "connector-docker": [{ path: "crates/connector-docker/Cargo.toml", kind: "cargo" }],
   "web-backend": [{ path: "crates/web-backend/Cargo.toml", kind: "cargo" }],
   "web-frontend": [
     { path: "apps/web-frontend/package.json", kind: "json", field: "version" },

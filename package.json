@@ -4,6 +4,7 @@
   "scripts": {
     "build": "pnpm -r --if-present build",
     "build:core": "cargo build --release --package loom-core",
+    "build:connector-docker": "cargo build --release --package loom-connector-docker",
     "build:desktop": "pnpm --filter desktop tauri build",
     "build:mobile": "pnpm --filter mobile android:configure && node scripts/run-with-java-21.mjs pnpm --filter mobile tauri android build --debug --target aarch64 --apk",
     "build:web-backend": "cargo build --release --package loom-web-backend",

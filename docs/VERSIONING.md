@@ -87,6 +87,7 @@ reject it.
 | Product | Files |
 | --- | --- |
 | `core` | `crates/core/Cargo.toml` → `package.version` |
+| `connector-docker` | `crates/connector-docker/Cargo.toml` → `package.version` |
 | `web-backend` | `crates/web-backend/Cargo.toml` → `package.version` |
 | `web-frontend` | `apps/web-frontend/package.json` → `version` |
 | `desktop` | `apps/desktop/package.json` → `version`, `apps/desktop/src-tauri/Cargo.toml` → `package.version`, `apps/desktop/src-tauri/tauri.conf.json` → `version` |

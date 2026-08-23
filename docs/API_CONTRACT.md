@@ -700,6 +700,33 @@ the instances they may see are on `/connector-instances`, which asks only for
       "template": "# Debug connector\nFixture label: {{label}}"
     },
     "discoverableType": "debug"
+  },
+  {
+    "typeId": "docker-container",
+    "displayName": "Docker Container",
+    "icon": "brand:docker",
+    "configSchema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "title": "Docker container configuration",
+      "type": "object",
+      "properties": {
+        "dockerHost": {
+          "type": "string",
+          "minLength": 1,
+          "default": "unix:///var/run/docker.sock",
+          "description": "Docker connection URI. …"
+        },
+        "containerName": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Exact container name or ID to monitor and control."
+        }
+      },
+      "required": ["dockerHost", "containerName"],
+      "additionalProperties": false
+    },
+    "setupGuide": null,
+    "discoverableType": null
   }
 ]
 ```
@@ -719,9 +746,36 @@ to the connector's factory, which is the only thing that knows what the keys
 mean. A configuration that satisfies the schema's shape can still be refused
 (see [`POST /connector-instances`](#post-connector-instances)).
 
-Today the array has exactly one element, the debug fixture. It is an array from
-day one so that registering real connector types is an insertion rather than a
-reshape of this response.
+Today the array holds two: the debug fixture and the Docker container
+connector. It was an array from day one so that registering a real connector
+type is an insertion rather than a reshape of this response, which is exactly
+what adding Docker turned out to be.
+
+**This response is type-level and needs nothing running.** The Docker entry is
+returned, with its full schema, on a host with no Docker daemon at all — so
+someone can open the add-connector form and read what it needs before they have
+a working endpoint. Whether the endpoint answers is decided when the *instance*
+is created, not here.
+
+### Connector types
+
+| `typeId` | What one instance is | Configuration | Validated by |
+| --- | --- | --- | --- |
+| `debug` | A fixture that contacts nothing. Permanent — see `crates/core/src/connector/debug.rs`. | How it should pretend to behave. | Parsing alone; there is nothing to reach. |
+| `docker-container` | **One container** on one Docker endpoint, named exactly. | `dockerHost` (a `unix://` socket or a `tcp://` host) and `containerName`. | A real connection **and** a container inspect — see below. |
+
+**Creating a `docker-container` instance actually connects.** `POST
+/connector-instances` opens the endpoint and inspects the named container
+before writing a row, so the two ways the configuration can be wrong come back
+as different 400s while the form is still open:
+
+- the daemon could not be reached → an `unreachable` connector error naming the
+  host, pointing at the socket, the bind mount, or the network;
+- the daemon answered but has no such container → an `invalidParams` error
+  naming the container, pointing at the name field.
+
+Collapsing those into one "could not connect" is the difference between a
+two-minute fix and an afternoon.
 
 ### `GET /connector-instances`
 

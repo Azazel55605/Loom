@@ -10,8 +10,11 @@
 //! a warning rather than by refusing to start.
 
 use std::collections::HashMap;
+use std::future::Future;
+use std::pin::Pin;
 use std::sync::Arc;
 
+use loom_connector_docker::DockerConnector;
 use loom_core::connector::debug::DebugConnector;
 use loom_core::connector::{Connector, ConnectorError, SetupGuide};
 use serde_json::Value;
@@ -19,11 +22,21 @@ use serde_json::Value;
 /// Builds a live connector from a stored configuration, or explains why it
 /// cannot.
 ///
-/// A plain `fn` pointer rather than a boxed closure: every registration is a
-/// free function today, and a `fn` stays trivially `Send + Sync`. Swap to
-/// `Arc<dyn Fn…>` only when
-/// a connector type genuinely needs to capture something.
-pub type ConnectorFactory = fn(Value) -> Result<Box<dyn Connector>, ConnectorError>;
+/// **Asynchronous, because construction can involve I/O.** A connector to a
+/// real service validates its configuration by *using* it: the Docker
+/// connector opens its endpoint and inspects the named container, which is what
+/// lets "no such container" be a different error from "no such host" at the
+/// moment someone still has the form open to fix. A synchronous factory could
+/// only reach that by blocking a worker thread on a runtime of its own, which
+/// is a worse answer to a question the signature can simply be honest about.
+///
+/// Still a plain `fn` pointer rather than a boxed closure: every registration
+/// is a free function, and a `fn` stays trivially `Send + Sync`. The return is
+/// boxed because each factory's future is a distinct anonymous type. Swap to
+/// `Arc<dyn Fn…>` only when a connector type genuinely needs to capture
+/// something.
+pub type ConnectorFactory =
+    fn(Value) -> Pin<Box<dyn Future<Output = Result<Box<dyn Connector>, ConnectorError>> + Send>>;
 
 /// One connector type this build can create instances of.
 pub struct ConnectorTypeRegistration {
@@ -57,9 +70,10 @@ pub type ConnectorTypeRegistry = Arc<HashMap<&'static str, ConnectorTypeRegistra
 
 /// The types compiled into this build.
 ///
-/// Exactly one today: the debug fixture. Real integrations (Docker, a reverse
-/// proxy, a hypervisor) register here alongside it, and nothing else in the
-/// backend has to change when they do — that is the point of the indirection.
+/// Two today: the debug fixture and the Docker container connector. Further
+/// integrations (a reverse proxy, a hypervisor) register here alongside them,
+/// and nothing else in the backend has to change when they do — that is the
+/// point of the indirection.
 pub fn builtin_registry() -> ConnectorTypeRegistry {
     let mut types = HashMap::new();
     // Connector descriptors are instance methods because plugins may derive
@@ -76,13 +90,50 @@ pub fn builtin_registry() -> ConnectorTypeRegistry {
             type_id: loom_core::connector::debug::TYPE_ID,
             display_name: "Debug Connector",
             icon: debug_metadata.icon,
+            // Synchronous work behind an async signature: the fixture contacts
+            // nothing, so there is nothing to await and the future is ready
+            // immediately rather than pretending it might not be.
             factory: |config| {
-                DebugConnector::from_config_value(config)
-                    .map(|connector| Box::new(connector) as Box<dyn Connector>)
+                Box::pin(async move {
+                    DebugConnector::from_config_value(config)
+                        .map(|connector| Box::new(connector) as Box<dyn Connector>)
+                })
             },
             schema: debug.config_schema(),
             setup_guide: debug.setup_guide(),
             discoverable_type: debug.discoverable_type(),
+        },
+    );
+
+    // The Docker connector is the exception to the snapshot-a-default-instance
+    // pattern above, and it has to be: constructing one requires a reachable
+    // Docker endpoint and the name of a container that exists on it, so there
+    // is no default instance to ask. Its type-level descriptors are `const`s in
+    // the connector crate instead, read from here *and* from its own
+    // `metadata()`, so the two cannot drift the way a hand-copied duplicate
+    // would.
+    types.insert(
+        loom_connector_docker::TYPE_ID,
+        ConnectorTypeRegistration {
+            type_id: loom_connector_docker::TYPE_ID,
+            display_name: loom_connector_docker::DISPLAY_NAME,
+            icon: Some(loom_connector_docker::ICON.to_owned()),
+            // This factory really does await: it opens the endpoint and
+            // inspects the container, so an unreachable host and a misspelled
+            // container name come back as different, actionable errors.
+            factory: |config| {
+                Box::pin(async move {
+                    DockerConnector::from_config_value(config)
+                        .await
+                        .map(|connector| Box::new(connector) as Box<dyn Connector>)
+                })
+            },
+            schema: loom_connector_docker::config_schema(),
+            // Both deliberately absent in this first version — a capability-
+            // aware setup guide and host-level container discovery are planned
+            // follow-ups. See the crate docs for why neither is stubbed.
+            setup_guide: None,
+            discoverable_type: None,
         },
     );
 
@@ -114,16 +165,59 @@ mod tests {
     }
 
     #[test]
-    fn every_registration_declares_its_connector_s_own_icon() {
+    fn every_registered_type_publishes_a_form_generatable_schema() {
+        // The add-connector form is generated from this, so a type whose schema
+        // is not an object is a type nobody can add through the UI. Checked for
+        // every registration rather than only the debug one, because a schema
+        // that needs no daemon to read is exactly what lets the Docker form be
+        // rendered before a host has been named.
+        for registration in builtin_registry().values() {
+            assert!(!registration.display_name.is_empty());
+            assert_eq!(
+                registration.schema["type"],
+                json!("object"),
+                "{} must publish an object schema",
+                registration.type_id
+            );
+            assert!(
+                registration.schema["properties"].is_object(),
+                "{} publishes no properties",
+                registration.type_id
+            );
+        }
+    }
+
+    #[test]
+    fn the_docker_type_is_registered_and_describable_without_a_daemon() {
+        let registry = builtin_registry();
+        let registration = registry
+            .get(loom_connector_docker::TYPE_ID)
+            .expect("the docker container type must be registered");
+
+        assert_eq!(registration.type_id, "docker-container");
+        assert_eq!(registration.icon.as_deref(), Some("brand:docker"));
+        assert!(registration.schema["properties"]["dockerHost"].is_object());
+        assert!(registration.schema["properties"]["containerName"].is_object());
+
+        // Deliberately absent in this first version, and asserted so that
+        // adding either later is a visible decision rather than a drive-by.
+        assert!(registration.setup_guide.is_none());
+        assert!(registration.discoverable_type.is_none());
+    }
+
+    #[tokio::test]
+    async fn every_registration_declares_its_connector_s_own_icon() {
         // The registration copies the icon so the type picker can draw one
         // without an instance. A copy that disagrees with the connector would
         // show one icon in the picker and a different one on the card that the
         // picker just created, which reads as a bug in the icon system rather
         // than as the transcription error it is.
         for registration in builtin_registry().values() {
-            let Ok(built) = (registration.factory)(Value::Object(Default::default())) else {
-                // A type whose default configuration is not buildable cannot be
-                // checked this way. None exist today; skipping is honest.
+            let Ok(built) = (registration.factory)(Value::Object(Default::default())).await else {
+                // A type that cannot be built from an empty configuration is
+                // skipped. The Docker connector is one: it needs a container
+                // name and a reachable host, which is why its icon comes from a
+                // shared `const` instead of a copy this test would police.
                 continue;
             };
             assert_eq!(
@@ -157,12 +251,12 @@ mod tests {
         }
     }
 
-    #[test]
-    fn the_factory_validates_before_it_constructs() {
+    #[tokio::test]
+    async fn the_factory_validates_before_it_constructs() {
         let registry = builtin_registry();
         let factory = registry.get(DEBUG_TYPE_ID).expect("registered").factory;
 
-        let Ok(built) = factory(json!({ "baseLoad": 10 })) else {
+        let Ok(built) = factory(json!({ "baseLoad": 10 })).await else {
             panic!("a valid configuration must build");
         };
         assert_eq!(built.metadata().id, DEBUG_TYPE_ID);
@@ -170,8 +264,32 @@ mod tests {
         // `Box<dyn Connector>` is not `Debug`, so the happy arm is discarded
         // before the error is examined rather than unwrapped through it.
         let error = factory(json!({ "baseLoad": 900 }))
+            .await
             .err()
             .expect("an invalid configuration must be refused");
         assert!(matches!(error, ConnectorError::InvalidConfig { .. }));
+    }
+
+    /// The Docker factory refuses an unusable configuration **before** it tries
+    /// to reach anything, so a missing container name is an immediate message
+    /// naming the field rather than a ten-second connection timeout.
+    #[tokio::test]
+    async fn the_docker_factory_refuses_a_configuration_with_no_container() {
+        let registry = builtin_registry();
+        let factory = registry
+            .get(loom_connector_docker::TYPE_ID)
+            .expect("registered")
+            .factory;
+
+        // A host that nothing could be listening on, to prove the refusal is
+        // not coming from a successful connection.
+        let error = factory(json!({ "dockerHost": "tcp://127.0.0.1:1" }))
+            .await
+            .err()
+            .expect("a connector with no container has nothing to monitor");
+        assert!(
+            matches!(error, ConnectorError::InvalidConfig { ref reason } if reason.contains("containerName")),
+            "the refusal must name the field: {error}"
+        );
     }
 }

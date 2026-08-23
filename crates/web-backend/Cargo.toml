@@ -12,6 +12,7 @@ name = "loom-web-backend"
 path = "src/main.rs"
 
 [dependencies]
+loom-connector-docker.workspace = true
 loom-core.workspace = true
 argon2.workspace = true
 axum.workspace = true

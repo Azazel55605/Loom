@@ -375,6 +375,7 @@ pub async fn create_instance(
     let connector = match state
         .connectors
         .build(&request.connector_type, request.config.clone())
+        .await
     {
         Ok(connector) => connector,
         Err(error) => return build_failure(error),
@@ -455,7 +456,11 @@ pub async fn update_instance(
         serde_json::from_str(&row.config).unwrap_or(Value::Object(Default::default()))
     });
 
-    let connector = match state.connectors.build(&row.connector_type, config.clone()) {
+    let connector = match state
+        .connectors
+        .build(&row.connector_type, config.clone())
+        .await
+    {
         Ok(connector) => connector,
         Err(error) => return build_failure(error),
     };

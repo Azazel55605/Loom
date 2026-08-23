@@ -30,14 +30,20 @@ dependencies are fetched by Cargo on first build; no separate step.
 | Component | Command | Output |
 | --- | --- | --- |
 | core (library) | `pnpm build:core` | Compiled rlib inside `target/release/`. No standalone artifact — Core is a library and never runs on its own. |
+| connector-docker (library) | `pnpm build:connector-docker` | Compiled rlib inside `target/release/`. Like Core, a library: it is linked into web-backend, which is what decides that this build has a Docker connector in it. |
 | web-backend | `pnpm build:web-backend` | `target/release/loom-web-backend` binary |
 | web-frontend | `pnpm build:web-frontend` | `apps/web-frontend/dist/` static site |
 | desktop | `pnpm build:desktop` | Platform installers in `apps/desktop/src-tauri/target/release/bundle/` |
 | mobile | `pnpm build:mobile` | Unsigned arm64 debug APK under `apps/mobile/src-tauri/gen/android/app/build/outputs/` |
 
-The Cargo packages are named `loom-core` and `loom-web-backend` — a crate named
-`core` would collide with Rust's built-in `core`. The `pnpm build:*` scripts
-already use the correct names; prefer them over hand-written `cargo` commands.
+The Cargo packages are named `loom-core`, `loom-connector-docker` and
+`loom-web-backend` — a crate named `core` would collide with Rust's built-in
+`core`, and the `loom-` prefix is carried through for consistency. The
+`pnpm build:*` scripts already use the correct names; prefer them over
+hand-written `cargo` commands.
+
+Every real connector is its own crate, and adding one adds a row here — see
+[`adr/0017`](./adr/0017-connector-crates-and-async-factories.md).
 
 ### `pnpm build` builds frontend apps and shared packages only
 
@@ -419,6 +425,21 @@ eslint .`; real tests join that script as they are written.
 ```sh
 cargo test --workspace
 ```
+
+**Some Rust tests need a Docker daemon.** `crates/connector-docker` has
+integration tests that create a real throwaway container and point the connector
+at it. If no daemon is reachable they **print why and pass** rather than
+failing, so a checkout with no Docker still runs a clean `cargo test
+--workspace`; GitHub-hosted runners do have one, so they run for real in CI.
+Use `--nocapture` to see which ran and which were skipped:
+
+```sh
+cargo test -p loom-connector-docker -- --nocapture
+```
+
+Point them elsewhere — or at a deliberately dead endpoint, to check the skip
+path still works — with `LOOM_TEST_DOCKER_HOST`. It is read only by those tests;
+the connector itself never reads the environment.
 
 CI runs the full Rust gate — `cargo fmt --check`, `cargo clippy --workspace
 --all-targets -- -D warnings`, and `cargo test --workspace`. See

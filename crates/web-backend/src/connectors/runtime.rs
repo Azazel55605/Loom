@@ -130,7 +130,7 @@ impl ConnectorRuntime {
                 }
             };
 
-            match runtime.build(&connector_type, config) {
+            match runtime.build(&connector_type, config).await {
                 Ok(connector) => {
                     live.insert(uuid, connector);
                 }
@@ -169,12 +169,20 @@ impl ConnectorRuntime {
     /// Separated from insertion so create and update can validate *before*
     /// they write: a configuration that the connector refuses must never reach
     /// the database, or the next startup would skip the row it created.
-    pub fn build(&self, type_id: &str, config: Value) -> Result<Arc<dyn Connector>, BuildError> {
+    pub async fn build(
+        &self,
+        type_id: &str,
+        config: Value,
+    ) -> Result<Arc<dyn Connector>, BuildError> {
         let registration = self
             .registration(type_id)
             .ok_or_else(|| BuildError::UnknownType(type_id.to_owned()))?;
 
+        // Awaited because a connector to a real service validates by using it —
+        // see `ConnectorFactory`. The registry lookup is a plain map read, so
+        // nothing is held across this await.
         (registration.factory)(config)
+            .await
             .map(Arc::from)
             .map_err(BuildError::Rejected)
     }
@@ -332,16 +340,18 @@ mod tests {
         let runtime = ConnectorRuntime::new(builtin_registry());
 
         assert!(matches!(
-            runtime.build("not-a-type", json!({})),
+            runtime.build("not-a-type", json!({})).await,
             Err(BuildError::UnknownType(type_id)) if type_id == "not-a-type"
         ));
 
         assert!(matches!(
-            runtime.build(DEBUG_TYPE_ID, json!({ "baseLoad": 900 })),
+            runtime
+                .build(DEBUG_TYPE_ID, json!({ "baseLoad": 900 }))
+                .await,
             Err(BuildError::Rejected(ConnectorError::InvalidConfig { .. }))
         ));
 
-        assert!(runtime.build(DEBUG_TYPE_ID, json!({})).is_ok());
+        assert!(runtime.build(DEBUG_TYPE_ID, json!({})).await.is_ok());
     }
 
     #[tokio::test]
@@ -352,7 +362,7 @@ mod tests {
         assert!(runtime.get(&id).await.is_none());
 
         runtime
-            .insert(id, runtime.build(DEBUG_TYPE_ID, json!({})).unwrap())
+            .insert(id, runtime.build(DEBUG_TYPE_ID, json!({})).await.unwrap())
             .await;
         assert!(runtime.get(&id).await.is_some());
         assert!(runtime.cached_status(&id).await.is_some());
@@ -364,6 +374,7 @@ mod tests {
                 id,
                 runtime
                     .build(DEBUG_TYPE_ID, json!({ "label": "replaced" }))
+                    .await
                     .unwrap(),
             )
             .await;
@@ -389,6 +400,7 @@ mod tests {
         let mut updates = runtime.subscribe_statuses();
         let connector = runtime
             .build(DEBUG_TYPE_ID, json!({ "label": "before" }))
+            .await
             .unwrap();
 
         runtime.insert(id, Arc::clone(&connector)).await;
@@ -420,6 +432,7 @@ mod tests {
         let id = Uuid::new_v4();
         let connector = runtime
             .build(DEBUG_TYPE_ID, json!({ "failMode": "unreachable" }))
+            .await
             .unwrap();
 
         runtime.insert(id, connector).await;
@@ -444,6 +457,7 @@ mod tests {
                         DEBUG_TYPE_ID,
                         json!({ "simulatedLatencyMs": 50, "label": "old" }),
                     )
+                    .await
                     .unwrap(),
             )
             .await;
@@ -456,6 +470,7 @@ mod tests {
                 id,
                 runtime
                     .build(DEBUG_TYPE_ID, json!({ "label": "new" }))
+                    .await
                     .unwrap(),
             )
             .await;

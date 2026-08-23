@@ -981,7 +981,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn the_type_catalog_lists_the_debug_type_with_its_schema() {
+    async fn the_type_catalog_lists_every_registered_type_with_its_schema() {
         let app = test_app().await;
         let (access, _) = setup_and_login(&app.router).await;
 
@@ -993,22 +993,49 @@ mod tests {
         assert_eq!(status, StatusCode::OK);
 
         let types = body.as_array().expect("array");
-        assert_eq!(types.len(), 1);
-        assert_eq!(types[0]["typeId"], "debug");
-        assert!(types[0]["displayName"]
-            .as_str()
-            .is_some_and(|n| !n.is_empty()));
-        // The add-connector form is generated from this, so it has to be a
-        // usable schema rather than merely present.
-        assert_eq!(types[0]["configSchema"]["type"], "object");
-        assert!(types[0]["configSchema"]["properties"].is_object());
-        assert_eq!(types[0]["discoverableType"], "debug");
-        assert!(types[0]["setupGuide"]["description"]
+        let by_id = |type_id: &str| {
+            types
+                .iter()
+                .find(|entry| entry["typeId"] == type_id)
+                .unwrap_or_else(|| panic!("{type_id} is not in the catalog: {body:#}"))
+        };
+
+        // Every entry, whatever it is, has to be renderable: a name, and a
+        // schema the add-connector form can actually be generated from.
+        for entry in types {
+            assert!(entry["displayName"]
+                .as_str()
+                .is_some_and(|name| !name.is_empty()));
+            assert_eq!(entry["configSchema"]["type"], "object");
+            assert!(entry["configSchema"]["properties"].is_object());
+        }
+
+        let debug = by_id("debug");
+        assert_eq!(debug["discoverableType"], "debug");
+        assert!(debug["setupGuide"]["description"]
             .as_str()
             .is_some_and(|description| description.contains("test fixture")));
-        assert!(types[0]["setupGuide"]["template"]
+        assert!(debug["setupGuide"]["template"]
             .as_str()
             .is_some_and(|template| template.contains("{{label}}")));
+
+        // The Docker connector is catalogued **without a daemon anywhere in
+        // this test**, which is the point: the type list and its form are
+        // type-level data, so someone can open the add-connector dialog and
+        // read what Docker needs before they have a working endpoint.
+        let docker = by_id("docker-container");
+        assert_eq!(docker["displayName"], "Docker Container");
+        assert_eq!(docker["icon"], "brand:docker");
+        assert!(docker["configSchema"]["properties"]["dockerHost"].is_object());
+        assert!(docker["configSchema"]["properties"]["containerName"].is_object());
+        assert_eq!(
+            docker["configSchema"]["properties"]["dockerHost"]["default"],
+            "unix:///var/run/docker.sock"
+        );
+        // Deliberately absent in this first version; asserted so that adding
+        // either later is a visible decision rather than a drive-by.
+        assert_eq!(docker["setupGuide"], serde_json::Value::Null);
+        assert_eq!(docker["discoverableType"], serde_json::Value::Null);
     }
 
     #[tokio::test]

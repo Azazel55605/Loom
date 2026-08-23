@@ -62,12 +62,10 @@ a bundle. Adding a connector type adds its icon here; nothing else does.
 
 | Icon | File | Referenced by | Upstream path |
 | --- | --- | --- | --- |
-| Docker | `docker.svg` | Reserved for the Docker connector type (`brand:docker`) | [`svg/docker.svg`](https://github.com/homarr-labs/dashboard-icons/blob/main/svg/docker.svg) |
+| Docker | `docker.svg` | The `docker-container` connector type (`crates/connector-docker`), as `brand:docker` | [`svg/docker.svg`](https://github.com/homarr-labs/dashboard-icons/blob/main/svg/docker.svg) |
 
-Docker is vendored ahead of the connector that will reference it because it is
-the one real integration on the near roadmap, and because it is what proves the
-`brand:` resolution path end to end. The debug fixture deliberately uses the
-`lucide:` path instead — it is not a product and has no logo to claim.
+The debug fixture deliberately uses the `lucide:` path instead — it is not a
+product and has no logo to claim.
 
 ## Adding an icon
 

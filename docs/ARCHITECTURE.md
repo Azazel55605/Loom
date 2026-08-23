@@ -32,10 +32,20 @@ client.
 
 A shared **library crate** (`crates/core`, package `loom-core`). It holds:
 
-- the connector trait and its implementations — the code that actually talks to
-  the services running in a homelab,
+- the connector **trait** — the contract everything that talks to a homelab
+  service is written against,
+- `DebugConnector`, the dependency-free fixture Core's own tests exercise that
+  trait with,
 - business logic that must behave identically regardless of which client
   triggered it.
+
+Connectors to **real** services do not live here. Each one is its own crate
+(`crates/connector-docker`, and its successors), depending on Core for the trait
+and on whatever client library it needs, and registered by Web/backend. Core is
+linked into the desktop and mobile clients, so an integration's dependency tree
+here would be a Docker API client — and later a hypervisor SDK, and a NAS API —
+in every binary Loom ships, including the ones that will never use them. See
+[`adr/0017`](./adr/0017-connector-crates-and-async-factories.md).
 
 Core has **no network surface of its own**: no listener, no daemon, no
 standalone mode. It is linked into whatever needs it. This is deliberate — Core
