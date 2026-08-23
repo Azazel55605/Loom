@@ -23,7 +23,7 @@ use axum::Json;
 use chrono::Utc;
 use loom_core::connector::{
     Connector, ConnectorAction, ConnectorError, ConnectorMetadata, ConnectorStatus,
-    DataPointDescriptor, DisplayField, WidgetLayout,
+    DataPointDescriptor, DisplayField, SetupGuide, WidgetLayout,
 };
 use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::Value;
@@ -67,6 +67,8 @@ pub struct ConnectorTypeResponse {
     /// connector itself. The add-connector form is generated from it, so
     /// registering a new connector type needs no frontend change.
     config_schema: Value,
+    setup_guide: Option<SetupGuide>,
+    discoverable_type: Option<String>,
 }
 
 /// `GET /connector-types`
@@ -86,8 +88,10 @@ pub async fn list_connector_types(
         .map(|registration| ConnectorTypeResponse {
             type_id: registration.type_id.to_owned(),
             display_name: registration.display_name.to_owned(),
-            icon: registration.icon.map(str::to_owned),
-            config_schema: (registration.schema)(),
+            icon: registration.icon.clone(),
+            config_schema: registration.schema.clone(),
+            setup_guide: registration.setup_guide.clone(),
+            discoverable_type: registration.discoverable_type.clone(),
         })
         .collect();
 
@@ -156,6 +160,8 @@ pub struct ConnectorInstanceDetail {
     data_points: Vec<DataPointDescriptor>,
     /// The widget arrangement the connector ships with.
     default_layout: WidgetLayout,
+    /// Type id this live instance can discover, or null when unsupported.
+    discoverable_type: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -282,6 +288,44 @@ pub async fn get_instance(
     };
 
     detail_for(&row, live.as_deref(), snapshot.as_ref()).await
+}
+
+/// `POST /connector-instances/{id}/discover`
+///
+/// Discovery is a management operation: its suggestions are intended to lead
+/// to creating connector instances, so it uses the same permission tier as
+/// instance creation rather than the read-only instance detail permission.
+pub async fn discover_instance(
+    _caller: RequirePermission<ConnectorsManage>,
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Response {
+    let row = match load_row(&state, &id).await {
+        Ok(Some(row)) => row,
+        Ok(None) => return not_found(&id),
+        Err(response) => return *response,
+    };
+
+    let Ok(uuid) = Uuid::parse_str(&row.id) else {
+        return not_found(&id);
+    };
+    let Some(connector) = state.connectors.get(&uuid).await else {
+        return ErrorBody::message(
+            StatusCode::BAD_REQUEST,
+            "discovery is unavailable because this connector instance is not loaded",
+        );
+    };
+    if connector.discoverable_type().is_none() {
+        return ErrorBody::message(
+            StatusCode::BAD_REQUEST,
+            "discovery is not supported for this connector instance",
+        );
+    }
+
+    match connector.discover().await {
+        Ok(resources) => Json(resources).into_response(),
+        Err(error) => ErrorBody::connector(status_for(&error), error),
+    }
 }
 
 /// Load the same cached connector summary used by the public list endpoint.
@@ -656,13 +700,14 @@ async fn detail_for(
 ) -> Response {
     let instance = entry_for(row, live, snapshot);
 
-    let (actions, data_points, default_layout) = match live {
+    let (actions, data_points, default_layout, discoverable_type) = match live {
         Some(connector) => (
             connector.actions().await,
             connector.data_points(),
             connector.default_layout(),
+            connector.discoverable_type(),
         ),
-        None => (Vec::new(), Vec::new(), WidgetLayout::default()),
+        None => (Vec::new(), Vec::new(), WidgetLayout::default(), None),
     };
 
     Json(ConnectorInstanceDetail {
@@ -671,6 +716,7 @@ async fn detail_for(
         actions,
         data_points,
         default_layout,
+        discoverable_type,
     })
     .into_response()
 }

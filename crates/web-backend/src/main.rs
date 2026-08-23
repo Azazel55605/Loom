@@ -226,11 +226,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Arc;
+
     use axum::{
         body::Body,
         http::{Request, StatusCode},
     };
     use http_body_util::BodyExt;
+    use loom_core::connector::debug::DebugConnector;
+    use loom_core::connector::{
+        ActionResult, Connector, ConnectorAction, ConnectorError, ConnectorMetadata,
+        ConnectorStatus, DataPointDescriptor, DisplayField, WidgetLayout,
+    };
+    use serde_json::Value;
     use tower::ServiceExt;
 
     /// A router backed by its own throwaway database.
@@ -908,6 +916,51 @@ mod tests {
     /* Connector types and instances                                     */
     /* ---------------------------------------------------------------- */
 
+    /// Delegates every established capability to DebugConnector while using
+    /// the trait's discovery defaults. This lets the HTTP unsupported branch
+    /// be proven without adding a fake production registry type solely for a
+    /// negative test.
+    struct NonDiscoverableConnector(DebugConnector);
+
+    #[async_trait::async_trait]
+    impl Connector for NonDiscoverableConnector {
+        async fn status(&self) -> Result<ConnectorStatus, ConnectorError> {
+            self.0.status().await
+        }
+
+        async fn actions(&self) -> Vec<ConnectorAction> {
+            self.0.actions().await
+        }
+
+        async fn execute_action(
+            &self,
+            action_id: &str,
+            params: Value,
+        ) -> Result<ActionResult, ConnectorError> {
+            self.0.execute_action(action_id, params).await
+        }
+
+        fn config_schema(&self) -> Value {
+            self.0.config_schema()
+        }
+
+        fn metadata(&self) -> ConnectorMetadata {
+            self.0.metadata()
+        }
+
+        fn display_fields(&self) -> Vec<DisplayField> {
+            self.0.display_fields()
+        }
+
+        fn data_points(&self) -> Vec<DataPointDescriptor> {
+            self.0.data_points()
+        }
+
+        fn default_layout(&self) -> WidgetLayout {
+            self.0.default_layout()
+        }
+    }
+
     /// Creates a debug instance through the real endpoint and returns its id.
     async fn create_debug_instance(app: &Router, token: &str, name: &str) -> String {
         let (status, body) = send(
@@ -949,6 +1002,71 @@ mod tests {
         // usable schema rather than merely present.
         assert_eq!(types[0]["configSchema"]["type"], "object");
         assert!(types[0]["configSchema"]["properties"].is_object());
+        assert_eq!(types[0]["discoverableType"], "debug");
+        assert!(types[0]["setupGuide"]["description"]
+            .as_str()
+            .is_some_and(|description| description.contains("test fixture")));
+        assert!(types[0]["setupGuide"]["template"]
+            .as_str()
+            .is_some_and(|template| template.contains("{{simulatedHealth}}")));
+    }
+
+    #[tokio::test]
+    async fn discovery_is_instance_scoped_and_reports_unsupported_instances() {
+        let app = test_app().await;
+        let (access, _) = setup_and_login(&app.router).await;
+        let id = create_debug_instance(&app.router, &access, "Discovery source").await;
+
+        let (status, detail) = send(
+            &app.router,
+            get_with_auth(&format!("/connector-instances/{id}"), &bearer(&access)),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(detail["discoverableType"], "debug");
+
+        let (status, resources) = send(
+            &app.router,
+            post_json_auth(
+                &format!("/connector-instances/{id}/discover"),
+                &access,
+                serde_json::Value::Null,
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "discovery failed: {resources:#}");
+        let resources = resources.as_array().expect("resource array");
+        assert_eq!(resources.len(), 3);
+        assert!(resources.iter().all(|resource| {
+            resource["targetConnectorType"] == "debug"
+                && resource["suggestedName"]
+                    .as_str()
+                    .is_some_and(|name| name.starts_with("Discovered Debug Fixture"))
+        }));
+
+        // Keep the durable row and replace only its live implementation with a
+        // connector that uses the trait's opt-out defaults.
+        let uuid = uuid::Uuid::parse_str(&id).expect("instance uuid");
+        app.connectors
+            .insert(
+                uuid,
+                Arc::new(NonDiscoverableConnector(DebugConnector::default())),
+            )
+            .await;
+
+        let (status, body) = send(
+            &app.router,
+            post_json_auth(
+                &format!("/connector-instances/{id}/discover"),
+                &access,
+                serde_json::Value::Null,
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{body:#}");
+        assert!(body["error"]
+            .as_str()
+            .is_some_and(|message| message.contains("not supported")));
     }
 
     #[tokio::test]
@@ -998,6 +1116,7 @@ mod tests {
             .as_array()
             .expect("array")
             .is_empty());
+        assert_eq!(created["discoverableType"], "debug");
 
         // Detail carries what a placement UI needs.
         let (status, detail) = send(
@@ -1371,6 +1490,17 @@ mod tests {
                 "/connector-instances",
                 &viewer,
                 serde_json::json!({ "connectorType": "debug", "name": "Nope", "config": {} }),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+
+        let (status, _) = send(
+            &app.router,
+            post_json_auth(
+                &format!("/connector-instances/{id}/discover"),
+                &viewer,
+                serde_json::Value::Null,
             ),
         )
         .await;
@@ -2020,6 +2150,8 @@ mod tests {
                 &owner,
                 serde_json::json!({
                     "placementIds": [&placements[2], &placements[0], &placements[1]],
+                    "name": "Infrastructure",
+                    "icon": "lucide:network",
                     "positionX": 0,
                     "positionY": 0,
                     "width": 6,
@@ -2030,6 +2162,8 @@ mod tests {
         .await;
         assert_eq!(status, StatusCode::CREATED, "{group:#}");
         let group_id = group["id"].as_str().expect("group id").to_owned();
+        assert_eq!(group["name"], "Infrastructure");
+        assert_eq!(group["icon"], "lucide:network");
         // Member order is the order the request listed, not creation order.
         assert_eq!(
             member_ids_of(&group),
@@ -2081,6 +2215,8 @@ mod tests {
                 &format!("/dashboards/{dashboard_id}/placement-groups/{group_id}"),
                 &owner,
                 serde_json::json!({
+                    "name": "Core services",
+                    "icon": null,
                     "positionX": 2,
                     "height": 4,
                     "memberOrder": [&placements[1], &placements[2], &placements[0]],
@@ -2090,6 +2226,8 @@ mod tests {
         .await;
         assert_eq!(status, StatusCode::OK, "{reordered:#}");
         assert_eq!(reordered["positionX"], 2);
+        assert_eq!(reordered["name"], "Core services");
+        assert_eq!(reordered["icon"], serde_json::Value::Null);
         assert_eq!(reordered["height"], 4);
         assert_eq!(reordered["width"], 6, "an absent field must be left alone");
         assert_eq!(

@@ -91,6 +91,10 @@ pub fn routes() -> Router<AppState> {
             "/connector-instances/{id}/actions/{action_id}",
             post(connectors::execute_action),
         )
+        .route(
+            "/connector-instances/{id}/discover",
+            post(connectors::discover_instance),
+        )
         .route("/ws", get(connector_socket::connector_status_socket))
         .route(
             "/dashboards",

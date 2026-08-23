@@ -23,6 +23,7 @@ use crate::error::{internal_error, ErrorBody};
 use crate::state::AppState;
 
 use super::connectors::{self, ConnectorInstanceResponse};
+use super::present_option;
 
 /// Internal helpers return complete HTTP failures. Boxing keeps the uncommon
 /// error path small enough for Clippy's `result_large_err` threshold across
@@ -65,6 +66,8 @@ struct PlacementRow {
 #[derive(Debug, sqlx::FromRow)]
 struct PlacementGroupRow {
     id: String,
+    name: String,
+    icon: Option<String>,
     position_x: i64,
     position_y: i64,
     width: i64,
@@ -177,6 +180,8 @@ struct PlacementResponse {
 #[serde(rename_all = "camelCase")]
 struct PlacementGroupResponse {
     id: String,
+    name: String,
+    icon: Option<String>,
     position_x: i64,
     position_y: i64,
     width: i64,
@@ -235,6 +240,11 @@ pub(super) struct CreatePlacementGroupRequest {
     /// At least two, all on this dashboard, none already grouped. Order here
     /// becomes the initial `group_order`.
     placement_ids: Vec<String>,
+    /// Optional so older clients can continue to create groups. When omitted,
+    /// the server gives the group a stable, useful name based on its initial
+    /// member count rather than making presentation text the client's job.
+    name: Option<String>,
+    icon: Option<String>,
     position_x: i64,
     position_y: i64,
     width: i64,
@@ -244,6 +254,11 @@ pub(super) struct CreatePlacementGroupRequest {
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub(super) struct UpdatePlacementGroupRequest {
+    name: Option<String>,
+    /// Absent leaves the icon alone; `null` clears it back to the generic
+    /// group icon; a string assigns that icon reference.
+    #[serde(default, deserialize_with = "present_option")]
+    icon: Option<Option<String>>,
     position_x: Option<i64>,
     position_y: Option<i64>,
     width: Option<i64>,
@@ -885,6 +900,12 @@ pub(super) async fn create_placement_group(
         return bad_request("a placement group needs at least 2 placements");
     }
 
+    let name = match request.name.as_deref() {
+        Some(name) if name.trim().is_empty() => return bad_request("name must not be empty"),
+        Some(name) => name.trim().to_owned(),
+        None => format!("Group of {}", request.placement_ids.len()),
+    };
+
     let (unknown, already_grouped) =
         match classify_candidates(&state, &id, &request.placement_ids).await {
             Ok(split) => split,
@@ -907,11 +928,13 @@ pub(super) async fn create_placement_group(
 
     if let Err(error) = sqlx::query(
         "INSERT INTO dashboard_placement_groups \
-         (id, dashboard_id, position_x, position_y, width, height, created_at) \
-         VALUES (?, ?, ?, ?, ?, ?, ?)",
+         (id, dashboard_id, name, icon, position_x, position_y, width, height, created_at) \
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
     )
     .bind(&group_id)
     .bind(&id)
+    .bind(&name)
+    .bind(&request.icon)
     .bind(request.position_x)
     .bind(request.position_y)
     .bind(request.width)
@@ -980,6 +1003,13 @@ pub(super) async fn update_placement_group(
         Err(response) => return *response,
     };
 
+    let name = match request.name.as_deref() {
+        Some(name) if name.trim().is_empty() => return bad_request("name must not be empty"),
+        Some(name) => name.trim().to_owned(),
+        None => existing.name.clone(),
+    };
+    let icon = request.icon.unwrap_or(existing.icon.clone());
+
     let width = request.width.unwrap_or(existing.width);
     let height = request.height.unwrap_or(existing.height);
     if let Some(response) = reject_bad_box(width, height) {
@@ -1014,9 +1044,11 @@ pub(super) async fn update_placement_group(
 
     if let Err(error) = sqlx::query(
         "UPDATE dashboard_placement_groups \
-         SET position_x = ?, position_y = ?, width = ?, height = ? \
+         SET name = ?, icon = ?, position_x = ?, position_y = ?, width = ?, height = ? \
          WHERE id = ? AND dashboard_id = ?",
     )
+    .bind(&name)
+    .bind(&icon)
     .bind(position_x)
     .bind(position_y)
     .bind(width)
@@ -1372,7 +1404,7 @@ async fn load_group_row(
     group_id: &str,
 ) -> RouteResult<Option<PlacementGroupRow>> {
     sqlx::query_as::<_, PlacementGroupRow>(
-        "SELECT id, position_x, position_y, width, height, created_at \
+        "SELECT id, name, icon, position_x, position_y, width, height, created_at \
          FROM dashboard_placement_groups WHERE id = ? AND dashboard_id = ?",
     )
     .bind(group_id)
@@ -1474,7 +1506,7 @@ async fn load_placements(
     .map_err(|error| Box::new(internal_error("listing dashboard placements", error)))?;
 
     let group_rows = sqlx::query_as::<_, PlacementGroupRow>(
-        "SELECT id, position_x, position_y, width, height, created_at \
+        "SELECT id, name, icon, position_x, position_y, width, height, created_at \
          FROM dashboard_placement_groups WHERE dashboard_id = ? \
          ORDER BY position_y, position_x, created_at",
     )
@@ -1499,6 +1531,8 @@ async fn load_placements(
         .map(|group| PlacementGroupResponse {
             members: members.remove(&group.id).unwrap_or_default(),
             id: group.id,
+            name: group.name,
+            icon: group.icon,
             position_x: group.position_x,
             position_y: group.position_y,
             width: group.width,

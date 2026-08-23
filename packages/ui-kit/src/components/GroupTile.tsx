@@ -1,6 +1,6 @@
 import * as React from "react";
 import { useMutation } from "@tanstack/react-query";
-import { GripVertical, Ungroup } from "lucide-react";
+import { GripVertical, Pencil, Ungroup } from "lucide-react";
 import { toast } from "sonner";
 
 import {
@@ -15,6 +15,18 @@ import {
 } from "@loom/ui-kit/components/ui/alert-dialog";
 import { Button } from "@loom/ui-kit/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@loom/ui-kit/components/ui/card";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "@loom/ui-kit/components/ui/dialog";
+import { Input } from "@loom/ui-kit/components/ui/input";
+import { Label } from "@loom/ui-kit/components/ui/label";
+import { ConnectorIcon } from "@loom/ui-kit/components/ConnectorIcon";
+import { GenericIconPicker } from "@loom/ui-kit/components/GenericIconPicker";
 import {
   DRAG_HANDLE_CLASS,
   PlacementTile,
@@ -51,6 +63,32 @@ export function GroupTile({
 }) {
   const api = useApiClient();
   const [splitOpen, setSplitOpen] = React.useState(false);
+  const [editOpen, setEditOpen] = React.useState(false);
+  const [name, setName] = React.useState(group.name);
+  const [icon, setIcon] = React.useState<string | null>(group.icon);
+
+  React.useEffect(() => {
+    if (!editOpen) return;
+    setName(group.name);
+    setIcon(group.icon);
+  }, [editOpen, group.icon, group.name]);
+
+  const updateIdentity = useMutation({
+    mutationFn: () =>
+      api.updateDashboardPlacementGroup(dashboardId, group.id, {
+        name: name.trim(),
+        icon,
+      }),
+    onSuccess: async () => {
+      await onChanged();
+      setEditOpen(false);
+    },
+    onError: (error) => {
+      toast.error("Could not update the group", {
+        description: describeConnectorError(error),
+      });
+    },
+  });
 
   const reorder = useMutation({
     mutationFn: (memberOrder: string[]) =>
@@ -110,26 +148,42 @@ export function GroupTile({
             {editing ? (
               <GripVertical className="shrink-0 text-muted-foreground" aria-hidden="true" />
             ) : null}
+            <ConnectorIcon
+              typeIcon="lucide:boxes"
+              iconOverride={group.icon}
+              size={20}
+              className="shrink-0"
+            />
             <div className="min-w-0">
-              <CardTitle className="truncate text-sm">Group of {group.members.length}</CardTitle>
+              <CardTitle className="truncate text-sm">{group.name}</CardTitle>
               <p className="truncate text-xs text-muted-foreground">
                 {group.members.map((member) => member.connector.name).join(" · ")}
               </p>
             </div>
           </div>
           {editing ? (
-            <Button
-              type="button"
-              variant="outline"
-              size="sm"
-              className="loom-grid-control shrink-0"
-              disabled={split.isPending}
-              aria-label="Split this group apart"
-              onClick={() => setSplitOpen(true)}
-            >
-              <Ungroup data-icon="inline-start" aria-hidden="true" />
-              <span className="hidden sm:inline">Split apart</span>
-            </Button>
+            <div className="loom-grid-control flex shrink-0 gap-2">
+              <Button
+                type="button"
+                variant="outline"
+                size="icon"
+                aria-label={`Edit ${group.name}`}
+                onClick={() => setEditOpen(true)}
+              >
+                <Pencil aria-hidden="true" />
+              </Button>
+              <Button
+                type="button"
+                variant="outline"
+                size="sm"
+                disabled={split.isPending}
+                aria-label="Split this group apart"
+                onClick={() => setSplitOpen(true)}
+              >
+                <Ungroup data-icon="inline-start" aria-hidden="true" />
+                <span className="hidden sm:inline">Split apart</span>
+              </Button>
+            </div>
           ) : null}
         </CardHeader>
 
@@ -158,6 +212,60 @@ export function GroupTile({
           ))}
         </CardContent>
       </Card>
+
+      <Dialog
+        open={editOpen}
+        onOpenChange={(open) => {
+          setEditOpen(open);
+          if (!open) updateIdentity.reset();
+        }}
+      >
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>Edit group</DialogTitle>
+            <DialogDescription>
+              Give this collection a name and icon that make it easy to find.
+            </DialogDescription>
+          </DialogHeader>
+          <form
+            className="space-y-5"
+            onSubmit={(event) => {
+              event.preventDefault();
+              if (name.trim()) updateIdentity.mutate();
+            }}
+          >
+            <div className="space-y-2">
+              <Label htmlFor={`group-name-${group.id}`}>Name</Label>
+              <Input
+                id={`group-name-${group.id}`}
+                value={name}
+                onChange={(event) => setName(event.target.value)}
+                disabled={updateIdentity.isPending}
+                autoFocus
+              />
+            </div>
+            <div className="space-y-2">
+              <Label>Icon</Label>
+              <GenericIconPicker
+                label="Group icon"
+                value={icon}
+                defaultIcon="lucide:boxes"
+                defaultLabel="Use group default"
+                onChange={setIcon}
+                disabled={updateIdentity.isPending}
+              />
+            </div>
+            <DialogFooter>
+              <Button type="button" variant="outline" onClick={() => setEditOpen(false)}>
+                Cancel
+              </Button>
+              <Button type="submit" disabled={!name.trim() || updateIdentity.isPending}>
+                {updateIdentity.isPending ? "Saving…" : "Save changes"}
+              </Button>
+            </DialogFooter>
+          </form>
+        </DialogContent>
+      </Dialog>
 
       <AlertDialog
         open={splitOpen}

@@ -1,5 +1,6 @@
 import {
   Activity,
+  Boxes,
   Bug,
   Camera,
   Cloud,
@@ -57,6 +58,7 @@ export type GenericIcon = {
 
 export const GENERIC_ICONS: readonly GenericIcon[] = [
   { name: "server", label: "Server", Component: Server },
+  { name: "boxes", label: "Group", Component: Boxes },
   { name: "container", label: "Container", Component: Container },
   { name: "database", label: "Database", Component: Database },
   { name: "hard-drive", label: "Storage", Component: HardDrive },

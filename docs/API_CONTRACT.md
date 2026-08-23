@@ -694,7 +694,12 @@ the instances they may see are on `/connector-instances`, which asks only for
         "enabled": { "type": "boolean", "default": true }
       },
       "additionalProperties": false
-    }
+    },
+    "setupGuide": {
+      "description": "No real setup required — this is an internal test fixture.",
+      "template": "# Debug connector\nSimulated health: {{simulatedHealth}}"
+    },
+    "discoverableType": "debug"
   }
 ]
 ```
@@ -705,6 +710,8 @@ the instances they may see are on `/connector-instances`, which asks only for
 | `displayName` | string | Human-facing name for the type picker. | Always present. |
 | `icon` | string | The type's icon reference, in the same convention as [`ConnectorMetadata.icon`](#connectormetadata). Carried here so the type picker can draw an icon *before* any instance of the type exists. | **`null`** when the type declares none. |
 | `configSchema` | object | JSON Schema for this type's configuration, published by the connector itself. | Always present; an object, never `null`. A type needing no configuration returns an empty schema object. |
+| `setupGuide` | object | Descriptive client-rendered help: `{ description, template }`. See [Discovery & Setup Guides](#discovery--setup-guides). | **`null`** when the type publishes no guide. |
+| `discoverableType` | string | Type id this connector can discover through a configured live instance. | **`null`** when discovery is unsupported. |
 
 **The schema is advisory for the client and not the server's validator.** The
 backend does not check a submitted configuration against it — it hands the value
@@ -833,7 +840,8 @@ carries, plus what a dashboard placement UI needs.
       { "display": { "dataPointId": "log", "widgetType": "logStream", "config": {} } },
       { "action": { "actionId": "set-enabled", "widgetType": "toggle", "config": {} } }
     ]
-  }
+  },
+  "discoverableType": "debug"
 }
 ```
 
@@ -844,6 +852,7 @@ carries, plus what a dashboard placement UI needs.
 | `actions` | array | [`ConnectorAction`](#connectoraction) — what this instance can be asked to do right now. | Always present; **may be empty** for a read-only or currently-broken connector. |
 | `dataPoints` | array | [`DataPointDescriptor`](#datapointdescriptor) — what can be bound to a widget. | Always present; may be empty. |
 | `defaultLayout` | object | [`WidgetLayout`](#widgetlayout) the connector ships with. | Always present; `bindings` may be empty. |
+| `discoverableType` | string | Type id this live instance can discover. Clients use this to decide whether to offer discovery without guessing from `connectorType`. | **`null`** when unsupported or the stored instance is not loaded. |
 
 **`config` is `connectors.view`-gated, which will not be good enough forever.**
 The only registered type has nothing secret in it. A real integration storing an
@@ -854,6 +863,64 @@ this field; treat that as a known open item rather than a settled decision.
 | --- | --- |
 | 200 | Found. |
 | 403 | The caller lacks a global `connectors.view` grant. |
+| 404 | No instance with that id. |
+
+## Discovery & Setup Guides
+
+Discovery is **instance-scoped**: it runs through a live, already-configured
+connector, because finding child resources commonly requires the connection or
+credentials held by that instance. Setup guides are **type-scoped** descriptive
+content returned by `GET /connector-types`; they do not execute code in Core.
+
+### Setup guide template substitution
+
+`setupGuide.template` is text containing zero or more literal
+`{{fieldName}}` placeholders. `fieldName` must be the exact camelCase property
+name from that type's `configSchema.properties`. Clients substitute the current
+form value when rendering the guide. Substitution is entirely client-side:
+Core and the backend neither interpret templates nor persist rendered output.
+
+For example, `{{simulatedHealth}}` refers to the debug schema's
+`simulatedHealth` property. A client that does not recognise a placeholder must
+leave it visibly unchanged rather than silently remove content.
+
+### `POST /connector-instances/{id}/discover`
+
+Requires a global `connectors.manage` grant, the same tier as creating an
+instance. The request has no body.
+
+**Response 200** — suggested resources, not created instances:
+
+```json
+[
+  {
+    "suggestedName": "Discovered Debug Fixture 1",
+    "targetConnectorType": "debug",
+    "config": {
+      "simulatedHealth": "healthy",
+      "baseLoad": 24,
+      "label": "discovered-alpha",
+      "enabled": true
+    }
+  }
+]
+```
+
+| Field | JSON type | Meaning |
+| --- | --- | --- |
+| `suggestedName` | string | Human-facing starting name for a future connector instance. |
+| `targetConnectorType` | string | Type id whose normal factory validates and constructs `config`. |
+| `config` | any | Suggested configuration in the target type's schema shape. |
+
+Discovery does not persist anything. A client may present or edit suggestions,
+then creates accepted resources through the ordinary
+`POST /connector-instances` contract.
+
+| Status | Meaning |
+| --- | --- |
+| 200 | Discovery completed; the array may be empty. |
+| 400 | The instance does not support discovery or is not loaded. |
+| 403 | The caller lacks a global `connectors.manage` grant. |
 | 404 | No instance with that id. |
 
 ### `POST /connector-instances`
@@ -1142,6 +1209,8 @@ group, never in `placements`.
   "placementGroups": [
     {
       "id": "3d6c1f0a-2b1e-4f8c-9a77-0d2b6f4e1c33",
+      "name": "Core services",
+      "icon": "lucide:network",
       "positionX": 0,
       "positionY": 2,
       "width": 6,
@@ -1343,6 +1412,10 @@ and layout edits are an ACL question — see
 [`0013`](./adr/0013-dashboard-sharing-model.md) and
 [`0015`](./adr/0015-dashboard-tile-grouping.md).
 
+Each group also has a user-facing `name` and optional generic `icon` reference.
+`icon: null` means the client uses its group fallback. Both are properties of
+the combined tile, not of any member connector.
+
 ### A member keeps its own position and size
 
 A group has its own `positionX`/`positionY`/`width`/`height`, and **that box is
@@ -1397,6 +1470,8 @@ Editor or Owner. Combines existing placements into a new tile.
     "cab30488-a7b8-4746-95b3-4a5fbfbb0e94",
     "7f2e9d10-3c4b-4a58-8e6f-1b0d2c3a4e5f"
   ],
+  "name": "Core services",
+  "icon": "lucide:network",
   "positionX": 0,
   "positionY": 2,
   "width": 6,
@@ -1407,6 +1482,8 @@ Editor or Owner. Combines existing placements into a new tile.
 | Field | JSON type | Meaning |
 | --- | --- | --- |
 | `placementIds` | array | **At least two**, each once, each a placement on this dashboard, none already in a group. Their order becomes the initial member order. |
+| `name` | string | Optional display name. Trimmed and non-empty when supplied; omitted generates `Group of N`. |
+| `icon` | string or `null` | Optional group icon reference. Omitted or `null` uses the generic group fallback. |
 | `positionX`, `positionY` | integer | The tile's grid position. |
 | `width`, `height` | integer | The tile's grid size. Both at least 1. |
 
@@ -1425,11 +1502,13 @@ ids, since "some placements cannot be grouped" is not actionable on its own.
 
 ### `PATCH /dashboards/{id}/placement-groups/{groupId}`
 
-Editor or Owner. Moves or resizes the tile, reorders its members, or both. Every
+Editor or Owner. Renames or re-icons the tile, moves or resizes it, reorders its members, or combines those changes. Every
 field is optional; an omitted one is left alone, and an empty body is a no-op.
 
 ```json
 {
+  "name": "Storage cluster",
+  "icon": "lucide:hard-drive",
   "positionX": 2,
   "height": 4,
   "memberOrder": [
@@ -1445,12 +1524,15 @@ joining or leaving a group: those have their own endpoints, with their own
 validation and, in the leaving case, a cascade this endpoint must not silently
 trigger.
 
+Omitting `name` or `icon` leaves it alone. `name` is trimmed and cannot be
+empty; `icon: null` explicitly clears the assignment back to the group default.
+
 **Response 200** — the updated group with its members in the new order.
 
 | Status | Meaning |
 | --- | --- |
 | 200 | Updated. |
-| 400 | `memberOrder` does not match current membership, or `width`/`height` below 1. |
+| 400 | `name` is empty, `memberOrder` does not match current membership, or `width`/`height` below 1. |
 | 403 | Caller is not an Editor or Owner. |
 | 404 | No such group on this dashboard. |
 

@@ -92,6 +92,32 @@ pub trait Connector: Send + Sync {
     /// object rather than `null`.
     fn config_schema(&self) -> Value;
 
+    /// The connector type this live instance can discover child resources for.
+    ///
+    /// Discovery is instance-scoped because it commonly needs an already
+    /// configured connection. `None` means this connector does not support it.
+    fn discoverable_type(&self) -> Option<String> {
+        None
+    }
+
+    /// Finds resources reachable through this configured connector.
+    ///
+    /// Implementations return suggested configurations; they never create
+    /// connector instances themselves. The backend remains responsible for
+    /// authorization and persistence. Connectors opt in by overriding this
+    /// method together with [`Connector::discoverable_type`].
+    async fn discover(&self) -> Result<Vec<DiscoveredResource>, ConnectorError> {
+        Ok(Vec::new())
+    }
+
+    /// Descriptive, client-rendered help for configuring this connector type.
+    ///
+    /// The template may contain `{{fieldName}}` placeholders whose names match
+    /// properties in [`Connector::config_schema`]. Core does no substitution.
+    fn setup_guide(&self) -> Option<SetupGuide> {
+        None
+    }
+
     /// Identifying information for this connector: id, label, icon, version.
     ///
     /// Cheap and synchronous on purpose — it is used for registry keys, list
@@ -127,6 +153,32 @@ pub trait Connector: Send + Sync {
     /// anything. It is a starting point the user then owns, not a constraint —
     /// nothing re-applies it after placement.
     fn default_layout(&self) -> WidgetLayout;
+}
+
+/// One resource found by a live connector's discovery pass.
+///
+/// This is a proposal, not a persisted instance. A client may present or edit
+/// it before sending the configuration through the ordinary instance-creation
+/// endpoint, where the target connector's factory validates it normally.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DiscoveredResource {
+    /// Human-facing starting name for the eventual connector instance.
+    pub suggested_name: String,
+    /// Registry type id that should validate and construct `config`.
+    pub target_connector_type: String,
+    /// Suggested configuration in the target connector's schema shape.
+    pub config: Value,
+}
+
+/// Type-level setup help published alongside a connector's config schema.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SetupGuide {
+    /// Short explanation shown before the generated setup form.
+    pub description: String,
+    /// Client-rendered text containing literal `{{fieldName}}` placeholders.
+    pub template: String,
 }
 
 /// How a service is doing, as of a particular moment.

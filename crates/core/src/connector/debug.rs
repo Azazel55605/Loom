@@ -9,7 +9,7 @@
 //! with a laptop and no homelab can still work on Loom's UI, and Loom's tests
 //! can assert on connector behaviour without depending on a service being up.
 //!
-//! It now carries four jobs rather than one:
+//! It now carries five jobs rather than one:
 //!
 //! 1. **Auth and shell development**, its original purpose — a connector that
 //!    is reliably there to be listed, permission-checked, and acted on.
@@ -22,6 +22,9 @@
 //!    layout, which is what a placement UI needs in order to be exercised.
 //! 4. **End-to-end tests**, present and future — it is the one connector type
 //!    that behaves identically on every machine.
+//! 5. **Discovery and setup-guide reference behaviour.** Its self-referential
+//!    discovery yields more valid debug configurations, so every layer can be
+//!    exercised before a real integration exists.
 //!
 //! Everything interesting is set at construction through
 //! [`DebugConnectorConfig`]:
@@ -62,8 +65,9 @@ use serde_json::{json, Map, Value};
 
 use super::{
     ActionResult, ActionWidgetType, ChartType, Connector, ConnectorAction, ConnectorError,
-    ConnectorMetadata, ConnectorStatus, DataPointDescriptor, DataPointValueType, DisplayField,
-    DisplayWidgetType, HealthState, WidgetBinding, WidgetLayout,
+    ConnectorMetadata, ConnectorStatus, DataPointDescriptor, DataPointValueType,
+    DiscoveredResource, DisplayField, DisplayWidgetType, HealthState, SetupGuide, WidgetBinding,
+    WidgetLayout,
 };
 
 /// The connector type id this fixture registers under.
@@ -729,6 +733,55 @@ impl Connector for DebugConnector {
         })
     }
 
+    fn discoverable_type(&self) -> Option<String> {
+        Some(TYPE_ID.to_owned())
+    }
+
+    async fn discover(&self) -> Result<Vec<DiscoveredResource>, ConnectorError> {
+        self.gate().await?;
+
+        Ok(vec![
+            DiscoveredResource {
+                suggested_name: "Discovered Debug Fixture 1".to_owned(),
+                target_connector_type: TYPE_ID.to_owned(),
+                config: json!({
+                    "simulatedHealth": "healthy",
+                    "baseLoad": 24,
+                    "label": "discovered-alpha",
+                    "enabled": true
+                }),
+            },
+            DiscoveredResource {
+                suggested_name: "Discovered Debug Fixture 2".to_owned(),
+                target_connector_type: TYPE_ID.to_owned(),
+                config: json!({
+                    "simulatedHealth": "degraded",
+                    "simulatedLatencyMs": 150,
+                    "baseLoad": 68,
+                    "label": "discovered-beta",
+                    "enabled": false
+                }),
+            },
+            DiscoveredResource {
+                suggested_name: "Discovered Debug Fixture 3".to_owned(),
+                target_connector_type: TYPE_ID.to_owned(),
+                config: json!({
+                    "simulatedHealth": "unknown",
+                    "baseLoad": 5,
+                    "label": "discovered-gamma",
+                    "enabled": true
+                }),
+            },
+        ])
+    }
+
+    fn setup_guide(&self) -> Option<SetupGuide> {
+        Some(SetupGuide {
+            description: "No real setup required — this is an internal test fixture.".to_owned(),
+            template: "# Debug connector\nSimulated health: {{simulatedHealth}}".to_owned(),
+        })
+    }
+
     fn metadata(&self) -> ConnectorMetadata {
         ConnectorMetadata {
             id: TYPE_ID.to_string(),
@@ -850,6 +903,39 @@ mod tests {
         assert_eq!(connector.metadata().id, TYPE_ID);
         assert_eq!(connector.metadata().min_size, (2, 2));
         assert!(connector.config_schema().is_object());
+    }
+
+    #[tokio::test]
+    async fn discovery_returns_valid_debug_connector_suggestions() {
+        let connector = DebugConnector::default();
+        assert_eq!(connector.discoverable_type().as_deref(), Some(TYPE_ID));
+
+        let resources = connector.discover().await.expect("discovery must succeed");
+        assert_eq!(resources.len(), 3);
+        for resource in resources {
+            assert_eq!(resource.target_connector_type, TYPE_ID);
+            assert!(resource
+                .suggested_name
+                .starts_with("Discovered Debug Fixture"));
+            DebugConnector::from_config_value(resource.config)
+                .expect("every discovered config must satisfy the real parser");
+        }
+    }
+
+    #[test]
+    fn setup_guide_uses_a_real_schema_property() {
+        let connector = DebugConnector::default();
+        let guide = connector.setup_guide().expect("debug publishes setup help");
+
+        assert_eq!(
+            guide.description,
+            "No real setup required — this is an internal test fixture."
+        );
+        assert_eq!(
+            guide.template,
+            "# Debug connector\nSimulated health: {{simulatedHealth}}"
+        );
+        assert!(connector.config_schema()["properties"]["simulatedHealth"].is_object());
     }
 
     #[test]

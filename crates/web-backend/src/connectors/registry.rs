@@ -13,26 +13,17 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use loom_core::connector::debug::DebugConnector;
-use loom_core::connector::{Connector, ConnectorError};
+use loom_core::connector::{Connector, ConnectorError, SetupGuide};
 use serde_json::Value;
 
 /// Builds a live connector from a stored configuration, or explains why it
 /// cannot.
 ///
 /// A plain `fn` pointer rather than a boxed closure: every registration is a
-/// free function today, and a `fn` keeps [`ConnectorTypeRegistration`] `Copy`-
-/// cheap to clone and trivially `Send + Sync`. Swap to `Arc<dyn Fn…>` only when
+/// free function today, and a `fn` stays trivially `Send + Sync`. Swap to
+/// `Arc<dyn Fn…>` only when
 /// a connector type genuinely needs to capture something.
 pub type ConnectorFactory = fn(Value) -> Result<Box<dyn Connector>, ConnectorError>;
-
-/// Returns a type's configuration schema without constructing an instance.
-///
-/// Separate from the factory because the "add connector" form needs the schema
-/// *before* there is any configuration to build from —
-/// [`Connector::config_schema`] is an instance method, and requiring an
-/// instance to ask what an instance needs is a chicken-and-egg the frontend
-/// should not have to solve.
-pub type ConnectorSchemaFn = fn() -> Value;
 
 /// One connector type this build can create instances of.
 pub struct ConnectorTypeRegistration {
@@ -44,16 +35,18 @@ pub struct ConnectorTypeRegistration {
     /// The type's icon reference, in the `ConnectorMetadata::icon` convention
     /// (`"brand:<key>"` or `"lucide:<name>"`).
     ///
-    /// Duplicated from the connector's own `metadata()` rather than read
-    /// through it, because the type picker draws an icon *before* any instance
-    /// exists and `metadata()` is an instance method — the same chicken-and-egg
-    /// [`ConnectorSchemaFn`] exists to solve. `every_registration_declares_its_
-    /// connector_s_own_icon` below is what keeps the copy honest.
-    pub icon: Option<&'static str>,
+    /// Snapshotted from the same default instance as the schema and other type
+    /// descriptors, because the type picker draws an icon before a configured
+    /// instance exists.
+    pub icon: Option<String>,
     /// Turns stored configuration into a live connector.
     pub factory: ConnectorFactory,
     /// The configuration this type accepts, as JSON Schema.
-    pub schema: ConnectorSchemaFn,
+    pub schema: Value,
+    /// Optional descriptive setup content published with the schema.
+    pub setup_guide: Option<SetupGuide>,
+    /// Type id this connector can discover through a configured instance.
+    pub discoverable_type: Option<String>,
 }
 
 /// Every registered type, keyed by [`ConnectorTypeRegistration::type_id`].
@@ -69,22 +62,27 @@ pub type ConnectorTypeRegistry = Arc<HashMap<&'static str, ConnectorTypeRegistra
 /// backend has to change when they do — that is the point of the indirection.
 pub fn builtin_registry() -> ConnectorTypeRegistry {
     let mut types = HashMap::new();
+    // Connector descriptors are instance methods because plugins may derive
+    // them from their implementation. Construct the cheap default exactly
+    // once and snapshot every type-level descriptor together, so schema,
+    // setup help, discovery capability, and icon cannot come from different
+    // throwaway instances or duplicated constants.
+    let debug = DebugConnector::default();
+    let debug_metadata = debug.metadata();
 
     types.insert(
         loom_core::connector::debug::TYPE_ID,
         ConnectorTypeRegistration {
             type_id: loom_core::connector::debug::TYPE_ID,
             display_name: "Debug Connector",
-            icon: Some("lucide:bug"),
+            icon: debug_metadata.icon,
             factory: |config| {
                 DebugConnector::from_config_value(config)
                     .map(|connector| Box::new(connector) as Box<dyn Connector>)
             },
-            // Constructing a default fixture to read its schema off is cheap
-            // and allocates nothing the connector holds onto. A `const` schema
-            // would duplicate the document that already lives next to the
-            // parser that enforces it, which is exactly how the two drift.
-            schema: || DebugConnector::default().config_schema(),
+            schema: debug.config_schema(),
+            setup_guide: debug.setup_guide(),
+            discoverable_type: debug.discoverable_type(),
         },
     );
 
@@ -107,7 +105,7 @@ mod tests {
         assert_eq!(registration.type_id, DEBUG_TYPE_ID);
         assert!(!registration.display_name.is_empty());
 
-        let schema = (registration.schema)();
+        let schema = &registration.schema;
         assert_eq!(schema["type"], json!("object"));
         assert!(
             schema["properties"].is_object(),
@@ -130,11 +128,24 @@ mod tests {
             };
             assert_eq!(
                 built.metadata().icon.as_deref(),
-                registration.icon,
+                registration.icon.as_deref(),
                 "{} registers an icon its connector does not declare",
                 registration.type_id
             );
         }
+    }
+
+    #[test]
+    fn the_debug_type_bundles_discovery_and_setup_descriptors() {
+        let registry = builtin_registry();
+        let registration = registry.get(DEBUG_TYPE_ID).expect("registered");
+
+        assert_eq!(
+            registration.discoverable_type.as_deref(),
+            Some(DEBUG_TYPE_ID)
+        );
+        let guide = registration.setup_guide.as_ref().expect("setup guide");
+        assert!(guide.template.contains("{{simulatedHealth}}"));
     }
 
     #[test]

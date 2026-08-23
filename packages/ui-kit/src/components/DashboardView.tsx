@@ -46,6 +46,7 @@ import { AddPlacementDialog } from "@loom/ui-kit/components/AddPlacementDialog";
 import { DashboardSharesDialog } from "@loom/ui-kit/components/DashboardSharesDialog";
 import { dashboardsQueryKey } from "@loom/ui-kit/components/DashboardSidebar";
 import { GroupTile } from "@loom/ui-kit/components/GroupTile";
+import { ConnectorIcon } from "@loom/ui-kit/components/ConnectorIcon";
 import {
   DRAG_HANDLE_CLASS,
   PlacementTile,
@@ -834,8 +835,14 @@ export function DashboardView({
                   disabled={addToGroup.isPending}
                   onClick={() => addToGroup.mutate(group.id)}
                 >
+                  <ConnectorIcon
+                    typeIcon="lucide:boxes"
+                    iconOverride={group.icon}
+                    size={20}
+                    className="shrink-0"
+                  />
                   <span>
-                    <span className="block font-medium">Group of {group.members.length}</span>
+                    <span className="block font-medium">{group.name}</span>
                     <span className="block text-xs text-muted-foreground">
                       {firstName}
                       {group.members.length > 1 ? " + others" : ""}

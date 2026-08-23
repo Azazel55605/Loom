@@ -255,6 +255,22 @@ export type ConnectorTypeSummary = {
    * form built from this must still surface the 400 that comes back.
    */
   configSchema: unknown;
+  /** Optional type-level setup help rendered by clients. */
+  setupGuide: SetupGuide | null;
+  /** Connector type discoverable through a configured instance, if any. */
+  discoverableType: string | null;
+};
+
+export type SetupGuide = {
+  description: string;
+  /** Text with literal `{{fieldName}}` placeholders from the config schema. */
+  template: string;
+};
+
+export type DiscoveredResource = {
+  suggestedName: string;
+  targetConnectorType: string;
+  config: unknown;
 };
 
 /** One element of `GET /connector-instances`: a connector this deployment has. */
@@ -300,6 +316,8 @@ export type ConnectorInstanceDetail = ConnectorInstanceSummary & {
   /** The arrangement the connector ships with. Seeds a new placement's
    *  bindings, which the user then owns — nothing re-applies it afterwards. */
   defaultLayout: WidgetLayout;
+  /** Type id this live instance can discover, or null when unsupported. */
+  discoverableType: string | null;
 };
 
 /** The caller's effective role for one dashboard. */
@@ -354,6 +372,10 @@ export type DashboardPlacement = {
  */
 export type DashboardPlacementGroup = {
   id: string;
+  /** User-facing group name. */
+  name: string;
+  /** Assigned generic icon, or null to use the group default. */
+  icon: string | null;
   /** The tile's own grid box. **This** is what the grid lays out; a member's
    *  own position and size are ignored while it is grouped. */
   positionX: number;
@@ -389,6 +411,10 @@ export type CreateDashboardPlacementGroupRequest = {
   /** At least two, each once, each a standalone placement on this dashboard.
    *  This order becomes the initial member order. */
   placementIds: string[];
+  /** Optional for compatibility; the backend generates `Group of N`. */
+  name?: string;
+  /** Omit or null to use the generic group icon. */
+  icon?: string | null;
   positionX: number;
   positionY: number;
   width: number;
@@ -398,6 +424,9 @@ export type CreateDashboardPlacementGroupRequest = {
 /** `PATCH /dashboards/{id}/placement-groups/{groupId}` body. Every field is
  *  optional; an omitted one is left alone. */
 export type UpdateDashboardPlacementGroupRequest = {
+  name?: string;
+  /** `null` clears the assigned icon. */
+  icon?: string | null;
   positionX?: number;
   positionY?: number;
   width?: number;
@@ -1058,6 +1087,19 @@ function getConnectorInstance(
     runtime,
     `/connector-instances/${encodeURIComponent(id)}`,
     { signal },
+  );
+}
+
+/** Run discovery through one configured connector instance. */
+function discoverConnectorInstance(
+  runtime: ApiRuntime,
+  id: string,
+  signal?: AbortSignal,
+): Promise<DiscoveredResource[]> {
+  return authorizedRequest<DiscoveredResource[]>(
+    runtime,
+    `/connector-instances/${encodeURIComponent(id)}/discover`,
+    { method: "POST", signal },
   );
 }
 
@@ -1751,6 +1793,8 @@ export function createApiClient(options: {
     getConnectorInstances: (signal?: AbortSignal) => getConnectorInstances(runtime, signal),
     getConnectorInstance: (id: string, signal?: AbortSignal) =>
       getConnectorInstance(runtime, id, signal),
+    discoverConnectorInstance: (id: string, signal?: AbortSignal) =>
+      discoverConnectorInstance(runtime, id, signal),
     createConnectorInstance: (data: CreateConnectorInstanceRequest, signal?: AbortSignal) =>
       createConnectorInstance(runtime, data, signal),
     updateConnectorInstance: (
