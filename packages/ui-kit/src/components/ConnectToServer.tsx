@@ -74,6 +74,7 @@ export function ConnectToServer({
   initialAllowInvalidCertificates = false,
   embedded = false,
   supportsInvalidCertificates = false,
+  invalidCertificateNote,
   getHttpTransport,
   onConnected,
 }: {
@@ -81,6 +82,8 @@ export function ConnectToServer({
   initialAllowInvalidCertificates?: boolean;
   embedded?: boolean;
   supportsInvalidCertificates?: boolean;
+  /** Platform-specific limits of the certificate exception, shown beside it. */
+  invalidCertificateNote?: string;
   getHttpTransport?: (allowInvalidCertificates: boolean) => HttpTransport;
   onConnected: (connection: ServerConnection) => void | Promise<void>;
 }) {
@@ -199,6 +202,9 @@ export function ConnectToServer({
               >
                 For HTTPS homelab servers using a self-signed certificate. Disabled
                 by default.
+                {invalidCertificateNote === undefined ? null : (
+                  <span className="mt-1 block">{invalidCertificateNote}</span>
+                )}
               </p>
             </div>
             <Switch

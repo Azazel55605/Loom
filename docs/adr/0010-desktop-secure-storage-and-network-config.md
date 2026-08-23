@@ -43,6 +43,24 @@ feature is enabled solely to express the explicit per-server certificate
 option. HTTP and HTTPS are both permitted because the server destination is
 selected at runtime; no other schemes are in scope.
 
+Connector status WebSockets follow the same ownership boundary through an
+injected `WebSocketTransport`. Web supplies a thin browser-WebSocket adapter;
+Desktop supplies the official `tauri-plugin-websocket` client and grants its
+default connect/send capability. This keeps socket construction out of the
+shared connector-status client and gives each installed platform one place to
+apply future native network policy.
+
+`@tauri-apps/plugin-websocket` 2.4.2 does not expose an
+accept-invalid-certificates option in its JavaScript `ConnectionConfig`. Its
+Rust builder accepts a process-wide TLS connector at application startup, but
+that cannot follow Loom's runtime, per-server Store setting. Consequently
+Desktop supports plain `ws:` and normally validated `wss:`, but the existing
+HTTP certificate exception does not extend to self-signed WSS. Initial data and
+actions continue over the native HTTP transport; only live status push is
+unavailable in that configuration. The connect form states this limitation and
+the Desktop adapter is the intended place to add support if the upstream plugin
+gains a per-connection policy.
+
 Desktop stores the serialized access/refresh token pair through
 `tauri-plugin-keyring-store` with its optional wallet/cryptography feature
 disabled. The plugin uses the app identifier as its OS credential-store service
@@ -69,12 +87,12 @@ homelab certificate authorities without disabling TLS or hostname validation.
 Because `src-tauri/gen` is intentionally ignored, a repository script reapplies
 the policy after `tauri android init` in both local builds and CI.
 
-The Tauri CSP allows `connect-src` for both `http:` and `https:` in addition to
-the IPC endpoints Tauri needs. This is intentionally broader than a typical
-fixed-service app: the destination is user-configured, so a build-time hostname
-allowlist cannot express the product requirement. Other resource directives
-remain narrow; remote images are allowed because account avatar URLs come from
-the chosen Loom server.
+The Tauri CSP allows `connect-src` for `http:`, `https:`, `ws:`, and `wss:` in
+addition to the IPC endpoints Tauri needs. This is intentionally broader than a
+typical fixed-service app: the destination is user-configured, so a build-time
+hostname allowlist cannot express the product requirement. Other resource
+directives remain narrow; remote images are allowed because account avatar URLs
+come from the chosen Loom server.
 
 The backend CORS policy explicitly allows Tauri's known webview origins:
 `tauri://localhost`, `https://tauri.localhost`, and `http://tauri.localhost`
@@ -89,10 +107,12 @@ explicit list still limits which browser contexts may read API responses.
 
 - Desktop tokens are stored by the OS credential service, not in its JSON
   store. Mobile tokens are stored in Stronghold, not in its JSON settings.
-- Certificate verification remains enabled unless the user opts out for the
-  selected HTTPS server. The exception accepts more than self-signed roots (for
-  example, an expired certificate), so the UI warns that it is appropriate only
-  for a server the user trusts; hostname mismatch remains an error.
+- Certificate verification for HTTP API traffic remains enabled unless the user
+  opts out for the selected HTTPS server. The exception accepts more than
+  self-signed roots (for example, an expired certificate), so the UI warns that
+  it is appropriate only for a server the user trusts; hostname mismatch remains
+  an error. WebSocket TLS verification cannot currently opt out, so self-signed
+  WSS has no live status push even while API requests continue to work.
 - The native HTTP capability allows arbitrary HTTP(S) hosts because the chosen
   server is not known at build time. A compromised trusted webview could use
   that capability, just as it could use the previously broad runtime

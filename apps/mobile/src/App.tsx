@@ -11,6 +11,7 @@ import {
 
 import { mobileBaseUrlProvider } from "@/adapters/mobileBaseUrlProvider";
 import { mobileTokenStorage } from "@/adapters/mobileTokenStorage";
+import { mobileWebSocketTransport } from "@/adapters/mobileWebSocketTransport";
 import {
   MobilePermissionsIndexRedirect,
   MobilePermissionsRoute,
@@ -114,6 +115,7 @@ export default function App({ queryClient }: { queryClient: QueryClient }) {
         key={server.baseUrl}
         baseUrlProvider={mobileBaseUrlProvider}
         tokenStorage={mobileTokenStorage}
+        webSocketTransport={mobileWebSocketTransport}
       >
         <React.Suspense fallback={null}>
           <MobileRoutes

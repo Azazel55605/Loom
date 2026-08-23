@@ -2,6 +2,7 @@ import { Outlet, useLocation, useNavigate } from "react-router-dom";
 
 import { DesktopAppShell } from "@/components/DesktopAppShell";
 import { createDesktopHttpTransport } from "@/adapters/desktopHttpTransport";
+import { desktopInvalidCertificateWebSocketNote } from "@/adapters/desktopWebSocketTransport";
 import {
   ConnectToServer,
   type ServerConnection,
@@ -48,6 +49,7 @@ export function DesktopSettingsRoute({
               <ConnectToServer
                 embedded
                 supportsInvalidCertificates
+                invalidCertificateNote={desktopInvalidCertificateWebSocketNote}
                 getHttpTransport={createDesktopHttpTransport}
                 initialUrl={connection.baseUrl}
                 initialAllowInvalidCertificates={

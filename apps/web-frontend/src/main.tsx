@@ -10,6 +10,7 @@ import { AuthProvider } from "@loom/ui-kit/lib/auth-context";
 import "@loom/ui-kit/styles.css";
 import { webBaseUrlProvider } from "@/adapters/webBaseUrlProvider";
 import { webTokenStorage } from "@/adapters/webTokenStorage";
+import { webWebSocketTransport } from "@/adapters/webWebSocketTransport";
 
 /**
  * One client for the whole app.
@@ -32,10 +33,11 @@ ReactDOM.createRoot(document.getElementById("root")!).render(
     <QueryClientProvider client={queryClient}>
       <AccentThemeProvider>
         <BrowserRouter>
-      <AuthProvider
-        baseUrlProvider={webBaseUrlProvider}
-        tokenStorage={webTokenStorage}
-      >
+          <AuthProvider
+            baseUrlProvider={webBaseUrlProvider}
+            tokenStorage={webTokenStorage}
+            webSocketTransport={webWebSocketTransport}
+          >
             <App />
             <Toaster />
           </AuthProvider>

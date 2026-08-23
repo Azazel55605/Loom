@@ -13,6 +13,10 @@ import { desktopBaseUrlProvider } from "@/adapters/desktopBaseUrlProvider";
 import { createDesktopHttpTransport } from "@/adapters/desktopHttpTransport";
 import { desktopTokenStorage } from "@/adapters/desktopTokenStorage";
 import {
+  desktopInvalidCertificateWebSocketNote,
+  desktopWebSocketTransport,
+} from "@/adapters/desktopWebSocketTransport";
+import {
   DesktopPermissionsIndexRedirect,
   DesktopPermissionsRoute,
 } from "@/components/DesktopPermissionsRoute";
@@ -94,6 +98,7 @@ export default function App({ queryClient }: { queryClient: QueryClient }) {
     return (
       <ConnectToServer
         supportsInvalidCertificates
+        invalidCertificateNote={desktopInvalidCertificateWebSocketNote}
         getHttpTransport={createDesktopHttpTransport}
         onConnected={async (connection) => {
           await desktopBaseUrlProvider.setConnection(connection);
@@ -130,6 +135,7 @@ export default function App({ queryClient }: { queryClient: QueryClient }) {
           server.connection.allowInvalidCertificates,
         )}
         tokenStorage={desktopTokenStorage}
+        webSocketTransport={desktopWebSocketTransport}
       >
         <React.Suspense fallback={null}>
           <DesktopRoutes

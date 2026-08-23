@@ -22,6 +22,9 @@ importers:
       '@tauri-apps/plugin-store':
         specifier: ^2.4.4
         version: 2.4.4
+      '@tauri-apps/plugin-websocket':
+        specifier: ^2.4.2
+        version: 2.4.2
       lucide-react:
         specifier: ^0.469.0
         version: 0.469.0(react@18.3.1)
@@ -1447,6 +1450,9 @@ packages:
 
   '@tauri-apps/plugin-stronghold@2.3.1':
     resolution: {integrity: sha512-zFbD1Apk/VFdWaoGaoKcouRrZnzLFiNY9b1KDeBaN47sMaMHRYIa+ZDhvbzMOyH314+OHCQBXfe8I/ph59Lp9g==}
+
+  '@tauri-apps/plugin-websocket@2.4.2':
+    resolution: {integrity: sha512-B1/csKPwJH9kLduNoqWFUdCsTgCvLM84T5ZZYK35jeBc9m2cm2m2G/hbSr28ZpVOZrl0x24fCWFe/9rpp7WETw==}
 
   '@types/babel__core@7.20.5':
     resolution: {integrity: sha512-qoQprZvz5wQFJwMDqeseRXWv3rqMvhgpbXFfVyWhbx9X47POIA6i/+dXefEmZKoAgOaTdaIgNSMqMIU61yRyzA==}
@@ -3470,6 +3476,10 @@ snapshots:
       '@tauri-apps/api': 2.11.1
 
   '@tauri-apps/plugin-stronghold@2.3.1':
+    dependencies:
+      '@tauri-apps/api': 2.11.1
+
+  '@tauri-apps/plugin-websocket@2.4.2':
     dependencies:
       '@tauri-apps/api': 2.11.1
 

@@ -1,4 +1,8 @@
 import type { ApiClient, ConnectorError, ConnectorStatus } from "@loom/ui-kit/lib/api";
+import type {
+  TransportSocket,
+  WebSocketTransport,
+} from "@loom/ui-kit/lib/websocket-transport";
 
 const INITIAL_RECONNECT_DELAY_MS = 1_000;
 const MAX_RECONNECT_DELAY_MS = 30_000;
@@ -42,7 +46,8 @@ function isStatusUpdate(value: unknown): value is ConnectorStatusUpdate {
  */
 export class ConnectorStatusSocket {
   private readonly listeners = new Map<string, Set<StatusListener>>();
-  private socket: WebSocket | null = null;
+  private socket: TransportSocket | null = null;
+  private socketOpen = false;
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
   private reconnectDelayMs = INITIAL_RECONNECT_DELAY_MS;
   private generation = 0;
@@ -51,7 +56,10 @@ export class ConnectorStatusSocket {
   private accessToken: string | null;
   private readonly unsubscribeFromTokens: () => void;
 
-  constructor(private readonly api: ApiClient) {
+  constructor(
+    private readonly api: ApiClient,
+    private readonly transport: WebSocketTransport,
+  ) {
     this.accessToken = api.tokenStore.getAccessToken();
     this.unsubscribeFromTokens = api.tokenStore.subscribe(() => {
       const next = api.tokenStore.getAccessToken();
@@ -73,7 +81,7 @@ export class ConnectorStatusSocket {
       callbacks.add(listener);
     }
 
-    if (newlyActive.length > 0 && this.socket?.readyState === WebSocket.OPEN) {
+    if (newlyActive.length > 0 && this.socketOpen) {
       this.send("subscribe", newlyActive);
     }
     this.ensureConnected();
@@ -115,7 +123,7 @@ export class ConnectorStatusSocket {
   }
 
   private afterUnsubscribe(inactive: string[]): void {
-    if (inactive.length > 0 && this.socket?.readyState === WebSocket.OPEN) {
+    if (inactive.length > 0 && this.socketOpen) {
       this.send("unsubscribe", inactive);
     }
     if (this.listeners.size === 0) {
@@ -131,8 +139,7 @@ export class ConnectorStatusSocket {
       this.socket !== null ||
       this.reconnectTimer !== null ||
       this.listeners.size === 0 ||
-      this.accessToken === null ||
-      typeof WebSocket === "undefined"
+      this.accessToken === null
     ) {
       return;
     }
@@ -151,17 +158,30 @@ export class ConnectorStatusSocket {
           return;
         }
 
-        const socket = new WebSocket(websocketUrl(baseUrl, this.accessToken));
+        return this.transport.connect(websocketUrl(baseUrl, this.accessToken));
+      })
+      .then((socket) => {
+        if (socket === undefined) return;
+        if (
+          this.disposed ||
+          generation !== this.generation ||
+          this.listeners.size === 0 ||
+          this.accessToken === null
+        ) {
+          void socket.close().catch(() => undefined);
+          return;
+        }
+
         this.socket = socket;
-        socket.onopen = () => {
+        socket.onOpen(() => {
           if (socket !== this.socket) return;
+          this.socketOpen = true;
           this.reconnectDelayMs = INITIAL_RECONNECT_DELAY_MS;
           this.send("subscribe", [...this.listeners.keys()]);
-        };
-        socket.onmessage = (event) => {
-          if (typeof event.data !== "string") return;
+        });
+        socket.onMessage((data) => {
           try {
-            const update: unknown = JSON.parse(event.data);
+            const update: unknown = JSON.parse(data);
             if (!isStatusUpdate(update)) return;
             for (const listener of this.listeners.get(update.instanceId) ?? []) {
               listener(update);
@@ -170,13 +190,14 @@ export class ConnectorStatusSocket {
             // Unknown or malformed server messages are ignored; a later valid
             // status update still keeps the connection useful.
           }
-        };
-        socket.onclose = () => {
+        });
+        socket.onClose(() => {
           if (socket !== this.socket) return;
           this.socket = null;
+          this.socketOpen = false;
           this.scheduleReconnect();
-        };
-        socket.onerror = () => socket.close();
+        });
+        socket.onError(() => this.failSocket(socket));
       })
       .catch(() => this.scheduleReconnect())
       .finally(() => {
@@ -196,10 +217,18 @@ export class ConnectorStatusSocket {
   private disconnect(): void {
     const socket = this.socket;
     this.socket = null;
+    this.socketOpen = false;
     if (socket !== null) {
-      socket.onclose = null;
-      socket.close();
+      void socket.close().catch(() => undefined);
     }
+  }
+
+  private failSocket(socket: TransportSocket): void {
+    if (socket !== this.socket) return;
+    this.socket = null;
+    this.socketOpen = false;
+    void socket.close().catch(() => undefined);
+    this.scheduleReconnect();
   }
 
   private scheduleReconnect(): void {
@@ -225,7 +254,10 @@ export class ConnectorStatusSocket {
   }
 
   private send(type: "subscribe" | "unsubscribe", instanceIds: readonly string[]): void {
-    if (instanceIds.length === 0 || this.socket?.readyState !== WebSocket.OPEN) return;
-    this.socket.send(JSON.stringify({ type, instanceIds }));
+    const socket = this.socket;
+    if (instanceIds.length === 0 || socket === null || !this.socketOpen) return;
+    void socket
+      .send(JSON.stringify({ type, instanceIds }))
+      .catch(() => this.failSocket(socket));
   }
 }

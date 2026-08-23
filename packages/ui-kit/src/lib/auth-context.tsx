@@ -11,6 +11,7 @@ import {
 import { ApiClientProvider } from "@loom/ui-kit/lib/api-context";
 import { ConnectorStatusSocket } from "@loom/ui-kit/lib/connector-socket";
 import type { StoredTokens, TokenStorageAdapter } from "@loom/ui-kit/lib/token-store";
+import type { WebSocketTransport } from "@loom/ui-kit/lib/websocket-transport";
 
 const PROACTIVE_REFRESH_BUFFER_MS = 60_000;
 
@@ -38,18 +39,22 @@ const AuthContext = React.createContext<AuthContextValue | null>(null);
 export function AuthProvider({
   baseUrlProvider,
   httpTransport,
+  webSocketTransport,
   tokenStorage,
   children,
 }: {
   baseUrlProvider: BaseUrlProvider;
   httpTransport?: HttpTransport;
+  webSocketTransport: WebSocketTransport;
   tokenStorage: TokenStorageAdapter;
   children: React.ReactNode;
 }) {
   const [client] = React.useState(() =>
     createApiClient({ baseUrlProvider, httpTransport, tokenStorage }),
   );
-  const [connectorSocket] = React.useState(() => new ConnectorStatusSocket(client));
+  const [connectorSocket] = React.useState(
+    () => new ConnectorStatusSocket(client, webSocketTransport),
+  );
   const [runtimeReady, setRuntimeReady] = React.useState(false);
   const session = React.useSyncExternalStore<StoredTokens | null>(
     client.tokenStore.subscribe,
