@@ -2,15 +2,18 @@
 
 use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
-use bollard::models::{ContainerInspectResponse, ContainerStatsResponse, ContainerSummary};
+use bollard::models::{
+    ContainerCpuStats, ContainerInspectResponse, ContainerStatsResponse, ContainerSummary,
+};
 use bollard::query_parameters::{
     ListContainersOptionsBuilder, LogsOptionsBuilder, StatsOptionsBuilder,
 };
 use bollard::Docker;
 use chrono::{DateTime, Utc};
-use futures_util::StreamExt;
+use futures_util::{stream, StreamExt};
 use loom_core::connector::{
     details::set_detail, ActionResult, ActionWidgetType, ChartType, Connector, ConnectorAction,
     ConnectorError, ConnectorMetadata, ConnectorStatus, DataPointDescriptor, DataPointValueType,
@@ -76,6 +79,18 @@ pub const HISTORY_CAPACITY: usize = 50;
 /// How many log lines the `logs` data point carries.
 pub const LOG_TAIL_LINES: usize = 20;
 
+/// Slow daemon-wide values do not need five-second freshness.
+///
+/// `/system/df` can return megabytes and take several seconds even through a
+/// local socket proxy. Fetching it on every ordinary status poll both loads the
+/// daemon and turns an otherwise quick health check into a likely client
+/// timeout on a remote host. Version is effectively static for the same
+/// process lifetime, so it shares this conservative refresh window.
+const HOST_DETAILS_REFRESH_INTERVAL: Duration = Duration::from_secs(60);
+
+/// Keep a large host from opening an unbounded burst through its socket proxy.
+const CONTAINER_POLL_CONCURRENCY: usize = 4;
+
 /// One point in a history buffer.
 ///
 /// Serialized as `{ "timestamp": "…", "value": … }`, which is the shape the
@@ -92,6 +107,10 @@ struct HistorySample {
 struct History {
     cpu: VecDeque<HistorySample>,
     memory: VecDeque<HistorySample>,
+    /// The one-shot Docker stats endpoint has no useful `precpu_stats`.
+    /// Retaining the previous cumulative counters here gives the next poll the
+    /// same delta without holding one HTTP request open for two sample cycles.
+    previous_cpu: Option<ContainerCpuStats>,
 }
 
 impl History {
@@ -107,6 +126,14 @@ impl History {
             });
         }
     }
+}
+
+#[derive(Debug, Clone)]
+struct CachedHostDetails {
+    disk_usage: i64,
+    version: String,
+    errors: Vec<String>,
+    refreshed_at: Instant,
 }
 
 /// Monitors one Docker host and every addressable container below it.
@@ -129,6 +156,9 @@ pub struct DockerConnector {
     /// synchronous in the shared trait, so live target discovery refreshes
     /// this cache before descriptors are read.
     known_targets: Arc<Mutex<Vec<SubTarget>>>,
+    /// Cached because Docker's disk-usage endpoint is far more expensive than
+    /// the five-second health cadence and can overwhelm a remote socket proxy.
+    host_details: Arc<Mutex<Option<CachedHostDetails>>>,
 }
 
 /// Hand-written because `bollard::Docker` is not `Debug`, and because the
@@ -165,6 +195,7 @@ impl DockerConnector {
             control,
             history: Arc::new(Mutex::new(HashMap::new())),
             known_targets: Arc::new(Mutex::new(Vec::new())),
+            host_details: Arc::new(Mutex::new(None)),
         };
         connector.list_sub_targets_live().await?;
         Ok(connector)
@@ -175,23 +206,22 @@ impl DockerConnector {
         Self::connect(DockerConnectorConfig::from_value(config)?).await
     }
 
-    /// One sample of stats, with `precpu_stats` populated.
+    /// One immediate sample of cumulative container stats.
     ///
-    /// `stream(false)` and **not** `one_shot(true)`, which is the trap in this
-    /// endpoint. With `stream=false` Docker waits for two collection cycles and
-    /// returns a single sample carrying both `cpu_stats` and `precpu_stats`,
-    /// which is exactly the pair the CPU formula needs — no state kept between
-    /// polls, no first-poll blind spot. With `one_shot=true` it returns
-    /// immediately and leaves `precpu_stats` zeroed, so every CPU reading would
-    /// be a confident, permanent 0%.
-    ///
-    /// The cost is that this call blocks for roughly one Docker collection
-    /// interval (~1s). That is why the timeout is what it is.
+    /// Uses Docker's one-shot form so one container does not hold the proxy
+    /// connection open for one or two collection cycles. The previous
+    /// cumulative counters live in [`History`], making the second and later
+    /// polls just as measurable without multiplying poll duration by the
+    /// number of containers. The first sample is deliberately 0% because no
+    /// interval exists yet.
     async fn sample_stats(
         &self,
         container_name: &str,
     ) -> Result<Option<ContainerStatsResponse>, ConnectorError> {
-        let options = StatsOptionsBuilder::new().stream(false).build();
+        let options = StatsOptionsBuilder::new()
+            .stream(false)
+            .one_shot(true)
+            .build();
         let mut stream = self.docker.stats(container_name, Some(options));
 
         match stream.next().await {
@@ -343,6 +373,21 @@ fn poll_failure_reason(
     }
 }
 
+/// Describes a failed optional host reading without implying that Docker itself
+/// is unreachable.
+///
+/// These messages are surfaced beside a Degraded badge. A bare Bollard
+/// `Timeout error` made an otherwise working socket proxy look disconnected,
+/// even though container status and actions were still available.
+fn optional_host_read_failure(label: &str, error: &bollard::errors::Error) -> String {
+    match error {
+        bollard::errors::Error::RequestTimeoutError => {
+            format!("{label} timed out. Container status and actions remain available.")
+        }
+        other => format!("{label} is unavailable: {other}"),
+    }
+}
+
 /// Turns a failed inspect into the error that names the right thing to fix.
 fn inspect_failure(
     config: &DockerConnectorConfig,
@@ -413,22 +458,27 @@ impl Connector for DockerConnector {
         // even when no active placement displays it. That is reasonable for a
         // typical homelab count; target-aware polling can be revisited if this
         // becomes a demonstrated cost.
-        for target in targets {
-            let (_target_health, values) =
-                match self.docker.inspect_container(&target.id, None).await {
-                    Ok(inspect) => self.status_from(&target.id, inspect).await,
-                    Err(error) => (
-                        HealthState::Down,
-                        unavailable_details(&poll_failure_reason(&self.config, &target.id, &error)),
-                    ),
-                };
+        let target_values = stream::iter(targets.into_iter().map(|target| async move {
+            let values = match self.docker.inspect_container(&target.id, None).await {
+                Ok(inspect) => self.status_from(&target.id, inspect).await.1,
+                Err(error) => {
+                    unavailable_details(&poll_failure_reason(&self.config, &target.id, &error))
+                }
+            };
+            (target.id, values)
+        }))
+        .buffer_unordered(CONTAINER_POLL_CONCURRENCY)
+        .collect::<Vec<_>>()
+        .await;
+
+        for (target_id, values) in target_values {
             // Instance health describes the daemon connection, not the
             // least-healthy container. A deliberately stopped container is a
             // valid sub-target state; its target-scoped `status` detail tells
             // the placement without making the whole Docker host appear Down.
             if let Value::Object(values) = values {
                 for (id, value) in values {
-                    set_detail(&mut status.details, Some(&target.id), &id, value);
+                    set_detail(&mut status.details, Some(&target_id), &id, value);
                 }
             }
         }
@@ -700,13 +750,7 @@ fn container_actions(target_id: &str) -> Vec<ConnectorAction> {
 impl DockerConnector {
     /// Reads the daemon-wide summary used by host mode.
     async fn host_status(&self) -> ConnectorStatus {
-        let (info, usage, version) = tokio::join!(
-            self.docker.info(),
-            self.docker.df(None),
-            self.docker.version()
-        );
-
-        let info = match info {
+        let info = match self.docker.info().await {
             Ok(info) => info,
             Err(error) => {
                 return ConnectorStatus::new(
@@ -718,29 +762,8 @@ impl DockerConnector {
                 );
             }
         };
-        let mut partial_errors = Vec::new();
-        let disk_usage = match usage {
-            Ok(usage) => [
-                usage.image_usage.and_then(|value| value.total_size),
-                usage.container_usage.and_then(|value| value.total_size),
-                usage.volume_usage.and_then(|value| value.total_size),
-                usage.build_cache_usage.and_then(|value| value.total_size),
-            ]
-            .into_iter()
-            .flatten()
-            .sum::<i64>(),
-            Err(error) => {
-                partial_errors.push(format!("reading Docker disk usage failed: {error}"));
-                0
-            }
-        };
-        let version = match version {
-            Ok(version) => version.version.unwrap_or_else(|| "unknown".to_owned()),
-            Err(error) => {
-                partial_errors.push(format!("reading Docker version failed: {error}"));
-                "unavailable".to_owned()
-            }
-        };
+        let slow_details = self.host_details().await;
+        let partial_errors = slow_details.errors;
 
         let health = if partial_errors.is_empty() {
             HealthState::Healthy
@@ -765,8 +788,8 @@ impl DockerConnector {
                 DATA_POINT_TOTAL_IMAGES,
                 json!(info.images.unwrap_or_default()),
             ),
-            (DATA_POINT_DISK_USAGE_BYTES, json!(disk_usage)),
-            (DATA_POINT_DOCKER_VERSION, json!(version)),
+            (DATA_POINT_DISK_USAGE_BYTES, json!(slow_details.disk_usage)),
+            (DATA_POINT_DOCKER_VERSION, json!(slow_details.version)),
         ] {
             set_detail(&mut details, None, id, value);
         }
@@ -780,6 +803,55 @@ impl DockerConnector {
         }
 
         ConnectorStatus::new(health, details)
+    }
+
+    async fn host_details(&self) -> CachedHostDetails {
+        if let Some(cached) = self
+            .host_details
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .as_ref()
+            .filter(|cached| cached.refreshed_at.elapsed() < HOST_DETAILS_REFRESH_INTERVAL)
+            .cloned()
+        {
+            return cached;
+        }
+
+        let (usage, version) = tokio::join!(self.docker.df(None), self.docker.version());
+        let mut errors = Vec::new();
+        let disk_usage = match usage {
+            Ok(usage) => [
+                usage.image_usage.and_then(|value| value.total_size),
+                usage.container_usage.and_then(|value| value.total_size),
+                usage.volume_usage.and_then(|value| value.total_size),
+                usage.build_cache_usage.and_then(|value| value.total_size),
+            ]
+            .into_iter()
+            .flatten()
+            .sum::<i64>(),
+            Err(error) => {
+                errors.push(optional_host_read_failure("Docker disk usage", &error));
+                0
+            }
+        };
+        let version = match version {
+            Ok(version) => version.version.unwrap_or_else(|| "unknown".to_owned()),
+            Err(error) => {
+                errors.push(optional_host_read_failure("Docker version check", &error));
+                "unavailable".to_owned()
+            }
+        };
+        let refreshed = CachedHostDetails {
+            disk_usage,
+            version,
+            errors,
+            refreshed_at: Instant::now(),
+        };
+        *self
+            .host_details
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(refreshed.clone());
+        refreshed
     }
 
     /// Assembles the status from a successful inspect.
@@ -803,10 +875,10 @@ impl DockerConnector {
         // and asking for them otherwise means waiting out the stats collection
         // interval to be told nothing. A stopped container's poll is therefore
         // also the fast one.
-        let (cpu, memory) = if running {
+        let (current_cpu, memory) = if running {
             match self.sample_stats(container_name).await {
                 Ok(Some(sample)) => (
-                    cpu_percent(sample.cpu_stats.as_ref(), sample.precpu_stats.as_ref()),
+                    sample.cpu_stats,
                     sample
                         .memory_stats
                         .and_then(|memory| memory.usage)
@@ -815,17 +887,17 @@ impl DockerConnector {
                 // A container that stopped between the inspect and the stats
                 // call, or a stats read that failed. Neither is worth failing
                 // the poll for: the state we already read is the headline.
-                Ok(None) | Err(_) => (0.0, 0.0),
+                Ok(None) | Err(_) => (None, 0.0),
             }
         } else {
-            (0.0, 0.0)
+            (None, 0.0)
         };
 
         let now = Utc::now();
         // History is recorded only while running, so a stopped container leaves
         // a gap in its chart rather than a flat line at zero that looks like a
         // measurement.
-        let (cpu_history, memory_history) = {
+        let (cpu, cpu_history, memory_history) = {
             let mut histories = self.history.lock().unwrap_or_else(|poisoned| {
                 // A panic in another thread while holding this lock cannot
                 // corrupt a ring buffer of numbers, so recovering is strictly
@@ -833,10 +905,15 @@ impl DockerConnector {
                 poisoned.into_inner()
             });
             let history = histories.entry(container_name.to_owned()).or_default();
+            let cpu = cpu_percent(current_cpu.as_ref(), history.previous_cpu.as_ref());
             if running {
+                history.previous_cpu = current_cpu;
                 history.record(cpu, memory, now);
+            } else {
+                history.previous_cpu = None;
             }
             (
+                cpu,
                 serde_json::to_value(&history.cpu).unwrap_or(Value::Null),
                 serde_json::to_value(&history.memory).unwrap_or(Value::Null),
             )
@@ -927,6 +1004,7 @@ mod tests {
                     })
                     .collect(),
             )),
+            host_details: Arc::new(Mutex::new(None)),
         }
     }
 
@@ -984,6 +1062,17 @@ mod tests {
             vec![ACTION_RESTART.to_owned()],
             "stop and start take the container where the user asked; only restart \
              brings it back on its own"
+        );
+    }
+
+    #[test]
+    fn an_optional_timeout_explains_that_the_connector_still_works() {
+        assert_eq!(
+            optional_host_read_failure(
+                "Docker disk usage",
+                &bollard::errors::Error::RequestTimeoutError,
+            ),
+            "Docker disk usage timed out. Container status and actions remain available."
         );
     }
 

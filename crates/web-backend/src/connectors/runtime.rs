@@ -395,12 +395,21 @@ impl ConnectorRuntime {
             .map_err(BuildError::Rejected)
     }
 
-    /// Inserts or replaces the live connector for `id` and immediately seeds
-    /// its cache. This keeps create/update responses useful without making
-    /// request handlers call `status()` themselves.
+    /// Inserts or replaces the live connector for `id` and schedules a poll.
+    ///
+    /// Status collection must not be awaited by the create/update request. A
+    /// Docker instance can expose dozens of containers, and its poll includes
+    /// real remote I/O; making persistence wait for that work turns a valid
+    /// connector into a client-side "network error" even though the row and
+    /// connection were accepted successfully. The process poller picks this up
+    /// on its next one-second tick and publishes the resulting snapshot.
     pub async fn insert(&self, id: Uuid, connector: Arc<dyn Connector>) {
         self.instances.write().await.insert(id, connector);
-        self.poll_instance(id).await;
+        self.statuses.write().await.remove(&id);
+        self.schedules
+            .write()
+            .await
+            .insert(id, PollSchedule::due_now());
     }
 
     /// Drops the live connector for `id`.
@@ -497,7 +506,8 @@ impl ConnectorRuntime {
         .await;
     }
 
-    /// Brings an instance's next poll forward to now and clears its backoff.
+    /// Brings an instance's next poll forward to now without blocking the
+    /// action response on that poll's remote I/O.
     ///
     /// Called after an action, because an action is the strongest possible
     /// signal that the state is about to change and that somebody is watching.
@@ -505,17 +515,14 @@ impl ConnectorRuntime {
     /// would leave the dashboard stale for two minutes at the exact moment its
     /// user is looking at it.
     pub async fn refresh_now(&self, id: Uuid) {
-        {
-            let mut schedules = self.schedules.write().await;
-            let schedule = schedules.entry(id).or_insert_with(PollSchedule::due_now);
-            // Only the due time. The failure history is deliberately kept: if
-            // this poll fails too, the instance goes straight back to the
-            // interval it had earned rather than starting its backoff over.
-            // Pressing a button is a reason to look now, not evidence that the
-            // service is fixed.
-            schedule.next_due = time::Instant::now();
-        }
-        self.poll_instance(id).await;
+        let mut schedules = self.schedules.write().await;
+        let schedule = schedules.entry(id).or_insert_with(PollSchedule::due_now);
+        // Only the due time. The failure history is deliberately kept: if the
+        // eventual poll fails too, the instance goes straight back to the
+        // interval it had earned rather than starting its backoff over.
+        // Pressing a button is a reason to look soon, not evidence that the
+        // service is fixed.
+        schedule.next_due = time::Instant::now();
     }
 
     /// Subscribe to status changes after the current cache snapshot.
@@ -533,6 +540,7 @@ impl ConnectorRuntime {
     /// Connector calls happen without holding the instance map lock. A failed
     /// connector becomes an error snapshot and cannot prevent the remaining
     /// connectors from being polled.
+    #[cfg(test)]
     pub async fn poll_once(&self) {
         let instances: Vec<(Uuid, Arc<dyn Connector>)> = self
             .instances
@@ -647,12 +655,6 @@ impl ConnectorRuntime {
                 runtime.poll_due().await;
             }
         })
-    }
-
-    async fn poll_instance(&self, id: Uuid) {
-        if let Some(connector) = self.get(&id).await {
-            self.poll_connector(id, connector).await;
-        }
     }
 
     async fn poll_connector(&self, id: Uuid, connector: Arc<dyn Connector>) {
@@ -785,6 +787,7 @@ mod tests {
             .await
             .expect("the fixture builds");
         runtime.insert(id, connector).await;
+        runtime.poll_once().await;
 
         // The poll result underneath the overlay is healthy, and stays healthy:
         // the marker is an addition, not a replacement, so a client that wants
@@ -949,14 +952,19 @@ mod tests {
             "an instance that is not due must not be polled"
         );
 
-        // An action brings the next poll forward and runs it there and then,
-        // so a user who just pressed a button sees the result rather than
-        // waiting out a backoff they cannot see.
+        // An action brings the next poll forward without making the action's
+        // HTTP response wait for remote status I/O.
         runtime.refresh_now(id).await;
+        assert_eq!(
+            schedule_of(&runtime, &id).await.consecutive_failures,
+            1,
+            "scheduling a refresh must not itself perform the poll"
+        );
+        runtime.poll_due().await;
         let after_action = schedule_of(&runtime, &id).await;
         assert_eq!(
             after_action.consecutive_failures, 2,
-            "refreshing polls immediately, and this instance is still failing"
+            "the next poller tick performs the scheduled refresh"
         );
         assert_eq!(
             after_action.interval(),
@@ -1089,6 +1097,11 @@ mod tests {
             .insert(id, runtime.build(DEBUG_TYPE_ID, json!({})).await.unwrap())
             .await;
         assert!(runtime.get(&id).await.is_some());
+        assert!(
+            runtime.cached_status(&id).await.is_none(),
+            "insert must not block the request path on an initial status poll"
+        );
+        runtime.poll_once().await;
         assert!(runtime.cached_status(&id).await.is_some());
         assert_eq!(runtime.len().await, 1);
 
@@ -1128,7 +1141,8 @@ mod tests {
             .unwrap();
 
         runtime.insert(id, Arc::clone(&connector)).await;
-        let initial = updates.recv().await.expect("insert poll must broadcast");
+        runtime.poll_once().await;
+        let initial = updates.recv().await.expect("first poll must broadcast");
         assert_eq!(initial.instance_id, id);
         assert!(initial.snapshot.status.is_some());
 
@@ -1163,6 +1177,7 @@ mod tests {
             .unwrap();
 
         runtime.insert(id, connector).await;
+        runtime.poll_once().await;
 
         let snapshot = runtime.cached_status(&id).await.expect("poll result");
         assert!(snapshot.status.is_none());
@@ -1202,6 +1217,12 @@ mod tests {
             )
             .await;
         old_poll.await.expect("poll task must finish");
+
+        assert!(
+            runtime.cached_status(&id).await.is_none(),
+            "replacement clears the stale snapshot until its background poll"
+        );
+        runtime.poll_once().await;
 
         let snapshot = runtime.cached_status(&id).await.expect("new snapshot");
         let details = snapshot.status.expect("successful status").details;

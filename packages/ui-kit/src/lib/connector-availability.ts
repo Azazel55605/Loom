@@ -38,6 +38,8 @@ export type ConnectorAvailability = {
    * one, and this is the sentence that tells them apart.
    */
   unavailableReason: string | null;
+  /** Why a reachable connector is only partially healthy. */
+  statusReason: string | null;
   /** The network-level explanation for a Down instance, when there is one. */
   diagnosis: string | null;
 };
@@ -64,6 +66,7 @@ export function connectorAvailability(reading: ConnectorReading): ConnectorAvail
       isPending: true,
       actionsDisabled: false,
       unavailableReason: null,
+      statusReason: null,
       diagnosis: null,
     };
   }
@@ -79,6 +82,7 @@ export function connectorAvailability(reading: ConnectorReading): ConnectorAvail
       isPending: false,
       actionsDisabled: true,
       unavailableReason: "Unavailable — connector is unreachable",
+      statusReason: null,
       diagnosis: reading.diagnosis ?? null,
     };
   }
@@ -93,6 +97,19 @@ export function connectorAvailability(reading: ConnectorReading): ConnectorAvail
     actionsDisabled: health === "down",
     unavailableReason:
       health === "down" ? "Unavailable — connector is unreachable" : null,
+    statusReason: health === "degraded" ? degradedReason(reading.status?.details) : null,
     diagnosis: health === "down" ? (reading.diagnosis ?? null) : null,
   };
+}
+
+function degradedReason(details: unknown): string {
+  if (typeof details === "object" && details !== null && !Array.isArray(details)) {
+    const host = (details as Record<string, unknown>)[""];
+    if (typeof host === "object" && host !== null && !Array.isArray(host)) {
+      const error = (host as Record<string, unknown>).error;
+      if (typeof error === "string" && error.trim() !== "") return error;
+    }
+  }
+
+  return "The connector is reachable, but one or more status checks are unavailable.";
 }

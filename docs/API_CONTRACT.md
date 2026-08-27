@@ -856,8 +856,8 @@ Requires a **global** `connectors.view` grant.
 | `tags` | array of strings | Free-form administrator labels assigned to this instance, sorted alphabetically. | Always present; may be empty. |
 | `metadata` | object | [`ConnectorMetadata`](#connectormetadata) from the live connector. | Always present. |
 | `iconOverride` | string | The user's icon for *this instance*, overriding `metadata.icon`. Same [reference convention](#icon-references). Set through `PATCH /connector-instances/{id}`. | **`null`** when no override is set — fall back to `metadata.icon`, then to the client's own default. |
-| `status` | object | [`ConnectorStatus`](#connectorstatus) from the latest successful poll. | **`null`** when the latest check itself failed. |
-| `statusError` | object | The [`ConnectorError`](#connectorerror) that made `status` null. | **Omitted** (not null) on the healthy path. |
+| `status` | object | [`ConnectorStatus`](#connectorstatus) from the latest completed poll. | **`null`** before the first background poll or when the latest check itself failed. |
+| `statusError` | object | The [`ConnectorError`](#connectorerror) that made `status` null. | **Omitted** (not null) before the first poll and on the healthy path. |
 | `pendingOperation` | object | A disruptive action Loom is running against this instance right now: `{ actionLabel, startedAt }`. See [Pending operations and diagnosis](#pending-operations-and-diagnosis). | **`null`** when nothing is running. |
 | `diagnosis` | string | Why this instance is Down, established by probing the network beneath it. | **`null`** unless it is Down *and* its connector names an endpoint worth probing. |
 | `displayFields` | array | [`DisplayField`](#displayfield) values the connector agreed may be shown. | Always present; may be empty. |
@@ -1146,7 +1146,11 @@ shape check cannot: an unknown key, or a value that is the right type and still
 out of range. A row the factory would refuse must never reach the database, or
 it would be silently skipped at the next startup.
 
-**Response 201** — the same body as `GET /connector-instances/{id}`.
+**Response 201** — the same body as `GET /connector-instances/{id}`. Building
+the connector still validates and pings its configured endpoint before the row
+is written, but the response does not wait for a full status inventory. It may
+therefore contain `"status": null` with no `statusError`; the background poller
+fills it shortly afterward.
 
 | Status | Meaning |
 | --- | --- |
@@ -1198,7 +1202,9 @@ one fewer way for the two to disagree.
 
 The live connector is rebuilt and replaced on every successful update, whether
 or not `config` changed. That is also how an instance that failed to load at
-startup gets a second chance once its configuration is fixed.
+startup gets a second chance once its configuration is fixed. As with create,
+the response does not wait for the replacement's full status inventory, so its
+status is initially null until the scheduled background poll completes.
 
 When `tags` is present, replacing the tag rows and updating the instance happen
 in one database transaction. Omitting `tags` leaves the existing set alone;
@@ -1267,6 +1273,11 @@ one who explicitly submitted an empty form.
 
 A 200 with `success: false` is a normal answer, not an error; see
 [`ActionResult`](#actionresult) for why that is different from a 5xx.
+
+After any action returns, Loom schedules an immediate background status poll.
+The action response does not wait for that inventory: the action itself is the
+request's result, while status updates continue through the normal polling and
+WebSocket path.
 
 A 403 is returned **before** the instance id is looked up, so an unauthorized
 caller gets the same response whether or not the id exists. Otherwise the

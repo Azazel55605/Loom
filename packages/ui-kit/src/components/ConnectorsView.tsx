@@ -664,7 +664,14 @@ function ConnectorTableRow({
         <TagBadges tags={instance.tags} />
       </TableCell>
       <TableCell>
-        <Badge variant={availability.tone}>{availability.label}</Badge>
+        <div className="flex max-w-72 flex-col items-start gap-1">
+          <Badge variant={availability.tone}>{availability.label}</Badge>
+          {availability.statusReason !== null ? (
+            <p className="text-xs leading-relaxed text-muted-foreground">
+              {availability.statusReason}
+            </p>
+          ) : null}
+        </div>
       </TableCell>
       <TableCell className="whitespace-nowrap text-muted-foreground">
         {instance.status === null ? (

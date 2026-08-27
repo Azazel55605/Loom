@@ -44,10 +44,18 @@ manual cleanup. No old instance or placement is migrated automatically.
 - Discovery and sub-target enumeration coexist, with intentionally separate
   meanings and endpoints.
 - A placement cannot bind data or actions from a target other than its own.
-- The Docker poll currently fetches full inspect, stats, and log detail for
-  every container. This is acceptable for typical homelab counts. Fetching
-  only targets referenced by active placements is a future optimization if
-  polling cost becomes material.
+- The Docker poll fetches inspect, one-shot stats, and log detail for every
+  container with bounded concurrency. CPU deltas use counters retained from
+  the previous poll instead of waiting for Docker to produce two samples for
+  every container. Daemon-wide disk usage and version are cached for one
+  minute because `/system/df` can be large and slow through a socket proxy.
+  Fetching only targets referenced by active placements remains a possible
+  future optimization.
+- Connector creation, replacement, action responses, and server startup do
+  not wait for a status inventory. They schedule one on the background poller;
+  until it completes, a new or replaced connector has a nullable status. This
+  keeps a slow remote endpoint from turning an already-accepted operation into
+  a client-side network timeout.
 - `connectors.control` remains scoped to a connector instance. A grant over one
   Docker instance can control every container within that daemon connection.
   Per-target permission scoping is a possible future enhancement; it is not

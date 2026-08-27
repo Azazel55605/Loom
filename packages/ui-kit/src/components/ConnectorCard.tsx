@@ -260,12 +260,19 @@ export function ConnectorCard({
         )}
 
         {status !== null ? (
-          <p className="text-sm text-muted-foreground">
-            Checked{" "}
-            <time dateTime={status.lastChecked} title={status.lastChecked}>
-              {formatChecked(status.lastChecked)}
-            </time>
-          </p>
+          <div className="flex flex-col gap-1">
+            {availability.statusReason !== null ? (
+              <p className="text-sm leading-relaxed text-muted-foreground">
+                {availability.statusReason}
+              </p>
+            ) : null}
+            <p className="text-sm text-muted-foreground">
+              Checked{" "}
+              <time dateTime={status.lastChecked} title={status.lastChecked}>
+                {formatChecked(status.lastChecked)}
+              </time>
+            </p>
+          </div>
         ) : (
           // A connector Loom could not get a reading from at all — distinct
           // from one that reported itself down, which is a successful check.

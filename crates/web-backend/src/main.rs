@@ -205,7 +205,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // the live form of what is stored in `connector_instances`.
     let connectors =
         connectors::ConnectorRuntime::load(&pool, connectors::builtin_registry()).await?;
-    connectors.poll_once().await;
     let _poller = connectors.spawn_poller();
 
     let listener = tokio::net::TcpListener::bind(&bind_addr).await?;
@@ -1281,7 +1280,11 @@ mod tests {
         // once someone sets one.
         assert_eq!(created["iconOverride"], serde_json::Value::Null);
         assert_eq!(created["tags"], serde_json::json!([]));
-        assert_eq!(created["status"]["health"], "healthy");
+        assert_eq!(
+            created["status"],
+            serde_json::Value::Null,
+            "creation must not wait for a potentially expensive remote poll"
+        );
         assert!(!created["displayFields"]
             .as_array()
             .expect("array")
@@ -1293,6 +1296,10 @@ mod tests {
             .is_empty());
         assert_eq!(created["discoverableType"], "debug");
         assert_eq!(created["supportsSubTargets"], true);
+
+        // The poller fills status after the response rather than extending the
+        // create request until every remote sub-target has been sampled.
+        app.connectors.poll_once().await;
 
         // Detail carries what a placement UI needs.
         let (status, detail) = send(
@@ -1775,6 +1782,10 @@ mod tests {
             .collect();
         assert_eq!(disruptive, vec!["restart"]);
 
+        // Seed the underlying status explicitly; production's process poller
+        // does this on its next tick.
+        app.connectors.poll_once().await;
+
         let router = app.router.clone();
         let token = access.clone();
         let restart_id = id.clone();
@@ -1894,10 +1905,18 @@ mod tests {
         .await;
         assert_eq!(status, StatusCode::CREATED, "{created:#}");
 
-        assert_eq!(created["status"]["health"], "down");
-        let diagnosis = created["diagnosis"]
+        let id = created["id"].as_str().expect("id");
+        assert_eq!(created["status"], serde_json::Value::Null);
+        app.connectors.poll_once().await;
+        let (_, polled) = send(
+            &app.router,
+            get_with_auth(&format!("/connector-instances/{id}"), &bearer(&access)),
+        )
+        .await;
+        assert_eq!(polled["status"]["health"], "down");
+        let diagnosis = polled["diagnosis"]
             .as_str()
-            .unwrap_or_else(|| panic!("a Down instance should carry a diagnosis: {created:#}"));
+            .unwrap_or_else(|| panic!("a Down instance should carry a diagnosis: {polled:#}"));
         assert!(
             diagnosis.contains("unreachable on port `1`"),
             "the diagnosis should name the port that was tried: {diagnosis}"

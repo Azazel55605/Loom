@@ -136,6 +136,11 @@ export function ConnectorDetailModal({
           <DialogDescription>
             {instance.metadata.name} · {instance.connectorType} · v{instance.metadata.version}
           </DialogDescription>
+          {availability.statusReason !== null ? (
+            <p className="text-xs leading-relaxed text-muted-foreground">
+              {availability.statusReason}
+            </p>
+          ) : null}
           {/* Beneath the Badge that already said something is wrong. A plain
               line rather than a second Alert: one message per problem. */}
           {availability.diagnosis !== null ? (

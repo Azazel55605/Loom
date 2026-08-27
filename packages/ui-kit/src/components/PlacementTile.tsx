@@ -366,6 +366,12 @@ export function PlacementTile({
           </Alert>
         ) : null}
 
+        {availability.statusReason !== null ? (
+          <p className="mb-3 text-xs leading-relaxed text-muted-foreground">
+            {availability.statusReason}
+          </p>
+        ) : null}
+
         {/* The network-level explanation, when there is one. A plain line
             rather than another Alert: it sits under a Badge that has already
             said something is wrong, and a second red box would be shouting the
