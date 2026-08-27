@@ -1,9 +1,9 @@
 {
   "core": "0.2.0",
-  "connector-docker": "0.1.0",
-  "web-backend": "0.1.0",
-  "web-frontend": "0.1.0",
-  "desktop": "0.1.0",
+  "connector-docker": "0.2.0",
+  "web-backend": "0.2.0",
+  "web-frontend": "0.2.0",
+  "desktop": "0.2.0",
   "mobile": "0.3.0",
   "mobile-android-version-code": 3
 }

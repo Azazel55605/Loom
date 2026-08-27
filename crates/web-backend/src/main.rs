@@ -307,6 +307,54 @@ mod tests {
         }
     }
 
+    #[tokio::test]
+    async fn docker_type_merge_migration_relabels_both_legacy_modes() {
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .expect("in-memory database");
+        sqlx::query(
+            "CREATE TABLE connector_instances (id TEXT PRIMARY KEY, connector_type TEXT NOT NULL)",
+        )
+        .execute(&pool)
+        .await
+        .expect("representative legacy table");
+        for (id, connector_type) in [
+            ("container", "docker-container"),
+            ("host", "docker-host"),
+            ("debug", "debug"),
+        ] {
+            sqlx::query("INSERT INTO connector_instances (id, connector_type) VALUES (?, ?)")
+                .bind(id)
+                .bind(connector_type)
+                .execute(&pool)
+                .await
+                .expect("representative pre-existing row");
+        }
+
+        sqlx::raw_sql(include_str!(
+            "../migrations/20260827000001_merge_docker_connector_types.sql"
+        ))
+        .execute(&pool)
+        .await
+        .expect("Docker connector merge migration");
+
+        let rows: Vec<(String, String)> =
+            sqlx::query_as("SELECT id, connector_type FROM connector_instances ORDER BY id")
+                .fetch_all(&pool)
+                .await
+                .expect("migrated rows");
+        assert_eq!(
+            rows,
+            vec![
+                ("container".to_owned(), "docker".to_owned()),
+                ("debug".to_owned(), "debug".to_owned()),
+                ("host".to_owned(), "docker".to_owned()),
+            ]
+        );
+    }
+
     async fn send(app: &Router, request: Request<Body>) -> (StatusCode, serde_json::Value) {
         let response = app
             .clone()
@@ -993,6 +1041,10 @@ mod tests {
         assert_eq!(status, StatusCode::OK);
 
         let types = body.as_array().expect("array");
+        assert_eq!(types.len(), 2, "the catalog should contain one Docker type");
+        assert!(types.iter().all(|entry| {
+            entry["typeId"] != "docker-host" && entry["typeId"] != "docker-container"
+        }));
         let by_id = |type_id: &str| {
             types
                 .iter()
@@ -1012,6 +1064,7 @@ mod tests {
 
         let debug = by_id("debug");
         assert_eq!(debug["discoverableType"], "debug");
+        assert_eq!(debug["discoveryTargetField"], serde_json::Value::Null);
         assert!(debug["setupGuide"]["description"]
             .as_str()
             .is_some_and(|description| description.contains("test fixture")));
@@ -1023,8 +1076,8 @@ mod tests {
         // this test**, which is the point: the type list and its form are
         // type-level data, so someone can open the add-connector dialog and
         // read what Docker needs before they have a working endpoint.
-        let docker = by_id("docker-container");
-        assert_eq!(docker["displayName"], "Docker Container");
+        let docker = by_id("docker");
+        assert_eq!(docker["displayName"], "Docker");
         assert_eq!(docker["icon"], "brand:docker");
         assert!(docker["configSchema"]["properties"]["dockerHost"].is_object());
         assert!(docker["configSchema"]["properties"]["containerName"].is_object());
@@ -1036,6 +1089,7 @@ mod tests {
         // either later is a visible decision rather than a drive-by.
         assert_eq!(docker["setupGuide"], serde_json::Value::Null);
         assert_eq!(docker["discoverableType"], serde_json::Value::Null);
+        assert_eq!(docker["discoveryTargetField"], "containerName");
     }
 
     #[tokio::test]
@@ -1052,7 +1106,7 @@ mod tests {
         assert_eq!(status, StatusCode::OK);
         assert_eq!(detail["discoverableType"], "debug");
 
-        let (status, resources) = send(
+        let (status, discovery) = send(
             &app.router,
             post_json_auth(
                 &format!("/connector-instances/{id}/discover"),
@@ -1061,8 +1115,9 @@ mod tests {
             ),
         )
         .await;
-        assert_eq!(status, StatusCode::OK, "discovery failed: {resources:#}");
-        let resources = resources.as_array().expect("resource array");
+        assert_eq!(status, StatusCode::OK, "discovery failed: {discovery:#}");
+        assert_eq!(discovery["discoveryTargetField"], serde_json::Value::Null);
+        let resources = discovery["resources"].as_array().expect("resource array");
         assert_eq!(resources.len(), 3);
         assert!(resources.iter().all(|resource| {
             resource["targetConnectorType"] == "debug"
@@ -1094,6 +1149,96 @@ mod tests {
         assert!(body["error"]
             .as_str()
             .is_some_and(|message| message.contains("not supported")));
+    }
+
+    #[tokio::test]
+    async fn type_scoped_discovery_uses_a_candidate_without_persisting_it() {
+        let app = test_app().await;
+        let (access, _) = setup_and_login(&app.router).await;
+
+        let before: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM connector_instances")
+            .fetch_one(&app.pool)
+            .await
+            .expect("count before discovery");
+
+        let (status, discovery) = send(
+            &app.router,
+            post_json_auth(
+                "/connector-types/debug/discover",
+                &access,
+                serde_json::json!({ "label": "candidate" }),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "discovery failed: {discovery:#}");
+        assert_eq!(discovery["discoveryTargetField"], serde_json::Value::Null);
+        assert_eq!(
+            discovery["resources"]
+                .as_array()
+                .expect("resource array")
+                .len(),
+            3
+        );
+
+        let after: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM connector_instances")
+            .fetch_one(&app.pool)
+            .await
+            .expect("count after discovery");
+        assert_eq!(after, before, "candidate discovery must never insert a row");
+
+        let (status, body) = send(
+            &app.router,
+            post_json_auth(
+                "/connector-types/debug/discover",
+                &access,
+                serde_json::json!({ "baseLoad": 101 }),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{body:#}");
+        assert!(body["connectorError"].is_object());
+    }
+
+    #[tokio::test]
+    async fn docker_type_discovery_uses_host_mode_without_persisting_it() {
+        let app = test_app().await;
+        let candidate = serde_json::json!({
+            "dockerHost": loom_connector_docker::DEFAULT_DOCKER_HOST,
+        });
+
+        // Contributors are not required to run Docker. GitHub-hosted runners
+        // do, so this path is exercised in CI; locally the skip remains loud
+        // under `--nocapture` rather than turning workspace tests red.
+        if let Err(error) = app.connectors.build("docker", candidate.clone()).await {
+            eprintln!("SKIPPING docker type discovery endpoint test: {error:?}");
+            return;
+        }
+
+        let (access, _) = setup_and_login(&app.router).await;
+        let before: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM connector_instances")
+            .fetch_one(&app.pool)
+            .await
+            .expect("count before Docker discovery");
+
+        let (status, discovery) = send(
+            &app.router,
+            post_json_auth("/connector-types/docker/discover", &access, candidate),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "discovery failed: {discovery:#}");
+        assert_eq!(discovery["discoveryTargetField"], "containerName");
+        assert!(discovery["resources"].is_array());
+
+        let after: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM connector_instances")
+            .fetch_one(&app.pool)
+            .await
+            .expect("count after Docker discovery");
+        assert_eq!(after, before, "candidate discovery must never insert a row");
+        assert_eq!(
+            app.connectors.len().await,
+            0,
+            "candidate must not be retained"
+        );
     }
 
     #[tokio::test]
@@ -1648,6 +1793,13 @@ mod tests {
         )
         .await;
         assert_eq!(status, StatusCode::UNAUTHORIZED);
+
+        let (status, _) = send(
+            &app.router,
+            post_json("/connector-types/debug/discover", serde_json::Value::Null),
+        )
+        .await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
     }
 
     /// `connectors.manage` is a real split, not a synonym: viewing instances
@@ -1691,6 +1843,17 @@ mod tests {
                 "/connector-instances",
                 &viewer,
                 serde_json::json!({ "connectorType": "debug", "name": "Nope", "config": {} }),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+
+        let (status, _) = send(
+            &app.router,
+            post_json_auth(
+                "/connector-types/debug/discover",
+                &viewer,
+                serde_json::Value::Null,
             ),
         )
         .await;

@@ -790,6 +790,7 @@ impl Connector for DebugConnector {
                     "label": "discovered-alpha",
                     "enabled": true
                 }),
+                target_field_value: None,
             },
             DiscoveredResource {
                 suggested_name: "Discovered Debug Fixture 2".to_owned(),
@@ -801,6 +802,7 @@ impl Connector for DebugConnector {
                     "label": "discovered-beta",
                     "enabled": false
                 }),
+                target_field_value: None,
             },
             DiscoveredResource {
                 suggested_name: "Discovered Debug Fixture 3".to_owned(),
@@ -811,6 +813,7 @@ impl Connector for DebugConnector {
                     "label": "discovered-gamma",
                     "enabled": true
                 }),
+                target_field_value: None,
             },
         ])
     }
@@ -960,6 +963,7 @@ mod tests {
         assert_eq!(resources.len(), 3);
         for resource in resources {
             assert_eq!(resource.target_connector_type, TYPE_ID);
+            assert_eq!(resource.target_field_value, None);
             assert!(resource
                 .suggested_name
                 .starts_with("Discovered Debug Fixture"));

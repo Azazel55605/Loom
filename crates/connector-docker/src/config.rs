@@ -33,14 +33,13 @@ pub(crate) const CONTROL_TIMEOUT_SECONDS: u64 = 90;
 /// The default Docker endpoint: the local daemon socket.
 pub const DEFAULT_DOCKER_HOST: &str = "unix:///var/run/docker.sock";
 
-/// A validated configuration for one container.
+/// A validated configuration for a Docker host or one container on it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DockerConnectorConfig {
     /// Connection URI — `unix:///path/to.sock` or `tcp://host:port`.
     pub docker_host: String,
-    /// Exact container name or id. Not a pattern: this connector manages one
-    /// container, and a prefix that matched two would silently pick one.
-    pub container_name: String,
+    /// Exact container name or id in container mode. `None` selects host mode.
+    pub container_name: Option<String>,
 }
 
 /// The wire shape, before validation.
@@ -73,18 +72,10 @@ impl DockerConnectorConfig {
             .filter(|value| !value.is_empty())
             .unwrap_or_else(|| DEFAULT_DOCKER_HOST.to_owned());
 
-        // No default: there is no sensible container to monitor if nobody said
-        // which one, and picking the first one on the host would be a guess
-        // that looks like a feature until it picks the wrong one.
         let container_name = raw
             .container_name
             .map(|value| value.trim().to_owned())
-            .filter(|value| !value.is_empty())
-            .ok_or_else(|| {
-                ConnectorError::invalid_config(
-                    "containerName is required: name the container to monitor",
-                )
-            })?;
+            .filter(|value| !value.is_empty());
 
         Ok(Self {
             docker_host,
@@ -153,7 +144,7 @@ impl DockerConnectorConfig {
 pub fn config_schema() -> Value {
     json!({
         "$schema": "https://json-schema.org/draft/2020-12/schema",
-        "title": "Docker container configuration",
+        "title": "Docker configuration",
         "type": "object",
         "properties": {
             "dockerHost": {
@@ -167,10 +158,10 @@ pub fn config_schema() -> Value {
             "containerName": {
                 "type": "string",
                 "minLength": 1,
-                "description": "Exact container name or ID to monitor and control."
+                "description": "Leave blank to monitor the whole Docker host. Set to a specific container's exact name to monitor and control just that container."
             }
         },
-        "required": ["dockerHost", "containerName"],
+        "required": ["dockerHost"],
         "additionalProperties": false
     })
 }
@@ -180,19 +171,16 @@ mod tests {
     use super::*;
 
     #[test]
-    fn a_container_name_is_required_and_the_host_defaults() {
+    fn a_container_name_is_optional_and_the_host_defaults() {
         let config = DockerConnectorConfig::from_value(json!({ "containerName": "web" }))
             .expect("containerName alone is enough");
         assert_eq!(config.docker_host, DEFAULT_DOCKER_HOST);
-        assert_eq!(config.container_name, "web");
+        assert_eq!(config.container_name.as_deref(), Some("web"));
 
-        for missing in [json!({}), Value::Null, json!({ "containerName": "   " })] {
-            let error = DockerConnectorConfig::from_value(missing)
-                .expect_err("a connector with no container has nothing to monitor");
-            assert!(
-                matches!(error, ConnectorError::InvalidConfig { ref reason } if reason.contains("containerName")),
-                "the refusal must name the field: {error}"
-            );
+        for host_mode in [json!({}), Value::Null, json!({ "containerName": "   " })] {
+            let config = DockerConnectorConfig::from_value(host_mode)
+                .expect("an omitted or blank container selects host mode");
+            assert_eq!(config.container_name, None);
         }
     }
 
@@ -202,7 +190,7 @@ mod tests {
             json!({ "containerName": "  web  ", "dockerHost": "  tcp://example:2375  " }),
         )
         .expect("surrounding whitespace is a typo, not a different container");
-        assert_eq!(config.container_name, "web");
+        assert_eq!(config.container_name.as_deref(), Some("web"));
         assert_eq!(config.docker_host, "tcp://example:2375");
 
         // A misspelled key is a configuration that will not do what its author
@@ -220,7 +208,7 @@ mod tests {
         // succeeds against a host that does not exist.
         let config = DockerConnectorConfig {
             docker_host: "tcp://docker-proxy.example:2375".to_owned(),
-            container_name: "web".to_owned(),
+            container_name: Some("web".to_owned()),
         };
         assert!(config.connect().is_ok());
 
@@ -228,7 +216,7 @@ mod tests {
         // the fix is at the infrastructure level, usually a missing bind mount.
         let config = DockerConnectorConfig {
             docker_host: "unix:///nonexistent/loom-test/docker.sock".to_owned(),
-            container_name: "web".to_owned(),
+            container_name: Some("web".to_owned()),
         };
         assert!(matches!(
             config.connect(),
@@ -245,7 +233,7 @@ mod tests {
         ] {
             let config = DockerConnectorConfig {
                 docker_host: unsupported.to_owned(),
-                container_name: "web".to_owned(),
+                container_name: Some("web".to_owned()),
             };
             assert!(
                 matches!(config.connect(), Err(ConnectorError::InvalidConfig { .. })),
@@ -259,7 +247,7 @@ mod tests {
         let schema = config_schema();
         let properties = schema["properties"].as_object().expect("properties");
         assert_eq!(properties.len(), 2);
-        assert_eq!(schema["required"], json!(["dockerHost", "containerName"]));
+        assert_eq!(schema["required"], json!(["dockerHost"]));
         assert_eq!(properties["dockerHost"]["default"], DEFAULT_DOCKER_HOST);
         // `additionalProperties: false` has to agree with `deny_unknown_fields`,
         // or the generated form and the parser disagree about what is legal.

@@ -59,12 +59,12 @@ export function DiscoverResourcesDialog({
 
   React.useEffect(() => {
     if (discovery.data === undefined) return;
-    setSelected(new Set(discovery.data.map((_resource, index) => index)));
+    setSelected(new Set(discovery.data.resources.map((_resource, index) => index)));
     setResults({});
     setSummary(null);
   }, [discovery.data]);
 
-  const resources = discovery.data ?? [];
+  const resources = discovery.data?.resources ?? [];
   const selectable = resources
     .map((_resource, index) => index)
     .filter((index) => results[index]?.state !== "success");

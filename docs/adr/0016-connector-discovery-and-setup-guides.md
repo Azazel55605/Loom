@@ -50,3 +50,7 @@ guide references the real, editable `label` schema property.
   validation before they become durable.
 - Setup templates are deliberately small and non-executable; richer guide
   formats require a later decision rather than being smuggled into Core.
+
+The instance-scoped-only portion of this decision was later extended by
+[ADR 0019](./0019-docker-connector-merge.md), which adds ephemeral discovery
+from candidate type configuration for pre-creation field selection.

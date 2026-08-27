@@ -1,7 +1,9 @@
+import { DiscoveryFieldPicker } from "@loom/ui-kit/components/DiscoveryFieldPicker";
 import { Input } from "@loom/ui-kit/components/ui/input";
 import { Label } from "@loom/ui-kit/components/ui/label";
 import { Switch } from "@loom/ui-kit/components/ui/switch";
 import { cn } from "@loom/ui-kit/lib/utils";
+import type { DiscoveredResource } from "@loom/ui-kit/lib/api";
 
 /**
  * A form generated from a JSON Schema document.
@@ -20,9 +22,9 @@ import { cn } from "@loom/ui-kit/lib/utils";
  *
  * **Not** rendered, and skipped with a visible note rather than silently
  * dropped: `enum`, `array`, `oneOf`/`anyOf`/`allOf`, `$ref`, tuple types, and
- * any property whose `type` is absent or unrecognised. That is enough for
- * `DebugConnector`'s schema, which is the only one that exists today, and it is
- * a known future extension rather than an oversight. The visible note matters:
+ * any property whose `type` is absent or unrecognised. That is enough for the
+ * currently registered Debug and Docker schemas, and it is a known future
+ * extension rather than an oversight. The visible note matters:
  * a field quietly missing from a form is a configuration a user cannot set and
  * cannot see that they cannot set.
  *
@@ -47,6 +49,13 @@ export type JsonSchema = {
   maximum?: number;
   minLength?: number;
   enum?: unknown[];
+};
+
+export type SchemaFormDiscovery = {
+  /** Dotted schema-property path rendered with discovery assistance. */
+  targetField: string;
+  canDiscover: (currentValues: Record<string, unknown>) => boolean;
+  onDiscover: (currentValues: Record<string, unknown>) => Promise<DiscoveredResource[]>;
 };
 
 /** What a schema property was turned into, or why it was not. */
@@ -194,6 +203,7 @@ export function SchemaForm({
   errors,
   disabled,
   idPrefix = "schema",
+  discovery,
 }: {
   /** The type's `configSchema`, as published by `GET /connector-types`. */
   schema: JsonSchema | unknown;
@@ -205,6 +215,8 @@ export function SchemaForm({
   disabled?: boolean;
   /** Prefix for generated input ids, so two forms on one page do not collide. */
   idPrefix?: string;
+  /** Optional generic discovery assistance for one schema field. */
+  discovery?: SchemaFormDiscovery;
 }) {
   return (
     <SchemaFields
@@ -215,6 +227,7 @@ export function SchemaForm({
       errors={errors ?? {}}
       disabled={disabled === true}
       idPrefix={idPrefix}
+      discovery={discovery}
     />
   );
 }
@@ -227,6 +240,7 @@ function SchemaFields({
   errors,
   disabled,
   idPrefix,
+  discovery,
 }: {
   schema: JsonSchema;
   root: Record<string, unknown>;
@@ -235,6 +249,7 @@ function SchemaFields({
   errors: Record<string, string>;
   disabled: boolean;
   idPrefix: string;
+  discovery?: SchemaFormDiscovery;
 }) {
   const properties = Object.entries(schema.properties ?? {});
   const required = new Set(schema.required ?? []);
@@ -287,6 +302,7 @@ function SchemaFields({
                 errors={errors}
                 disabled={disabled}
                 idPrefix={idPrefix}
+                discovery={discovery}
               />
             </fieldset>
           );
@@ -323,36 +339,54 @@ function SchemaFields({
               {label}
               {required.has(key) && <span aria-hidden="true"> *</span>}
             </Label>
-            <Input
-              id={id}
-              disabled={disabled}
-              type={kind === "number" ? "number" : "text"}
-              inputMode={kind === "number" ? "decimal" : undefined}
-              min={property.minimum}
-              max={property.maximum}
-              aria-invalid={error !== undefined}
-              aria-describedby={[descriptionId, errorId].filter(Boolean).join(" ") || undefined}
-              value={current === undefined || current === null ? "" : String(current)}
-              onChange={(event) => {
-                const raw = event.target.value;
-                if (kind !== "number") {
-                  set(raw === "" ? undefined : raw);
-                  return;
+            {kind === "string" && discovery?.targetField === dotted ? (
+              <DiscoveryFieldPicker
+                fieldName={label}
+                inputId={id}
+                currentValue={current}
+                disabled={disabled}
+                ariaInvalid={error !== undefined}
+                ariaDescribedBy={
+                  [descriptionId, errorId].filter(Boolean).join(" ") || undefined
                 }
-                // An empty box means "not set", not zero. A half-typed value
-                // like "-" or "1e" parses to NaN, which must not be sent — it
-                // serializes to `null` and the backend would reject it with a
-                // message about the wrong field. Keeping the leaf absent until
-                // the text is a real number leaves the user's typing alone and
-                // lets `required` do the complaining.
-                if (raw.trim() === "") {
-                  set(undefined);
-                  return;
+                canDiscover={!disabled && discovery.canDiscover(root)}
+                onDiscover={() => discovery.onDiscover(root)}
+                onSelect={set}
+              />
+            ) : (
+              <Input
+                id={id}
+                disabled={disabled}
+                type={kind === "number" ? "number" : "text"}
+                inputMode={kind === "number" ? "decimal" : undefined}
+                min={property.minimum}
+                max={property.maximum}
+                aria-invalid={error !== undefined}
+                aria-describedby={
+                  [descriptionId, errorId].filter(Boolean).join(" ") || undefined
                 }
-                const parsed = Number(raw);
-                set(Number.isFinite(parsed) ? parsed : undefined);
-              }}
-            />
+                value={current === undefined || current === null ? "" : String(current)}
+                onChange={(event) => {
+                  const raw = event.target.value;
+                  if (kind !== "number") {
+                    set(raw === "" ? undefined : raw);
+                    return;
+                  }
+                  // An empty box means "not set", not zero. A half-typed value
+                  // like "-" or "1e" parses to NaN, which must not be sent — it
+                  // serializes to `null` and the backend would reject it with a
+                  // message about the wrong field. Keeping the leaf absent until
+                  // the text is a real number leaves the user's typing alone and
+                  // lets `required` do the complaining.
+                  if (raw.trim() === "") {
+                    set(undefined);
+                    return;
+                  }
+                  const parsed = Number(raw);
+                  set(Number.isFinite(parsed) ? parsed : undefined);
+                }}
+              />
+            )}
             {property.description !== undefined && (
               <p id={descriptionId} className="text-xs text-muted-foreground">
                 {property.description}

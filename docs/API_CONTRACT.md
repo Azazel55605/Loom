@@ -719,15 +719,16 @@ the instances they may see are on `/connector-instances`, which asks only for
       "description": "No real setup required — this is an internal test fixture.",
       "template": "# Debug connector\nFixture label: {{label}}"
     },
-    "discoverableType": "debug"
+    "discoverableType": "debug",
+    "discoveryTargetField": null
   },
   {
-    "typeId": "docker-container",
-    "displayName": "Docker Container",
+    "typeId": "docker",
+    "displayName": "Docker",
     "icon": "brand:docker",
     "configSchema": {
       "$schema": "https://json-schema.org/draft/2020-12/schema",
-      "title": "Docker container configuration",
+      "title": "Docker configuration",
       "type": "object",
       "properties": {
         "dockerHost": {
@@ -739,14 +740,15 @@ the instances they may see are on `/connector-instances`, which asks only for
         "containerName": {
           "type": "string",
           "minLength": 1,
-          "description": "Exact container name or ID to monitor and control."
+          "description": "Leave blank to monitor the whole Docker host. Set to a specific container's exact name to monitor and control just that container."
         }
       },
-      "required": ["dockerHost", "containerName"],
+      "required": ["dockerHost"],
       "additionalProperties": false
     },
     "setupGuide": null,
-    "discoverableType": null
+    "discoverableType": null,
+    "discoveryTargetField": "containerName"
   }
 ]
 ```
@@ -759,6 +761,7 @@ the instances they may see are on `/connector-instances`, which asks only for
 | `configSchema` | object | JSON Schema for this type's configuration, published by the connector itself. | Always present; an object, never `null`. A type needing no configuration returns an empty schema object. |
 | `setupGuide` | object | Descriptive client-rendered help: `{ description, template }`. See [Discovery & Setup Guides](#discovery--setup-guides). | **`null`** when the type publishes no guide. |
 | `discoverableType` | string | Type id this connector can discover through a configured live instance. | **`null`** when discovery is unsupported. |
+| `discoveryTargetField` | string | Candidate configuration field populated by a type-scoped discovery result's `targetFieldValue`. Clients use it to attach generic discovery assistance to the matching schema field. | **`null`** when discovery does not target one field. |
 
 **The schema is advisory for the client and not the server's validator.** The
 backend does not check a submitted configuration against it — it hands the value
@@ -766,7 +769,7 @@ to the connector's factory, which is the only thing that knows what the keys
 mean. A configuration that satisfies the schema's shape can still be refused
 (see [`POST /connector-instances`](#post-connector-instances)).
 
-Today the array holds two: the debug fixture and the Docker container
+Today the array holds two: the debug fixture and the unified Docker
 connector. It was an array from day one so that registering a real connector
 type is an insertion rather than a reshape of this response, which is exactly
 what adding Docker turned out to be.
@@ -782,12 +785,12 @@ is created, not here.
 | `typeId` | What one instance is | Configuration | Validated by |
 | --- | --- | --- | --- |
 | `debug` | A fixture that contacts nothing. Permanent — see `crates/core/src/connector/debug.rs`. | How it should pretend to behave. | Parsing alone; there is nothing to reach. |
-| `docker-container` | **One container** on one Docker endpoint, named exactly. | `dockerHost` (a `unix://` socket or a `tcp://` host) and `containerName`. | A real connection **and** a container inspect — see below. |
+| `docker` | One Docker endpoint, viewed either as the whole host or one exact container. | Required `dockerHost` (`unix://` or `tcp://`); optional `containerName`. Blank/omitted selects host mode, set selects container mode. | A real daemon connection in both modes, plus a container inspect in container mode. |
 
-**Creating a `docker-container` instance actually connects.** `POST
-/connector-instances` opens the endpoint and inspects the named container
-before writing a row, so the two ways the configuration can be wrong come back
-as different 400s while the form is still open:
+**Creating a `docker` instance actually connects.** `POST
+/connector-instances` opens the endpoint before writing a row. Host mode pings
+the daemon and skips container validation. Container mode additionally inspects
+the exact name, so its two failure classes remain different 400s:
 
 - the daemon could not be reached → an `unreachable` connector error naming the
   host, pointing at the socket, the bind mount, or the network;
@@ -796,6 +799,14 @@ as different 400s while the form is still open:
 
 Collapsing those into one "could not connect" is the difference between a
 two-minute fix and an afternoon.
+
+Container mode retains `status`, `cpuPercent`, `cpuHistory`,
+`memoryUsageBytes`, `memoryHistory`, `uptime`, and `logs`, plus start/stop/
+restart/pause/unpause actions. Host mode has no actions and publishes
+`totalContainers`, `runningContainers`, `stoppedContainers`, `totalImages`,
+`diskUsageBytes`, and `dockerVersion`. Both modes report metadata id `docker`;
+their data points and default layouts branch from the optional
+`containerName`.
 
 ### `GET /connector-instances`
 
@@ -968,7 +979,7 @@ carries, plus what a dashboard placement UI needs.
 | `discoverableType` | string | Type id this live instance can discover. Clients use this to decide whether to offer discovery without guessing from `connectorType`. | **`null`** when unsupported or the stored instance is not loaded. |
 
 **`config` is `connectors.view`-gated, which will not be good enough forever.**
-The only registered type has nothing secret in it. A real integration storing an
+The currently registered types store no credentials. A future integration storing an
 API token will need either a redaction pass here or a stricter permission on
 this field; treat that as a known open item rather than a settled decision.
 
@@ -980,10 +991,12 @@ this field; treat that as a known open item rather than a settled decision.
 
 ## Discovery & Setup Guides
 
-Discovery is **instance-scoped**: it runs through a live, already-configured
-connector, because finding child resources commonly requires the connection or
-credentials held by that instance. Setup guides are **type-scoped** descriptive
-content returned by `GET /connector-types`; they do not execute code in Core.
+Discovery has two complementary entry points. Instance-scoped discovery runs
+through an already-configured live connector and is useful for bulk proposals.
+Type-scoped discovery constructs and immediately discards a connector from a
+candidate configuration, allowing setup forms to discover one field before an
+instance exists. Setup guides remain type-scoped descriptive content returned
+by `GET /connector-types`; they do not execute code in Core.
 
 ### Setup guide template substitution
 
@@ -1005,25 +1018,32 @@ instance. The request has no body.
 **Response 200** — suggested resources, not created instances:
 
 ```json
-[
-  {
-    "suggestedName": "Discovered Debug Fixture 1",
-    "targetConnectorType": "debug",
-    "config": {
-      "simulatedHealth": "healthy",
-      "baseLoad": 24,
-      "label": "discovered-alpha",
-      "enabled": true
+{
+  "discoveryTargetField": null,
+  "resources": [
+    {
+      "suggestedName": "Discovered Debug Fixture 1",
+      "targetConnectorType": "debug",
+      "config": {
+        "simulatedHealth": "healthy",
+        "baseLoad": 24,
+        "label": "discovered-alpha",
+        "enabled": true
+      },
+      "targetFieldValue": null
     }
-  }
-]
+  ]
+}
 ```
 
 | Field | JSON type | Meaning |
 | --- | --- | --- |
+| `discoveryTargetField` | string or null | Candidate config field that `targetFieldValue` can fill directly. |
+| `resources` | array | Discovery proposals. |
 | `suggestedName` | string | Human-facing starting name for a future connector instance. |
 | `targetConnectorType` | string | Type id whose normal factory validates and constructs `config`. |
 | `config` | any | Suggested configuration in the target type's schema shape. |
+| `targetFieldValue` | any or null | Value for `discoveryTargetField`, when discovery supports field assignment. |
 
 Discovery does not persist anything. A client may present or edit suggestions,
 then creates accepted resources through the ordinary
@@ -1031,10 +1051,37 @@ then creates accepted resources through the ordinary
 
 | Status | Meaning |
 | --- | --- |
-| 200 | Discovery completed; the array may be empty. |
+| 200 | Discovery completed; `resources` may be empty. |
 | 400 | The instance does not support discovery or is not loaded. |
 | 403 | The caller lacks a global `connectors.manage` grant. |
 | 404 | No instance with that id. |
+
+### `POST /connector-types/{typeId}/discover`
+
+Requires a global `connectors.manage` grant. The JSON request body is a
+candidate connector configuration. It does not need to represent the final
+saved mode; it only needs to satisfy the connector factory. For Docker, host
+mode is the expected discovery candidate:
+
+```json
+{ "dockerHost": "unix:///var/run/docker.sock" }
+```
+
+The backend constructs the candidate, confirms that configuration supports
+discovery, calls it once, and discards it without inserting a row or adding it
+to the runtime map.
+
+**Response 200:** the same `{ discoveryTargetField, resources }` envelope as
+instance-scoped discovery. A Docker response uses
+`"discoveryTargetField": "containerName"`; each resource targets `docker`,
+copies the candidate `dockerHost`, supplies the exact `containerName`, and
+places that same name in `targetFieldValue`.
+
+| Status | Meaning |
+| --- | --- |
+| 200 | Candidate discovery completed; `resources` may be empty. |
+| 400 | Unknown type, factory validation failed (including an unreachable host), or discovery is unsupported for this candidate configuration. |
+| 403 | The caller lacks a global `connectors.manage` grant. |
 
 ### `POST /connector-instances`
 

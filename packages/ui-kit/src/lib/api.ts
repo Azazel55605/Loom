@@ -282,6 +282,8 @@ export type ConnectorTypeSummary = {
   setupGuide: SetupGuide | null;
   /** Connector type discoverable through a configured instance, if any. */
   discoverableType: string | null;
+  /** Candidate configuration field type-scoped discovery can fill. */
+  discoveryTargetField: string | null;
 };
 
 export type SetupGuide = {
@@ -294,6 +296,12 @@ export type DiscoveredResource = {
   suggestedName: string;
   targetConnectorType: string;
   config: unknown;
+  targetFieldValue: unknown | null;
+};
+
+export type DiscoveryResponse = {
+  discoveryTargetField: string | null;
+  resources: DiscoveredResource[];
 };
 
 /** One element of `GET /connector-instances`: a connector this deployment has. */
@@ -1134,11 +1142,25 @@ function discoverConnectorResources(
   runtime: ApiRuntime,
   id: string,
   signal?: AbortSignal,
-): Promise<DiscoveredResource[]> {
-  return authorizedRequest<DiscoveredResource[]>(
+): Promise<DiscoveryResponse> {
+  return authorizedRequest<DiscoveryResponse>(
     runtime,
     `/connector-instances/${encodeURIComponent(id)}/discover`,
     { method: "POST", signal },
+  );
+}
+
+/** Run discovery through an ephemeral candidate configuration. */
+function discoverForType(
+  runtime: ApiRuntime,
+  typeId: string,
+  config: unknown,
+  signal?: AbortSignal,
+): Promise<DiscoveryResponse> {
+  return authorizedRequest<DiscoveryResponse>(
+    runtime,
+    `/connector-types/${encodeURIComponent(typeId)}/discover`,
+    { method: "POST", body: JSON.stringify(config), signal },
   );
 }
 
@@ -1834,6 +1856,8 @@ export function createApiClient(options: {
       getConnectorInstance(runtime, id, signal),
     discoverConnectorResources: (id: string, signal?: AbortSignal) =>
       discoverConnectorResources(runtime, id, signal),
+    discoverForType: (typeId: string, candidateConfig: unknown, signal?: AbortSignal) =>
+      discoverForType(runtime, typeId, candidateConfig, signal),
     createConnectorInstance: (data: CreateConnectorInstanceRequest, signal?: AbortSignal) =>
       createConnectorInstance(runtime, data, signal),
     updateConnectorInstance: (

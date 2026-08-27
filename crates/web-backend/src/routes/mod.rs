@@ -78,6 +78,10 @@ pub fn routes() -> Router<AppState> {
         )
         .route("/connector-types", get(connectors::list_connector_types))
         .route(
+            "/connector-types/{type_id}/discover",
+            post(connectors::discover_type),
+        )
+        .route(
             "/connector-instances",
             get(connectors::list_instances).post(connectors::create_instance),
         )

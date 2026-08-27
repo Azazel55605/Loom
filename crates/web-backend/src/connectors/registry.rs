@@ -60,6 +60,8 @@ pub struct ConnectorTypeRegistration {
     pub setup_guide: Option<SetupGuide>,
     /// Type id this connector can discover through a configured instance.
     pub discoverable_type: Option<String>,
+    /// Candidate configuration field that discovery can fill directly.
+    pub discovery_target_field: Option<String>,
 }
 
 /// Every registered type, keyed by [`ConnectorTypeRegistration::type_id`].
@@ -70,7 +72,7 @@ pub type ConnectorTypeRegistry = Arc<HashMap<&'static str, ConnectorTypeRegistra
 
 /// The types compiled into this build.
 ///
-/// Two today: the debug fixture and the Docker container connector. Further
+/// Two today: the debug fixture and the unified Docker connector. Further
 /// integrations (a reverse proxy, a hypervisor) register here alongside them,
 /// and nothing else in the backend has to change when they do — that is the
 /// point of the indirection.
@@ -102,13 +104,13 @@ pub fn builtin_registry() -> ConnectorTypeRegistry {
             schema: debug.config_schema(),
             setup_guide: debug.setup_guide(),
             discoverable_type: debug.discoverable_type(),
+            discovery_target_field: debug.discovery_target_field(),
         },
     );
 
     // The Docker connector is the exception to the snapshot-a-default-instance
     // pattern above, and it has to be: constructing one requires a reachable
-    // Docker endpoint and the name of a container that exists on it, so there
-    // is no default instance to ask. Its type-level descriptors are `const`s in
+    // Docker endpoint, so there is no default instance to ask. Its type-level descriptors are `const`s in
     // the connector crate instead, read from here *and* from its own
     // `metadata()`, so the two cannot drift the way a hand-copied duplicate
     // would.
@@ -119,8 +121,8 @@ pub fn builtin_registry() -> ConnectorTypeRegistry {
             display_name: loom_connector_docker::DISPLAY_NAME,
             icon: Some(loom_connector_docker::ICON.to_owned()),
             // This factory really does await: it opens the endpoint and
-            // inspects the container, so an unreachable host and a misspelled
-            // container name come back as different, actionable errors.
+            // pings the host and, in container mode, inspects the container, so
+            // the two validation failures remain distinct and actionable.
             factory: |config| {
                 Box::pin(async move {
                     DockerConnector::from_config_value(config)
@@ -129,11 +131,13 @@ pub fn builtin_registry() -> ConnectorTypeRegistry {
                 })
             },
             schema: loom_connector_docker::config_schema(),
-            // Both deliberately absent in this first version — a capability-
-            // aware setup guide and host-level container discovery are planned
-            // follow-ups. See the crate docs for why neither is stubbed.
+            // Discovery capability depends on the candidate configuration:
+            // host mode supports it and container mode does not. The dynamic
+            // value is therefore returned by the discovery endpoints rather
+            // than advertised as one unconditional type-level value here.
             setup_guide: None,
             discoverable_type: None,
+            discovery_target_field: Some("containerName".to_owned()),
         },
     );
 
@@ -192,17 +196,21 @@ mod tests {
         let registry = builtin_registry();
         let registration = registry
             .get(loom_connector_docker::TYPE_ID)
-            .expect("the docker container type must be registered");
+            .expect("the Docker type must be registered");
 
-        assert_eq!(registration.type_id, "docker-container");
+        assert_eq!(registration.type_id, "docker");
         assert_eq!(registration.icon.as_deref(), Some("brand:docker"));
         assert!(registration.schema["properties"]["dockerHost"].is_object());
         assert!(registration.schema["properties"]["containerName"].is_object());
 
-        // Deliberately absent in this first version, and asserted so that
-        // adding either later is a visible decision rather than a drive-by.
+        // Setup remains absent. Discovery is configuration-dependent, so the
+        // static catalog does not claim it unconditionally.
         assert!(registration.setup_guide.is_none());
         assert!(registration.discoverable_type.is_none());
+        assert_eq!(
+            registration.discovery_target_field.as_deref(),
+            Some("containerName")
+        );
     }
 
     #[tokio::test]
@@ -238,6 +246,7 @@ mod tests {
             registration.discoverable_type.as_deref(),
             Some(DEBUG_TYPE_ID)
         );
+        assert_eq!(registration.discovery_target_field, None);
         let guide = registration.setup_guide.as_ref().expect("setup guide");
         assert!(guide.template.contains("{{label}}"));
     }
@@ -270,26 +279,26 @@ mod tests {
         assert!(matches!(error, ConnectorError::InvalidConfig { .. }));
     }
 
-    /// The Docker factory refuses an unusable configuration **before** it tries
-    /// to reach anything, so a missing container name is an immediate message
-    /// naming the field rather than a ten-second connection timeout.
+    /// Omitting the container selects host mode, which still proves the daemon
+    /// is reachable before returning a live connector.
     #[tokio::test]
-    async fn the_docker_factory_refuses_a_configuration_with_no_container() {
+    async fn the_docker_factory_treats_no_container_as_host_mode() {
         let registry = builtin_registry();
         let factory = registry
             .get(loom_connector_docker::TYPE_ID)
             .expect("registered")
             .factory;
 
-        // A host that nothing could be listening on, to prove the refusal is
-        // not coming from a successful connection.
+        // Loopback port 1 is reserved and has no daemon. If the factory still
+        // treated containerName as required this would be InvalidConfig
+        // instead of the reachability failure host mode must report.
         let error = factory(json!({ "dockerHost": "tcp://127.0.0.1:1" }))
             .await
             .err()
-            .expect("a connector with no container has nothing to monitor");
+            .expect("host mode still validates daemon reachability");
         assert!(
-            matches!(error, ConnectorError::InvalidConfig { ref reason } if reason.contains("containerName")),
-            "the refusal must name the field: {error}"
+            matches!(error, ConnectorError::Unreachable { .. }),
+            "host mode must reach the configured daemon: {error}"
         );
     }
 }

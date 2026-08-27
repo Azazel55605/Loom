@@ -100,6 +100,16 @@ pub trait Connector: Send + Sync {
         None
     }
 
+    /// Configuration field a discovery result can fill during setup.
+    ///
+    /// This is independent of [`Connector::discoverable_type`]: a connector
+    /// built from a complete configuration may have nothing further to
+    /// discover while its type can still use discovery to fill one field in a
+    /// candidate configuration.
+    fn discovery_target_field(&self) -> Option<String> {
+        None
+    }
+
     /// Finds resources reachable through this configured connector.
     ///
     /// Implementations return suggested configurations; they never create
@@ -219,6 +229,10 @@ pub struct DiscoveredResource {
     pub target_connector_type: String,
     /// Suggested configuration in the target connector's schema shape.
     pub config: Value,
+    /// Value that may be assigned directly to the source connector's
+    /// [`Connector::discovery_target_field`].
+    #[serde(default)]
+    pub target_field_value: Option<Value>,
 }
 
 /// Type-level setup help published alongside a connector's config schema.
@@ -877,6 +891,17 @@ mod tests {
     use super::*;
     use chrono::TimeZone;
     use serde_json::json;
+
+    #[test]
+    fn discovered_resource_defaults_a_missing_target_field_value() {
+        let resource: DiscoveredResource = serde_json::from_value(json!({
+            "suggestedName": "Legacy proposal",
+            "targetConnectorType": "debug",
+            "config": {},
+        }))
+        .expect("the new optional field must preserve older discovery payloads");
+        assert_eq!(resource.target_field_value, None);
+    }
 
     /// A minimal in-test implementation, separate from [`debug::DebugConnector`]
     /// on purpose: it proves the trait alone is enough to write a connector,

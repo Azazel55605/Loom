@@ -69,6 +69,15 @@ pub struct ConnectorTypeResponse {
     config_schema: Value,
     setup_guide: Option<SetupGuide>,
     discoverable_type: Option<String>,
+    discovery_target_field: Option<String>,
+}
+
+/// Discovery proposals plus the candidate field they may fill directly.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DiscoveryResponse {
+    discovery_target_field: Option<String>,
+    resources: Vec<loom_core::connector::DiscoveredResource>,
 }
 
 /// `GET /connector-types`
@@ -92,6 +101,7 @@ pub async fn list_connector_types(
             config_schema: registration.schema.clone(),
             setup_guide: registration.setup_guide.clone(),
             discoverable_type: registration.discoverable_type.clone(),
+            discovery_target_field: registration.discovery_target_field.clone(),
         })
         .collect();
 
@@ -100,6 +110,26 @@ pub async fn list_connector_types(
     types.sort_by(|a, b| a.display_name.cmp(&b.display_name));
 
     Json(types)
+}
+
+/// `POST /connector-types/{type_id}/discover`
+///
+/// Builds a connector from a candidate configuration, uses it for one
+/// discovery pass, and discards it. Nothing is added to the runtime or the
+/// database, which makes this suitable for filling a generated setup form
+/// before an instance exists.
+pub async fn discover_type(
+    _caller: RequirePermission<ConnectorsManage>,
+    State(state): State<AppState>,
+    Path(type_id): Path<String>,
+    Json(config): Json<Value>,
+) -> Response {
+    let connector = match state.connectors.build(&type_id, config).await {
+        Ok(connector) => connector,
+        Err(error) => return build_failure(error),
+    };
+
+    discover_with(connector.as_ref(), "this configuration").await
 }
 
 /* ------------------------------------------------------------------ */
@@ -327,17 +357,7 @@ pub async fn discover_instance(
             "discovery is unavailable because this connector instance is not loaded",
         );
     };
-    if connector.discoverable_type().is_none() {
-        return ErrorBody::message(
-            StatusCode::BAD_REQUEST,
-            "discovery is not supported for this connector instance",
-        );
-    }
-
-    match connector.discover().await {
-        Ok(resources) => Json(resources).into_response(),
-        Err(error) => ErrorBody::connector(status_for(&error), error),
-    }
+    discover_with(connector.as_ref(), "this connector instance").await
 }
 
 /// Load the same cached connector summary used by the public list endpoint.
@@ -695,6 +715,24 @@ fn build_failure(error: BuildError) -> Response {
             format!("no such connector type: {type_id}"),
         ),
         BuildError::Rejected(error) => ErrorBody::connector(StatusCode::BAD_REQUEST, error),
+    }
+}
+
+async fn discover_with(connector: &dyn Connector, subject: &str) -> Response {
+    if connector.discoverable_type().is_none() {
+        return ErrorBody::message(
+            StatusCode::BAD_REQUEST,
+            format!("discovery is not supported for {subject}"),
+        );
+    }
+
+    match connector.discover().await {
+        Ok(resources) => Json(DiscoveryResponse {
+            discovery_target_field: connector.discovery_target_field(),
+            resources,
+        })
+        .into_response(),
+        Err(error) => ErrorBody::connector(status_for(&error), error),
     }
 }
 

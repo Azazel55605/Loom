@@ -41,8 +41,10 @@ use bollard::Docker;
 use futures_util::StreamExt;
 use loom_connector_docker::{
     DockerConnector, DockerConnectorConfig, ACTION_RESTART, ACTION_START, ACTION_STOP,
-    DATA_POINT_CPU_HISTORY, DATA_POINT_CPU_PERCENT, DATA_POINT_LOGS, DATA_POINT_MEMORY_USAGE_BYTES,
-    DATA_POINT_STATUS, DATA_POINT_UPTIME, DEFAULT_DOCKER_HOST,
+    DATA_POINT_CPU_HISTORY, DATA_POINT_CPU_PERCENT, DATA_POINT_DISK_USAGE_BYTES,
+    DATA_POINT_DOCKER_VERSION, DATA_POINT_LOGS, DATA_POINT_MEMORY_USAGE_BYTES,
+    DATA_POINT_RUNNING_CONTAINERS, DATA_POINT_STATUS, DATA_POINT_STOPPED_CONTAINERS,
+    DATA_POINT_TOTAL_CONTAINERS, DATA_POINT_TOTAL_IMAGES, DATA_POINT_UPTIME, DEFAULT_DOCKER_HOST,
 };
 use loom_core::connector::{Connector, ConnectorError, HealthState};
 
@@ -218,7 +220,7 @@ async fn start_test_container(docker: &Docker, suffix: &str) -> TestContainer {
 fn config_for(name: &str) -> DockerConnectorConfig {
     DockerConnectorConfig {
         docker_host: test_docker_host(),
-        container_name: name.to_owned(),
+        container_name: Some(name.to_owned()),
     }
 }
 
@@ -255,6 +257,16 @@ async fn a_running_container_reports_healthy_with_every_data_point() {
     let connector = DockerConnector::connect(config_for(&container.name))
         .await
         .expect("connecting to a container that exists must succeed");
+    assert_eq!(connector.discoverable_type(), None);
+    assert_eq!(
+        connector.discovery_target_field().as_deref(),
+        Some("containerName")
+    );
+    assert!(connector
+        .discover()
+        .await
+        .expect("container mode discovery is a safe no-op")
+        .is_empty());
 
     let status = wait_for_state(&connector, |state| state == "running", "running").await;
     assert_eq!(status.health, HealthState::Healthy);
@@ -338,6 +350,78 @@ async fn a_running_container_reports_healthy_with_every_data_point() {
     assert!(
         after > before,
         "each poll should append a history sample: {before} then {after}"
+    );
+}
+
+#[tokio::test]
+async fn host_mode_reports_the_daemon_and_discovers_real_containers() {
+    let test_name = "host_mode_reports_the_daemon_and_discovers_real_containers";
+    let Some(docker) = docker_or_skip(test_name).await else {
+        return;
+    };
+    let container = start_test_container(&docker, "discovery").await;
+
+    let connector = DockerConnector::connect(DockerConnectorConfig {
+        docker_host: test_docker_host(),
+        container_name: None,
+    })
+    .await
+    .expect("host mode validates only daemon reachability");
+
+    assert_eq!(connector.metadata().id, "docker");
+    assert_eq!(connector.discoverable_type().as_deref(), Some("docker"));
+    assert_eq!(
+        connector.discovery_target_field().as_deref(),
+        Some("containerName")
+    );
+    assert!(connector.actions().await.is_empty());
+    assert_eq!(
+        connector
+            .data_points()
+            .into_iter()
+            .map(|point| point.id)
+            .collect::<Vec<_>>(),
+        [
+            DATA_POINT_TOTAL_CONTAINERS,
+            DATA_POINT_RUNNING_CONTAINERS,
+            DATA_POINT_STOPPED_CONTAINERS,
+            DATA_POINT_TOTAL_IMAGES,
+            DATA_POINT_DISK_USAGE_BYTES,
+            DATA_POINT_DOCKER_VERSION,
+        ]
+    );
+
+    let status = connector.status().await.expect("host status");
+    assert!(
+        matches!(status.health, HealthState::Healthy | HealthState::Degraded),
+        "a reachable daemon may degrade if an optional metric times out: {status:?}"
+    );
+    assert!(status.details[DATA_POINT_TOTAL_CONTAINERS]
+        .as_i64()
+        .is_some_and(|count| count >= 1));
+    assert!(status.details[DATA_POINT_RUNNING_CONTAINERS]
+        .as_i64()
+        .is_some_and(|count| count >= 1));
+    assert!(status.details[DATA_POINT_STOPPED_CONTAINERS].is_number());
+    assert!(status.details[DATA_POINT_TOTAL_IMAGES].is_number());
+    assert!(status.details[DATA_POINT_DISK_USAGE_BYTES]
+        .as_i64()
+        .is_some_and(|bytes| bytes >= 0));
+    assert!(status.details[DATA_POINT_DOCKER_VERSION]
+        .as_str()
+        .is_some_and(|version| !version.is_empty()));
+
+    let resources = connector.discover().await.expect("host discovery");
+    let discovered = resources
+        .iter()
+        .find(|resource| resource.suggested_name == container.name)
+        .unwrap_or_else(|| panic!("test container was not discovered: {resources:#?}"));
+    assert_eq!(discovered.target_connector_type, "docker");
+    assert_eq!(discovered.config["dockerHost"], test_docker_host());
+    assert_eq!(discovered.config["containerName"], container.name);
+    assert_eq!(
+        discovered.target_field_value.as_ref(),
+        Some(&serde_json::json!(container.name))
     );
 }
 
@@ -438,7 +522,7 @@ async fn a_bad_configuration_says_which_half_is_wrong() {
     // timeout — and it is a loopback address, so the test needs no network.
     let error = DockerConnector::connect(DockerConnectorConfig {
         docker_host: "tcp://127.0.0.1:1".to_owned(),
-        container_name: "anything".to_owned(),
+        container_name: Some("anything".to_owned()),
     })
     .await
     .expect_err("an unreachable host must be refused");

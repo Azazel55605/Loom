@@ -1,18 +1,21 @@
-//! The connector: one Docker container, watched and controlled.
+//! One Docker connection, presented as a host or one container.
 
 use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 use bollard::models::{ContainerInspectResponse, ContainerStatsResponse};
-use bollard::query_parameters::{LogsOptionsBuilder, StatsOptionsBuilder};
+use bollard::query_parameters::{
+    ListContainersOptionsBuilder, LogsOptionsBuilder, StatsOptionsBuilder,
+};
 use bollard::Docker;
 use chrono::{DateTime, Utc};
 use futures_util::StreamExt;
 use loom_core::connector::{
     ActionResult, ActionWidgetType, ChartType, Connector, ConnectorAction, ConnectorError,
-    ConnectorMetadata, ConnectorStatus, DataPointDescriptor, DataPointValueType, DisplayField,
-    DisplayWidgetType, HealthState, NetworkTarget, WidgetBinding, WidgetLayout,
+    ConnectorMetadata, ConnectorStatus, DataPointDescriptor, DataPointValueType,
+    DiscoveredResource, DisplayField, DisplayWidgetType, HealthState, NetworkTarget, WidgetBinding,
+    WidgetLayout,
 };
 use serde::Serialize;
 use serde_json::{json, Map, Value};
@@ -21,10 +24,10 @@ use crate::config::{config_schema, DockerConnectorConfig};
 use crate::metrics::{cpu_percent, format_uptime, health_for_state};
 
 /// The connector type id this registers under.
-pub const TYPE_ID: &str = "docker-container";
+pub const TYPE_ID: &str = "docker";
 
 /// Human-facing name for the type picker.
-pub const DISPLAY_NAME: &str = "Docker Container";
+pub const DISPLAY_NAME: &str = "Docker";
 
 /// Icon reference, in the `ConnectorMetadata::icon` convention. Vendored under
 /// `packages/ui-kit/src/assets/icons/brand` — see `docs/THIRD_PARTY_ICONS.md`
@@ -46,6 +49,12 @@ pub const DATA_POINT_MEMORY_USAGE_BYTES: &str = "memoryUsageBytes";
 pub const DATA_POINT_MEMORY_HISTORY: &str = "memoryHistory";
 pub const DATA_POINT_UPTIME: &str = "uptime";
 pub const DATA_POINT_LOGS: &str = "logs";
+pub const DATA_POINT_TOTAL_CONTAINERS: &str = "totalContainers";
+pub const DATA_POINT_RUNNING_CONTAINERS: &str = "runningContainers";
+pub const DATA_POINT_STOPPED_CONTAINERS: &str = "stoppedContainers";
+pub const DATA_POINT_TOTAL_IMAGES: &str = "totalImages";
+pub const DATA_POINT_DISK_USAGE_BYTES: &str = "diskUsageBytes";
+pub const DATA_POINT_DOCKER_VERSION: &str = "dockerVersion";
 
 /// Action ids.
 pub const ACTION_START: &str = "start";
@@ -100,25 +109,7 @@ impl History {
     }
 }
 
-/// Monitors and controls one Docker container.
-///
-/// # What this first version deliberately does not do
-///
-/// [`Connector::discoverable_type`], [`Connector::discover`],
-/// [`Connector::setup_guide`] and `test_connection` all keep their trait
-/// defaults. These are **planned follow-ups, not oversights**:
-///
-/// - **Discovery** belongs to a *host*-level connector that can list every
-///   container on a daemon and propose one of these per container. This
-///   connector is scoped to a single container it was told the name of, so
-///   the only thing it could discover is itself.
-/// - **A setup guide** is worth writing once it can be capability-aware — the
-///   text that helps is different for a socket bind-mount, a rootless daemon,
-///   and a `docker-socket-proxy`, and a single static template that covers all
-///   three helps with none of them.
-///
-/// Neither is stubbed with a placeholder. A `setup_guide` returning generic
-/// text would be worse than `None`, because a client renders whatever it gets.
+/// Monitors a Docker host, or monitors and controls one named container.
 pub struct DockerConnector {
     config: DockerConnectorConfig,
     /// Reads — inspect, stats, logs — on a short timeout, so a host that has
@@ -168,19 +159,23 @@ impl DockerConnector {
         let docker = config.connect()?;
         let control = config.connect_for_control()?;
 
-        // `inspect` rather than `ping`: it proves reachability *and* existence
-        // in one call, and a ping that succeeded followed by a first poll that
-        // 404s would report the connector as working right up until it did not.
-        let inspect = docker
-            .inspect_container(&config.container_name, None)
-            .await
-            .map_err(|error| inspect_failure(&config, &error))?;
-
-        // A container matched by a name prefix is a different container from
-        // the one the user named, and acting on the wrong one is the worst
-        // failure this connector has available. Docker resolves exact names and
-        // id prefixes, so this is belt and braces rather than a real filter.
-        debug_assert!(inspect.id.is_some() || inspect.name.is_some());
+        if let Some(container_name) = config.container_name.as_deref() {
+            // Container mode validates reachability and exact existence in one
+            // call. Host mode deliberately skips this check because there is
+            // no container to inspect.
+            let inspect = docker
+                .inspect_container(container_name, None)
+                .await
+                .map_err(|error| inspect_failure(&config, container_name, &error))?;
+            debug_assert!(inspect.id.is_some() || inspect.name.is_some());
+        } else {
+            docker.ping().await.map_err(|error| {
+                ConnectorError::unreachable(format!(
+                    "could not reach the Docker host at {}: {error}",
+                    config.docker_host
+                ))
+            })?;
+        }
 
         Ok(Self {
             config,
@@ -193,6 +188,13 @@ impl DockerConnector {
     /// Convenience for the registry factory: parse, then connect.
     pub async fn from_config_value(config: Value) -> Result<Self, ConnectorError> {
         Self::connect(DockerConnectorConfig::from_value(config)?).await
+    }
+
+    fn container_name(&self) -> &str {
+        self.config
+            .container_name
+            .as_deref()
+            .expect("container-only operation called in Docker host mode")
     }
 
     /// One sample of stats, with `precpu_stats` populated.
@@ -209,9 +211,7 @@ impl DockerConnector {
     /// interval (~1s). That is why the timeout is what it is.
     async fn sample_stats(&self) -> Result<Option<ContainerStatsResponse>, ConnectorError> {
         let options = StatsOptionsBuilder::new().stream(false).build();
-        let mut stream = self
-            .docker
-            .stats(&self.config.container_name, Some(options));
+        let mut stream = self.docker.stats(self.container_name(), Some(options));
 
         match stream.next().await {
             Some(Ok(sample)) => Ok(Some(sample)),
@@ -243,7 +243,7 @@ impl DockerConnector {
             .tail(&LOG_TAIL_LINES.to_string())
             .build();
 
-        let mut stream = self.docker.logs(&self.config.container_name, Some(options));
+        let mut stream = self.docker.logs(self.container_name(), Some(options));
         let mut lines: Vec<String> = Vec::new();
         while let Some(chunk) = stream.next().await {
             match chunk {
@@ -262,7 +262,9 @@ impl DockerConnector {
     /// Runs one lifecycle operation, mapping Docker's answer onto the
     /// reached-and-declined / could-not-reach split the trait draws.
     async fn run_lifecycle(&self, action_id: &str) -> Result<ActionResult, ConnectorError> {
-        let name = self.config.container_name.as_str();
+        let Some(name) = self.config.container_name.as_deref() else {
+            return Err(ConnectorError::invalid_action(action_id));
+        };
         // `self.control`, never `self.docker`: see the field docs.
         //
         // No explicit stop timeout is passed, so Docker applies the container's
@@ -309,7 +311,11 @@ impl DockerConnector {
 /// three days later. The variant carries the routing; only the reason is worth
 /// showing here.
 fn poll_failure_reason(config: &DockerConnectorConfig, error: &bollard::errors::Error) -> String {
-    match inspect_failure(config, error) {
+    match inspect_failure(
+        config,
+        config.container_name.as_deref().unwrap_or(""),
+        error,
+    ) {
         ConnectorError::InvalidParams { reason, .. }
         | ConnectorError::Unreachable { reason }
         | ConnectorError::InvalidConfig { reason }
@@ -321,6 +327,7 @@ fn poll_failure_reason(config: &DockerConnectorConfig, error: &bollard::errors::
 /// Turns a failed inspect into the error that names the right thing to fix.
 fn inspect_failure(
     config: &DockerConnectorConfig,
+    container_name: &str,
     error: &bollard::errors::Error,
 ) -> ConnectorError {
     match error {
@@ -333,7 +340,7 @@ fn inspect_failure(
             reason: format!(
                 "the Docker host at {} has no container named {:?}. Check `docker ps -a` for the \
                  exact name or id.",
-                config.docker_host, config.container_name
+                config.docker_host, container_name
             ),
         },
         // Any other status is the daemon objecting to us rather than to the
@@ -373,9 +380,13 @@ impl Connector for DockerConnector {
     /// should not be bindable to a widget — it is diagnostic text, shown in the
     /// detail view, not something a user arranges on a dashboard.
     async fn status(&self) -> Result<ConnectorStatus, ConnectorError> {
+        if self.config.container_name.is_none() {
+            return Ok(self.host_status().await);
+        }
+
         let inspect = match self
             .docker
-            .inspect_container(&self.config.container_name, None)
+            .inspect_container(self.container_name(), None)
             .await
         {
             Ok(inspect) => inspect,
@@ -391,6 +402,10 @@ impl Connector for DockerConnector {
     }
 
     async fn actions(&self) -> Vec<ConnectorAction> {
+        if self.config.container_name.is_none() {
+            return Vec::new();
+        }
+
         // Offered unconditionally rather than filtered by current state. The
         // list is cached by clients and the state can change between the two
         // calls, so a start button that vanished the instant a container came
@@ -436,11 +451,14 @@ impl Connector for DockerConnector {
             name: DISPLAY_NAME.to_owned(),
             icon: Some(ICON.to_owned()),
             version: env!("CARGO_PKG_VERSION").to_owned(),
-            // Two by two fits the status dot, one stat tile and a button row.
-            // The default layout also carries a chart and a log pane, which
-            // want more room — but `min_size` is a floor, not a preference, and
-            // a floor that refuses a small tile on a phone would be wrong.
-            min_size: (2, 2),
+            min_size: if self.config.container_name.is_some() {
+                // Two by two fits the status dot, one stat tile and a button
+                // row. Larger default widgets may ask for more room.
+                (2, 2)
+            } else {
+                // Host mode is a compact collection of headline totals.
+                (2, 2)
+            },
         }
     }
 
@@ -452,19 +470,54 @@ impl Connector for DockerConnector {
     /// but that is a property of *this* connector's schema today, not a rule
     /// that survives the next field somebody adds.
     fn display_fields(&self) -> Vec<DisplayField> {
-        vec![
-            DisplayField {
-                label: "Container".to_owned(),
-                value: self.config.container_name.clone(),
-            },
-            DisplayField {
-                label: "Docker host".to_owned(),
-                value: self.config.docker_host.clone(),
-            },
-        ]
+        let mut fields = Vec::with_capacity(2);
+        if let Some(container_name) = &self.config.container_name {
+            fields.push(DisplayField::new("Container", container_name));
+        }
+        fields.push(DisplayField::new(
+            "Docker host",
+            self.config.docker_host.clone(),
+        ));
+        fields
     }
 
     fn data_points(&self) -> Vec<DataPointDescriptor> {
+        if self.config.container_name.is_none() {
+            return vec![
+                DataPointDescriptor::new(
+                    DATA_POINT_TOTAL_CONTAINERS,
+                    "Containers",
+                    DataPointValueType::Number,
+                ),
+                DataPointDescriptor::new(
+                    DATA_POINT_RUNNING_CONTAINERS,
+                    "Running containers",
+                    DataPointValueType::Number,
+                ),
+                DataPointDescriptor::new(
+                    DATA_POINT_STOPPED_CONTAINERS,
+                    "Stopped containers",
+                    DataPointValueType::Number,
+                ),
+                DataPointDescriptor::new(
+                    DATA_POINT_TOTAL_IMAGES,
+                    "Images",
+                    DataPointValueType::Number,
+                ),
+                DataPointDescriptor::new(
+                    DATA_POINT_DISK_USAGE_BYTES,
+                    "Docker disk usage",
+                    DataPointValueType::Number,
+                )
+                .with_unit("bytes"),
+                DataPointDescriptor::new(
+                    DATA_POINT_DOCKER_VERSION,
+                    "Docker version",
+                    DataPointValueType::String,
+                ),
+            ];
+        }
+
         vec![
             DataPointDescriptor::new(DATA_POINT_STATUS, "State", DataPointValueType::String),
             DataPointDescriptor::new(DATA_POINT_CPU_PERCENT, "CPU", DataPointValueType::Number)
@@ -539,6 +592,17 @@ impl Connector for DockerConnector {
     }
 
     fn default_layout(&self) -> WidgetLayout {
+        if self.config.container_name.is_none() {
+            return WidgetLayout::new(vec![
+                WidgetBinding::display(DATA_POINT_TOTAL_CONTAINERS, DisplayWidgetType::StatTile),
+                WidgetBinding::display(DATA_POINT_RUNNING_CONTAINERS, DisplayWidgetType::StatTile),
+                WidgetBinding::display(DATA_POINT_STOPPED_CONTAINERS, DisplayWidgetType::StatTile),
+                WidgetBinding::display(DATA_POINT_TOTAL_IMAGES, DisplayWidgetType::StatTile),
+                WidgetBinding::display(DATA_POINT_DISK_USAGE_BYTES, DisplayWidgetType::StatTile),
+                WidgetBinding::display(DATA_POINT_DOCKER_VERSION, DisplayWidgetType::StatTile),
+            ]);
+        }
+
         WidgetLayout::new(vec![
             WidgetBinding::display(DATA_POINT_STATUS, DisplayWidgetType::StatusDot),
             WidgetBinding::display(
@@ -559,9 +623,136 @@ impl Connector for DockerConnector {
             // never press.
         ])
     }
+
+    fn discoverable_type(&self) -> Option<String> {
+        self.config
+            .container_name
+            .is_none()
+            .then(|| TYPE_ID.to_owned())
+    }
+
+    fn discovery_target_field(&self) -> Option<String> {
+        Some("containerName".to_owned())
+    }
+
+    async fn discover(&self) -> Result<Vec<DiscoveredResource>, ConnectorError> {
+        if self.config.container_name.is_some() {
+            return Ok(Vec::new());
+        }
+
+        let options = ListContainersOptionsBuilder::new().all(true).build();
+        let containers = self
+            .docker
+            .list_containers(Some(options))
+            .await
+            .map_err(|error| {
+                ConnectorError::unreachable(format!(
+                    "listing containers on {} failed: {error}",
+                    self.config.docker_host
+                ))
+            })?;
+
+        Ok(containers
+            .into_iter()
+            .filter_map(|container| {
+                let name = container
+                    .names
+                    .and_then(|names| names.into_iter().next())
+                    .map(|name| name.trim_start_matches('/').to_owned())
+                    .filter(|name| !name.is_empty())
+                    .or_else(|| container.id.map(|id| id.chars().take(12).collect()))?;
+
+                Some(DiscoveredResource {
+                    suggested_name: name.clone(),
+                    target_connector_type: TYPE_ID.to_owned(),
+                    config: json!({
+                        "dockerHost": self.config.docker_host,
+                        "containerName": name,
+                    }),
+                    target_field_value: Some(json!(name)),
+                })
+            })
+            .collect())
+    }
 }
 
 impl DockerConnector {
+    /// Reads the daemon-wide summary used by host mode.
+    async fn host_status(&self) -> ConnectorStatus {
+        let (info, usage, version) = tokio::join!(
+            self.docker.info(),
+            self.docker.df(None),
+            self.docker.version()
+        );
+
+        let info = match info {
+            Ok(info) => info,
+            Err(error) => {
+                return ConnectorStatus::new(
+                    HealthState::Down,
+                    unavailable_host_details(&format!(
+                        "reading Docker host information from {} failed: {error}",
+                        self.config.docker_host
+                    )),
+                );
+            }
+        };
+        let mut partial_errors = Vec::new();
+        let disk_usage = match usage {
+            Ok(usage) => [
+                usage.image_usage.and_then(|value| value.total_size),
+                usage.container_usage.and_then(|value| value.total_size),
+                usage.volume_usage.and_then(|value| value.total_size),
+                usage.build_cache_usage.and_then(|value| value.total_size),
+            ]
+            .into_iter()
+            .flatten()
+            .sum::<i64>(),
+            Err(error) => {
+                partial_errors.push(format!("reading Docker disk usage failed: {error}"));
+                0
+            }
+        };
+        let version = match version {
+            Ok(version) => version.version.unwrap_or_else(|| "unknown".to_owned()),
+            Err(error) => {
+                partial_errors.push(format!("reading Docker version failed: {error}"));
+                "unavailable".to_owned()
+            }
+        };
+
+        let health = if partial_errors.is_empty() {
+            HealthState::Healthy
+        } else {
+            HealthState::Degraded
+        };
+        let mut details = Map::from_iter([
+            (
+                DATA_POINT_TOTAL_CONTAINERS.to_owned(),
+                json!(info.containers.unwrap_or_default()),
+            ),
+            (
+                DATA_POINT_RUNNING_CONTAINERS.to_owned(),
+                json!(info.containers_running.unwrap_or_default()),
+            ),
+            (
+                DATA_POINT_STOPPED_CONTAINERS.to_owned(),
+                json!(info.containers_stopped.unwrap_or_default()),
+            ),
+            (
+                DATA_POINT_TOTAL_IMAGES.to_owned(),
+                json!(info.images.unwrap_or_default()),
+            ),
+            (DATA_POINT_DISK_USAGE_BYTES.to_owned(), json!(disk_usage)),
+            (DATA_POINT_DOCKER_VERSION.to_owned(), json!(version)),
+        ]);
+        if !partial_errors.is_empty() {
+            details.insert("error".to_owned(), json!(partial_errors.join("; ")));
+        }
+
+        ConnectorStatus::new(health, Value::Object(details))
+    }
+
     /// Assembles the status from a successful inspect.
     ///
     /// Split out so the stats and logs calls happen only once the container is
@@ -660,6 +851,19 @@ fn unavailable_details(reason: &str) -> Value {
     })
 }
 
+/// Host-mode values when a daemon-wide read could not be completed.
+fn unavailable_host_details(reason: &str) -> Value {
+    json!({
+        DATA_POINT_TOTAL_CONTAINERS: 0,
+        DATA_POINT_RUNNING_CONTAINERS: 0,
+        DATA_POINT_STOPPED_CONTAINERS: 0,
+        DATA_POINT_TOTAL_IMAGES: 0,
+        DATA_POINT_DISK_USAGE_BYTES: 0,
+        DATA_POINT_DOCKER_VERSION: "unavailable",
+        "error": reason,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -674,7 +878,7 @@ mod tests {
     fn describe(docker_host: &str) -> Option<NetworkTarget> {
         let config = DockerConnectorConfig {
             docker_host: docker_host.to_owned(),
-            container_name: "irrelevant".to_owned(),
+            container_name: Some("irrelevant".to_owned()),
         };
         let docker = config.connect().expect("building a client does no I/O");
         DockerConnector {
@@ -723,7 +927,7 @@ mod tests {
     async fn only_restart_is_marked_disruptive() {
         let config = DockerConnectorConfig {
             docker_host: "tcp://docker-proxy.example:2375".to_owned(),
-            container_name: "irrelevant".to_owned(),
+            container_name: Some("irrelevant".to_owned()),
         };
         let docker = config.connect().expect("building a client does no I/O");
         let connector = DockerConnector {
@@ -748,5 +952,46 @@ mod tests {
             "stop and start take the container where the user asked; only restart \
              brings it back on its own"
         );
+    }
+
+    #[tokio::test]
+    async fn host_and_container_modes_publish_different_capabilities() {
+        let build = |container_name: Option<&str>| {
+            let config = DockerConnectorConfig {
+                docker_host: "tcp://docker-proxy.example:2375".to_owned(),
+                container_name: container_name.map(str::to_owned),
+            };
+            let docker = config.connect().expect("building a client does no I/O");
+            DockerConnector {
+                docker: docker.clone(),
+                control: docker,
+                config,
+                history: Arc::new(Mutex::new(History::default())),
+            }
+        };
+
+        let host = build(None);
+        assert_eq!(host.metadata().id, TYPE_ID);
+        assert_eq!(host.metadata().min_size, (2, 2));
+        assert!(host.actions().await.is_empty());
+        assert_eq!(host.discoverable_type().as_deref(), Some(TYPE_ID));
+        assert_eq!(
+            host.discovery_target_field().as_deref(),
+            Some("containerName")
+        );
+        assert_eq!(host.data_points().len(), 6);
+        assert_eq!(host.default_layout().bindings.len(), 6);
+
+        let container = build(Some("web"));
+        assert_eq!(container.metadata().id, TYPE_ID);
+        assert_eq!(container.metadata().min_size, (2, 2));
+        assert_eq!(container.actions().await.len(), 5);
+        assert_eq!(container.discoverable_type(), None);
+        assert_eq!(
+            container.discovery_target_field().as_deref(),
+            Some("containerName")
+        );
+        assert_eq!(container.data_points().len(), 7);
+        assert_eq!(container.default_layout().bindings.len(), 7);
     }
 }

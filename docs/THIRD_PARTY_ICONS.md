@@ -62,7 +62,7 @@ a bundle. Adding a connector type adds its icon here; nothing else does.
 
 | Icon | File | Referenced by | Upstream path |
 | --- | --- | --- | --- |
-| Docker | `docker.svg` | The `docker-container` connector type (`crates/connector-docker`), as `brand:docker` | [`svg/docker.svg`](https://github.com/homarr-labs/dashboard-icons/blob/main/svg/docker.svg) |
+| Docker | `docker.svg` | The `docker` connector type (`crates/connector-docker`), as `brand:docker` | [`svg/docker.svg`](https://github.com/homarr-labs/dashboard-icons/blob/main/svg/docker.svg) |
 
 The debug fixture deliberately uses the `lucide:` path instead — it is not a
 product and has no logo to claim.
