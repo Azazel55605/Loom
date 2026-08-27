@@ -1,10 +1,10 @@
-//! One Docker connection, presented as a host or one container.
+//! One Docker connection with host-level and per-container views.
 
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
-use bollard::models::{ContainerInspectResponse, ContainerStatsResponse};
+use bollard::models::{ContainerInspectResponse, ContainerStatsResponse, ContainerSummary};
 use bollard::query_parameters::{
     ListContainersOptionsBuilder, LogsOptionsBuilder, StatsOptionsBuilder,
 };
@@ -12,9 +12,9 @@ use bollard::Docker;
 use chrono::{DateTime, Utc};
 use futures_util::StreamExt;
 use loom_core::connector::{
-    ActionResult, ActionWidgetType, ChartType, Connector, ConnectorAction, ConnectorError,
-    ConnectorMetadata, ConnectorStatus, DataPointDescriptor, DataPointValueType,
-    DiscoveredResource, DisplayField, DisplayWidgetType, HealthState, NetworkTarget, WidgetBinding,
+    details::set_detail, ActionResult, ActionWidgetType, ChartType, Connector, ConnectorAction,
+    ConnectorError, ConnectorMetadata, ConnectorStatus, DataPointDescriptor, DataPointValueType,
+    DisplayField, DisplayWidgetType, HealthState, NetworkTarget, SubTarget, WidgetBinding,
     WidgetLayout,
 };
 use serde::Serialize;
@@ -109,7 +109,7 @@ impl History {
     }
 }
 
-/// Monitors a Docker host, or monitors and controls one named container.
+/// Monitors one Docker host and every addressable container below it.
 pub struct DockerConnector {
     config: DockerConnectorConfig,
     /// Reads — inspect, stats, logs — on a short timeout, so a host that has
@@ -124,18 +124,21 @@ pub struct DockerConnector {
     /// `std::sync::Mutex`, not tokio's: every critical section here is a few
     /// pushes with no `await` inside it, so an async mutex would buy nothing
     /// and cost a scheduler hop per poll.
-    history: Arc<Mutex<History>>,
+    history: Arc<Mutex<HashMap<String, History>>>,
+    /// Last successful cheap enumeration. `data_points()` is intentionally
+    /// synchronous in the shared trait, so live target discovery refreshes
+    /// this cache before descriptors are read.
+    known_targets: Arc<Mutex<Vec<SubTarget>>>,
 }
 
 /// Hand-written because `bollard::Docker` is not `Debug`, and because the
-/// interesting part of a connector in a log line is which container on which
-/// host it points at — not the state of an HTTP connection pool.
+/// interesting part of a connector in a log line is which Docker endpoint
+/// it points at — not the state of an HTTP connection pool.
 impl std::fmt::Debug for DockerConnector {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter
             .debug_struct("DockerConnector")
             .field("docker_host", &self.config.docker_host)
-            .field("container_name", &self.config.container_name)
             .finish_non_exhaustive()
     }
 }
@@ -143,58 +146,33 @@ impl std::fmt::Debug for DockerConnector {
 impl DockerConnector {
     /// Builds a connector and proves it can be used.
     ///
-    /// Two round trips' worth of validation happens here rather than at first
-    /// poll, so that "add connector" fails at the moment someone can still fix
-    /// the form, and so the two failures a bad configuration produces stay
-    /// distinguishable:
-    ///
-    /// - the daemon cannot be reached at all → [`ConnectorError::Unreachable`],
-    ///   which points at the socket, the mount, or the network;
-    /// - the daemon answered but has no such container →
-    ///   [`ConnectorError::InvalidParams`], which points at the name field.
-    ///
-    /// Collapsing those into one "could not connect" is the difference between
-    /// a two-minute fix and an afternoon.
+    /// The daemon is pinged and its cheap container list is read here so a bad
+    /// endpoint is refused while the setup form is still open, and the
+    /// synchronous descriptor cache starts with the current targets.
     pub async fn connect(config: DockerConnectorConfig) -> Result<Self, ConnectorError> {
         let docker = config.connect()?;
         let control = config.connect_for_control()?;
+        docker.ping().await.map_err(|error| {
+            ConnectorError::unreachable(format!(
+                "could not reach the Docker host at {}: {error}",
+                config.docker_host
+            ))
+        })?;
 
-        if let Some(container_name) = config.container_name.as_deref() {
-            // Container mode validates reachability and exact existence in one
-            // call. Host mode deliberately skips this check because there is
-            // no container to inspect.
-            let inspect = docker
-                .inspect_container(container_name, None)
-                .await
-                .map_err(|error| inspect_failure(&config, container_name, &error))?;
-            debug_assert!(inspect.id.is_some() || inspect.name.is_some());
-        } else {
-            docker.ping().await.map_err(|error| {
-                ConnectorError::unreachable(format!(
-                    "could not reach the Docker host at {}: {error}",
-                    config.docker_host
-                ))
-            })?;
-        }
-
-        Ok(Self {
+        let connector = Self {
             config,
             docker,
             control,
-            history: Arc::new(Mutex::new(History::default())),
-        })
+            history: Arc::new(Mutex::new(HashMap::new())),
+            known_targets: Arc::new(Mutex::new(Vec::new())),
+        };
+        connector.list_sub_targets_live().await?;
+        Ok(connector)
     }
 
     /// Convenience for the registry factory: parse, then connect.
     pub async fn from_config_value(config: Value) -> Result<Self, ConnectorError> {
         Self::connect(DockerConnectorConfig::from_value(config)?).await
-    }
-
-    fn container_name(&self) -> &str {
-        self.config
-            .container_name
-            .as_deref()
-            .expect("container-only operation called in Docker host mode")
     }
 
     /// One sample of stats, with `precpu_stats` populated.
@@ -209,9 +187,12 @@ impl DockerConnector {
     ///
     /// The cost is that this call blocks for roughly one Docker collection
     /// interval (~1s). That is why the timeout is what it is.
-    async fn sample_stats(&self) -> Result<Option<ContainerStatsResponse>, ConnectorError> {
+    async fn sample_stats(
+        &self,
+        container_name: &str,
+    ) -> Result<Option<ContainerStatsResponse>, ConnectorError> {
         let options = StatsOptionsBuilder::new().stream(false).build();
-        let mut stream = self.docker.stats(self.container_name(), Some(options));
+        let mut stream = self.docker.stats(container_name, Some(options));
 
         match stream.next().await {
             Some(Ok(sample)) => Ok(Some(sample)),
@@ -235,7 +216,7 @@ impl DockerConnector {
     /// Joined into one `String` rather than sent as an array because the
     /// declared value type is `String`, and a second wire shape for one type is
     /// how a renderer and a connector quietly disagree.
-    async fn tail_logs(&self) -> String {
+    async fn tail_logs(&self, container_name: &str) -> String {
         let options = LogsOptionsBuilder::new()
             .stdout(true)
             .stderr(true)
@@ -243,7 +224,7 @@ impl DockerConnector {
             .tail(&LOG_TAIL_LINES.to_string())
             .build();
 
-        let mut stream = self.docker.logs(self.container_name(), Some(options));
+        let mut stream = self.docker.logs(container_name, Some(options));
         let mut lines: Vec<String> = Vec::new();
         while let Some(chunk) = stream.next().await {
             match chunk {
@@ -261,10 +242,11 @@ impl DockerConnector {
 
     /// Runs one lifecycle operation, mapping Docker's answer onto the
     /// reached-and-declined / could-not-reach split the trait draws.
-    async fn run_lifecycle(&self, action_id: &str) -> Result<ActionResult, ConnectorError> {
-        let Some(name) = self.config.container_name.as_deref() else {
-            return Err(ConnectorError::invalid_action(action_id));
-        };
+    async fn run_lifecycle(
+        &self,
+        action_id: &str,
+        name: &str,
+    ) -> Result<ActionResult, ConnectorError> {
         // `self.control`, never `self.docker`: see the field docs.
         //
         // No explicit stop timeout is passed, so Docker applies the container's
@@ -301,6 +283,43 @@ impl DockerConnector {
             ))),
         }
     }
+
+    async fn list_sub_targets_live(&self) -> Result<Vec<SubTarget>, ConnectorError> {
+        let options = ListContainersOptionsBuilder::new().all(true).build();
+        let containers = self
+            .docker
+            .list_containers(Some(options))
+            .await
+            .map_err(|error| {
+                ConnectorError::unreachable(format!(
+                    "listing containers on {} failed: {error}",
+                    self.config.docker_host
+                ))
+            })?;
+        let targets: Vec<SubTarget> = containers
+            .into_iter()
+            .filter_map(sub_target_from_summary)
+            .collect();
+        *self
+            .known_targets
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = targets.clone();
+        Ok(targets)
+    }
+}
+
+fn sub_target_from_summary(container: ContainerSummary) -> Option<SubTarget> {
+    let id = container
+        .names
+        .and_then(|names| names.into_iter().next())
+        .map(|name| name.trim_start_matches('/').to_owned())
+        .filter(|name| !name.is_empty())
+        .or_else(|| container.id.map(|id| id.chars().take(12).collect()))?;
+    let label = container
+        .image
+        .filter(|image| !image.is_empty() && image != &id)
+        .map_or_else(|| id.clone(), |image| format!("{id} ({image})"));
+    Some(SubTarget { id, label })
 }
 
 /// The human half of a failed inspect, for the `error` detail on a poll.
@@ -310,12 +329,12 @@ impl DockerConnector {
 /// when a *factory* refuses a configuration, and nonsense on a dashboard tile
 /// three days later. The variant carries the routing; only the reason is worth
 /// showing here.
-fn poll_failure_reason(config: &DockerConnectorConfig, error: &bollard::errors::Error) -> String {
-    match inspect_failure(
-        config,
-        config.container_name.as_deref().unwrap_or(""),
-        error,
-    ) {
+fn poll_failure_reason(
+    config: &DockerConnectorConfig,
+    container_name: &str,
+    error: &bollard::errors::Error,
+) -> String {
+    match inspect_failure(config, container_name, error) {
         ConnectorError::InvalidParams { reason, .. }
         | ConnectorError::Unreachable { reason }
         | ConnectorError::InvalidConfig { reason }
@@ -362,7 +381,7 @@ fn inspect_failure(
 
 #[async_trait]
 impl Connector for DockerConnector {
-    /// One poll: inspect, stats, logs.
+    /// One poll: host summary plus inspect, stats, and logs for every container.
     ///
     /// # Why a dead daemon is `Ok(Down)` and not `Err`
     ///
@@ -380,65 +399,79 @@ impl Connector for DockerConnector {
     /// should not be bindable to a widget — it is diagnostic text, shown in the
     /// detail view, not something a user arranges on a dashboard.
     async fn status(&self) -> Result<ConnectorStatus, ConnectorError> {
-        if self.config.container_name.is_none() {
-            return Ok(self.host_status().await);
-        }
-
-        let inspect = match self
-            .docker
-            .inspect_container(self.container_name(), None)
-            .await
-        {
-            Ok(inspect) => inspect,
+        let mut status = self.host_status().await;
+        let targets = match self.list_sub_targets_live().await {
+            Ok(targets) => targets,
             Err(error) => {
-                return Ok(ConnectorStatus::new(
-                    HealthState::Down,
-                    unavailable_details(&poll_failure_reason(&self.config, &error)),
-                ));
+                set_detail(&mut status.details, None, "error", json!(error.to_string()));
+                status.health = HealthState::Down;
+                return Ok(status);
             }
         };
 
-        Ok(self.status_from(inspect).await)
+        // Known trade-off: every poll fetches full detail for every container,
+        // even when no active placement displays it. That is reasonable for a
+        // typical homelab count; target-aware polling can be revisited if this
+        // becomes a demonstrated cost.
+        for target in targets {
+            let (_target_health, values) =
+                match self.docker.inspect_container(&target.id, None).await {
+                    Ok(inspect) => self.status_from(&target.id, inspect).await,
+                    Err(error) => (
+                        HealthState::Down,
+                        unavailable_details(&poll_failure_reason(&self.config, &target.id, &error)),
+                    ),
+                };
+            // Instance health describes the daemon connection, not the
+            // least-healthy container. A deliberately stopped container is a
+            // valid sub-target state; its target-scoped `status` detail tells
+            // the placement without making the whole Docker host appear Down.
+            if let Value::Object(values) = values {
+                for (id, value) in values {
+                    set_detail(&mut status.details, Some(&target.id), &id, value);
+                }
+            }
+        }
+
+        status.last_checked = Utc::now();
+        Ok(status)
     }
 
     async fn actions(&self) -> Vec<ConnectorAction> {
-        if self.config.container_name.is_none() {
-            return Vec::new();
-        }
-
         // Offered unconditionally rather than filtered by current state. The
         // list is cached by clients and the state can change between the two
         // calls, so a start button that vanished the instant a container came
         // up would only ever be *stale*, never correct — Docker's own refusal
         // is the authoritative answer, and it arrives as a clear message.
-        vec![
-            ConnectorAction::simple(ACTION_START, "Start").with_description("Start the container."),
-            ConnectorAction::simple(ACTION_STOP, "Stop")
-                .with_description("Stop the container, giving it time to shut down."),
-            // The only disruptive one. `start`, `stop`, `pause` and `unpause`
-            // each move the container to a state the person who pressed the
-            // button asked for and can see coming; `restart` is the case where
-            // a running service vanishes and is expected back, and the gap in
-            // between is exactly what the "Performing: …" overlay exists to
-            // explain rather than report as an outage.
-            ConnectorAction::simple(ACTION_RESTART, "Restart")
-                .with_description("Stop and start the container.")
-                .disruptive(),
-            ConnectorAction::simple(ACTION_PAUSE, "Pause")
-                .with_description("Freeze every process in the container without stopping it."),
-            ConnectorAction::simple(ACTION_UNPAUSE, "Resume")
-                .with_description("Resume a paused container."),
-        ]
+        let Ok(targets) = self.list_sub_targets_live().await else {
+            return Vec::new();
+        };
+        targets
+            .into_iter()
+            .flat_map(|target| container_actions(&target.id))
+            .collect()
     }
 
     async fn execute_action(
         &self,
         action_id: &str,
+        target_id: Option<&str>,
         _params: Value,
     ) -> Result<ActionResult, ConnectorError> {
         // Every action is parameterless, so `params` is ignored rather than
         // validated. A future action that takes one must validate its own.
-        self.run_lifecycle(action_id).await
+        let Some(target_id) = target_id else {
+            return Err(ConnectorError::invalid_action(action_id));
+        };
+        self.run_lifecycle(action_id, target_id).await
+    }
+
+    fn supports_sub_targets(&self) -> bool {
+        true
+    }
+
+    async fn list_sub_targets(&self) -> Result<Vec<SubTarget>, ConnectorError> {
+        self.list_sub_targets_live().await
     }
 
     fn config_schema(&self) -> Value {
@@ -451,14 +484,7 @@ impl Connector for DockerConnector {
             name: DISPLAY_NAME.to_owned(),
             icon: Some(ICON.to_owned()),
             version: env!("CARGO_PKG_VERSION").to_owned(),
-            min_size: if self.config.container_name.is_some() {
-                // Two by two fits the status dot, one stat tile and a button
-                // row. Larger default widgets may ask for more room.
-                (2, 2)
-            } else {
-                // Host mode is a compact collection of headline totals.
-                (2, 2)
-            },
+            min_size: (2, 2),
         }
     }
 
@@ -470,79 +496,26 @@ impl Connector for DockerConnector {
     /// but that is a property of *this* connector's schema today, not a rule
     /// that survives the next field somebody adds.
     fn display_fields(&self) -> Vec<DisplayField> {
-        let mut fields = Vec::with_capacity(2);
-        if let Some(container_name) = &self.config.container_name {
-            fields.push(DisplayField::new("Container", container_name));
-        }
-        fields.push(DisplayField::new(
+        vec![DisplayField::new(
             "Docker host",
             self.config.docker_host.clone(),
-        ));
-        fields
+        )]
     }
 
     fn data_points(&self) -> Vec<DataPointDescriptor> {
-        if self.config.container_name.is_none() {
-            return vec![
-                DataPointDescriptor::new(
-                    DATA_POINT_TOTAL_CONTAINERS,
-                    "Containers",
-                    DataPointValueType::Number,
-                ),
-                DataPointDescriptor::new(
-                    DATA_POINT_RUNNING_CONTAINERS,
-                    "Running containers",
-                    DataPointValueType::Number,
-                ),
-                DataPointDescriptor::new(
-                    DATA_POINT_STOPPED_CONTAINERS,
-                    "Stopped containers",
-                    DataPointValueType::Number,
-                ),
-                DataPointDescriptor::new(
-                    DATA_POINT_TOTAL_IMAGES,
-                    "Images",
-                    DataPointValueType::Number,
-                ),
-                DataPointDescriptor::new(
-                    DATA_POINT_DISK_USAGE_BYTES,
-                    "Docker disk usage",
-                    DataPointValueType::Number,
-                )
-                .with_unit("bytes"),
-                DataPointDescriptor::new(
-                    DATA_POINT_DOCKER_VERSION,
-                    "Docker version",
-                    DataPointValueType::String,
-                ),
-            ];
-        }
-
-        vec![
-            DataPointDescriptor::new(DATA_POINT_STATUS, "State", DataPointValueType::String),
-            DataPointDescriptor::new(DATA_POINT_CPU_PERCENT, "CPU", DataPointValueType::Number)
-                .with_unit("%"),
-            DataPointDescriptor::new(
-                DATA_POINT_CPU_HISTORY,
-                "CPU history",
-                DataPointValueType::TimeSeries,
+        let targets = self
+            .known_targets
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone();
+        host_data_points()
+            .into_iter()
+            .chain(
+                targets
+                    .into_iter()
+                    .flat_map(|target| container_data_points(&target.id)),
             )
-            .with_unit("%"),
-            DataPointDescriptor::new(
-                DATA_POINT_MEMORY_USAGE_BYTES,
-                "Memory",
-                DataPointValueType::Number,
-            )
-            .with_unit("bytes"),
-            DataPointDescriptor::new(
-                DATA_POINT_MEMORY_HISTORY,
-                "Memory history",
-                DataPointValueType::TimeSeries,
-            )
-            .with_unit("bytes"),
-            DataPointDescriptor::new(DATA_POINT_UPTIME, "Uptime", DataPointValueType::String),
-            DataPointDescriptor::new(DATA_POINT_LOGS, "Recent logs", DataPointValueType::String),
-        ]
+            .collect()
     }
 
     /// The Docker endpoint, when probing it would mean anything.
@@ -592,16 +565,20 @@ impl Connector for DockerConnector {
     }
 
     fn default_layout(&self) -> WidgetLayout {
-        if self.config.container_name.is_none() {
-            return WidgetLayout::new(vec![
-                WidgetBinding::display(DATA_POINT_TOTAL_CONTAINERS, DisplayWidgetType::StatTile),
-                WidgetBinding::display(DATA_POINT_RUNNING_CONTAINERS, DisplayWidgetType::StatTile),
-                WidgetBinding::display(DATA_POINT_STOPPED_CONTAINERS, DisplayWidgetType::StatTile),
-                WidgetBinding::display(DATA_POINT_TOTAL_IMAGES, DisplayWidgetType::StatTile),
-                WidgetBinding::display(DATA_POINT_DISK_USAGE_BYTES, DisplayWidgetType::StatTile),
-                WidgetBinding::display(DATA_POINT_DOCKER_VERSION, DisplayWidgetType::StatTile),
-            ]);
-        }
+        WidgetLayout::new(vec![
+            WidgetBinding::display(DATA_POINT_TOTAL_CONTAINERS, DisplayWidgetType::StatTile),
+            WidgetBinding::display(DATA_POINT_RUNNING_CONTAINERS, DisplayWidgetType::StatTile),
+            WidgetBinding::display(DATA_POINT_STOPPED_CONTAINERS, DisplayWidgetType::StatTile),
+            WidgetBinding::display(DATA_POINT_TOTAL_IMAGES, DisplayWidgetType::StatTile),
+            WidgetBinding::display(DATA_POINT_DISK_USAGE_BYTES, DisplayWidgetType::StatTile),
+            WidgetBinding::display(DATA_POINT_DOCKER_VERSION, DisplayWidgetType::StatTile),
+        ])
+    }
+
+    fn default_layout_for(&self, target_id: Option<&str>) -> WidgetLayout {
+        let Some(_target_id) = target_id else {
+            return self.default_layout();
+        };
 
         WidgetLayout::new(vec![
             WidgetBinding::display(DATA_POINT_STATUS, DisplayWidgetType::StatusDot),
@@ -623,57 +600,101 @@ impl Connector for DockerConnector {
             // never press.
         ])
     }
+}
 
-    fn discoverable_type(&self) -> Option<String> {
-        self.config
-            .container_name
-            .is_none()
-            .then(|| TYPE_ID.to_owned())
-    }
+fn host_data_points() -> Vec<DataPointDescriptor> {
+    vec![
+        DataPointDescriptor::new(
+            DATA_POINT_TOTAL_CONTAINERS,
+            "Containers",
+            DataPointValueType::Number,
+        ),
+        DataPointDescriptor::new(
+            DATA_POINT_RUNNING_CONTAINERS,
+            "Running containers",
+            DataPointValueType::Number,
+        ),
+        DataPointDescriptor::new(
+            DATA_POINT_STOPPED_CONTAINERS,
+            "Stopped containers",
+            DataPointValueType::Number,
+        ),
+        DataPointDescriptor::new(
+            DATA_POINT_TOTAL_IMAGES,
+            "Images",
+            DataPointValueType::Number,
+        ),
+        DataPointDescriptor::new(
+            DATA_POINT_DISK_USAGE_BYTES,
+            "Docker disk usage",
+            DataPointValueType::Number,
+        )
+        .with_unit("bytes"),
+        DataPointDescriptor::new(
+            DATA_POINT_DOCKER_VERSION,
+            "Docker version",
+            DataPointValueType::String,
+        ),
+    ]
+}
 
-    fn discovery_target_field(&self) -> Option<String> {
-        Some("containerName".to_owned())
-    }
+fn container_data_points(target_id: &str) -> Vec<DataPointDescriptor> {
+    vec![
+        DataPointDescriptor::new(DATA_POINT_STATUS, "State", DataPointValueType::String)
+            .for_target(target_id),
+        DataPointDescriptor::new(DATA_POINT_CPU_PERCENT, "CPU", DataPointValueType::Number)
+            .with_unit("%")
+            .for_target(target_id),
+        DataPointDescriptor::new(
+            DATA_POINT_CPU_HISTORY,
+            "CPU history",
+            DataPointValueType::TimeSeries,
+        )
+        .with_unit("%")
+        .for_target(target_id),
+        DataPointDescriptor::new(
+            DATA_POINT_MEMORY_USAGE_BYTES,
+            "Memory",
+            DataPointValueType::Number,
+        )
+        .with_unit("bytes")
+        .for_target(target_id),
+        DataPointDescriptor::new(
+            DATA_POINT_MEMORY_HISTORY,
+            "Memory history",
+            DataPointValueType::TimeSeries,
+        )
+        .with_unit("bytes")
+        .for_target(target_id),
+        DataPointDescriptor::new(DATA_POINT_UPTIME, "Uptime", DataPointValueType::String)
+            .for_target(target_id),
+        DataPointDescriptor::new(DATA_POINT_LOGS, "Recent logs", DataPointValueType::String)
+            .for_target(target_id),
+    ]
+}
 
-    async fn discover(&self) -> Result<Vec<DiscoveredResource>, ConnectorError> {
-        if self.config.container_name.is_some() {
-            return Ok(Vec::new());
-        }
-
-        let options = ListContainersOptionsBuilder::new().all(true).build();
-        let containers = self
-            .docker
-            .list_containers(Some(options))
-            .await
-            .map_err(|error| {
-                ConnectorError::unreachable(format!(
-                    "listing containers on {} failed: {error}",
-                    self.config.docker_host
-                ))
-            })?;
-
-        Ok(containers
-            .into_iter()
-            .filter_map(|container| {
-                let name = container
-                    .names
-                    .and_then(|names| names.into_iter().next())
-                    .map(|name| name.trim_start_matches('/').to_owned())
-                    .filter(|name| !name.is_empty())
-                    .or_else(|| container.id.map(|id| id.chars().take(12).collect()))?;
-
-                Some(DiscoveredResource {
-                    suggested_name: name.clone(),
-                    target_connector_type: TYPE_ID.to_owned(),
-                    config: json!({
-                        "dockerHost": self.config.docker_host,
-                        "containerName": name,
-                    }),
-                    target_field_value: Some(json!(name)),
-                })
-            })
-            .collect())
-    }
+fn container_actions(target_id: &str) -> Vec<ConnectorAction> {
+    vec![
+        ConnectorAction::simple(ACTION_START, "Start")
+            .with_description("Start the container.")
+            .for_target(target_id),
+        ConnectorAction::simple(ACTION_STOP, "Stop")
+            .with_description("Stop the container, giving it time to shut down.")
+            .for_target(target_id),
+        // The only disruptive one. `start`, `stop`, `pause` and `unpause`
+        // move to the requested stable state; restart is the temporary
+        // disappearance the operation overlay explains.
+        ConnectorAction::simple(ACTION_RESTART, "Restart")
+            .with_description("Stop and start the container.")
+            .disruptive()
+            .for_target(target_id),
+        ConnectorAction::simple(ACTION_PAUSE, "Pause")
+            .with_description("Freeze every process in the container without stopping it.")
+            .for_target(target_id),
+        ConnectorAction::simple(ACTION_UNPAUSE, "Resume")
+            .with_description("Resume a paused container.")
+            .for_target(target_id),
+    ]
 }
 
 impl DockerConnector {
@@ -726,38 +747,50 @@ impl DockerConnector {
         } else {
             HealthState::Degraded
         };
-        let mut details = Map::from_iter([
+        let mut details = Value::Object(Map::new());
+        for (id, value) in [
             (
-                DATA_POINT_TOTAL_CONTAINERS.to_owned(),
+                DATA_POINT_TOTAL_CONTAINERS,
                 json!(info.containers.unwrap_or_default()),
             ),
             (
-                DATA_POINT_RUNNING_CONTAINERS.to_owned(),
+                DATA_POINT_RUNNING_CONTAINERS,
                 json!(info.containers_running.unwrap_or_default()),
             ),
             (
-                DATA_POINT_STOPPED_CONTAINERS.to_owned(),
+                DATA_POINT_STOPPED_CONTAINERS,
                 json!(info.containers_stopped.unwrap_or_default()),
             ),
             (
-                DATA_POINT_TOTAL_IMAGES.to_owned(),
+                DATA_POINT_TOTAL_IMAGES,
                 json!(info.images.unwrap_or_default()),
             ),
-            (DATA_POINT_DISK_USAGE_BYTES.to_owned(), json!(disk_usage)),
-            (DATA_POINT_DOCKER_VERSION.to_owned(), json!(version)),
-        ]);
+            (DATA_POINT_DISK_USAGE_BYTES, json!(disk_usage)),
+            (DATA_POINT_DOCKER_VERSION, json!(version)),
+        ] {
+            set_detail(&mut details, None, id, value);
+        }
         if !partial_errors.is_empty() {
-            details.insert("error".to_owned(), json!(partial_errors.join("; ")));
+            set_detail(
+                &mut details,
+                None,
+                "error",
+                json!(partial_errors.join("; ")),
+            );
         }
 
-        ConnectorStatus::new(health, Value::Object(details))
+        ConnectorStatus::new(health, details)
     }
 
     /// Assembles the status from a successful inspect.
     ///
     /// Split out so the stats and logs calls happen only once the container is
     /// known to exist, and so this half is readable without the error plumbing.
-    async fn status_from(&self, inspect: ContainerInspectResponse) -> ConnectorStatus {
+    async fn status_from(
+        &self,
+        container_name: &str,
+        inspect: ContainerInspectResponse,
+    ) -> (HealthState, Value) {
         let state = inspect.state.unwrap_or_default();
         let status_enum = state.status;
         let health = health_for_state(status_enum);
@@ -771,7 +804,7 @@ impl DockerConnector {
         // interval to be told nothing. A stopped container's poll is therefore
         // also the fast one.
         let (cpu, memory) = if running {
-            match self.sample_stats().await {
+            match self.sample_stats(container_name).await {
                 Ok(Some(sample)) => (
                     cpu_percent(sample.cpu_stats.as_ref(), sample.precpu_stats.as_ref()),
                     sample
@@ -793,12 +826,13 @@ impl DockerConnector {
         // a gap in its chart rather than a flat line at zero that looks like a
         // measurement.
         let (cpu_history, memory_history) = {
-            let mut history = self.history.lock().unwrap_or_else(|poisoned| {
+            let mut histories = self.history.lock().unwrap_or_else(|poisoned| {
                 // A panic in another thread while holding this lock cannot
                 // corrupt a ring buffer of numbers, so recovering is strictly
                 // better than propagating the panic into every later poll.
                 poisoned.into_inner()
             });
+            let history = histories.entry(container_name.to_owned()).or_default();
             if running {
                 history.record(cpu, memory, now);
             }
@@ -811,7 +845,7 @@ impl DockerConnector {
         // Read whether or not the container is running: for a stopped one, the
         // last lines before it exited are usually the reason it exited, which
         // is the single most useful thing a dashboard can show at that moment.
-        let logs = self.tail_logs().await;
+        let logs = self.tail_logs(container_name).await;
 
         let mut details = Map::new();
         details.insert(
@@ -828,7 +862,7 @@ impl DockerConnector {
         );
         details.insert(DATA_POINT_LOGS.to_owned(), json!(logs));
 
-        ConnectorStatus::new(health, Value::Object(details))
+        (health, Value::Object(details))
     }
 }
 
@@ -853,15 +887,19 @@ fn unavailable_details(reason: &str) -> Value {
 
 /// Host-mode values when a daemon-wide read could not be completed.
 fn unavailable_host_details(reason: &str) -> Value {
-    json!({
-        DATA_POINT_TOTAL_CONTAINERS: 0,
-        DATA_POINT_RUNNING_CONTAINERS: 0,
-        DATA_POINT_STOPPED_CONTAINERS: 0,
-        DATA_POINT_TOTAL_IMAGES: 0,
-        DATA_POINT_DISK_USAGE_BYTES: 0,
-        DATA_POINT_DOCKER_VERSION: "unavailable",
-        "error": reason,
-    })
+    let mut details = Value::Object(Map::new());
+    for (id, value) in [
+        (DATA_POINT_TOTAL_CONTAINERS, json!(0)),
+        (DATA_POINT_RUNNING_CONTAINERS, json!(0)),
+        (DATA_POINT_STOPPED_CONTAINERS, json!(0)),
+        (DATA_POINT_TOTAL_IMAGES, json!(0)),
+        (DATA_POINT_DISK_USAGE_BYTES, json!(0)),
+        (DATA_POINT_DOCKER_VERSION, json!("unavailable")),
+        ("error", json!(reason)),
+    ] {
+        set_detail(&mut details, None, id, value);
+    }
+    details
 }
 
 #[cfg(test)]
@@ -869,40 +907,42 @@ mod tests {
     use super::*;
     use crate::config::DockerConnectorConfig;
 
-    /// Builds a connector without touching Docker.
-    ///
-    /// `network_target()` and `actions()` are descriptive: neither reaches the
-    /// daemon, and both are worth testing on a machine that has none. The
-    /// client is built but never used, which is why a `tcp://` host that does
-    /// not exist is fine here.
-    fn describe(docker_host: &str) -> Option<NetworkTarget> {
+    /// Builds a descriptive connector without touching Docker.
+    fn detached(docker_host: &str, targets: &[&str]) -> DockerConnector {
         let config = DockerConnectorConfig {
             docker_host: docker_host.to_owned(),
-            container_name: Some("irrelevant".to_owned()),
         };
         let docker = config.connect().expect("building a client does no I/O");
         DockerConnector {
             docker: docker.clone(),
             control: docker,
             config,
-            history: Arc::new(Mutex::new(History::default())),
+            history: Arc::new(Mutex::new(HashMap::new())),
+            known_targets: Arc::new(Mutex::new(
+                targets
+                    .iter()
+                    .map(|id| SubTarget {
+                        id: (*id).to_owned(),
+                        label: (*id).to_owned(),
+                    })
+                    .collect(),
+            )),
         }
-        .network_target()
     }
 
     #[test]
     fn a_tcp_endpoint_is_worth_probing() {
         assert_eq!(
-            describe("tcp://docker-proxy.example:2375"),
+            detached("tcp://docker-proxy.example:2375", &[]).network_target(),
             Some(NetworkTarget::new("docker-proxy.example", 2375))
         );
         assert_eq!(
-            describe("http://192.0.2.10:2376"),
+            detached("http://192.0.2.10:2376", &[]).network_target(),
             Some(NetworkTarget::new("192.0.2.10", 2376))
         );
         // An IPv6 literal keeps its own colons; only the trailing port is taken.
         assert_eq!(
-            describe("tcp://[2001:db8::1]:2375"),
+            detached("tcp://[2001:db8::1]:2375", &[]).network_target(),
             Some(NetworkTarget::new("2001:db8::1", 2375))
         );
     }
@@ -910,38 +950,31 @@ mod tests {
     #[test]
     fn a_local_socket_has_nothing_to_probe() {
         // A DNS lookup and a TCP connect have nothing to say about a file.
-        assert_eq!(describe("unix:///var/run/docker.sock"), None);
+        assert_eq!(
+            detached("unix:///var/run/docker.sock", &[]).network_target(),
+            None
+        );
     }
 
     #[test]
     fn a_host_without_a_usable_port_still_reports_its_host() {
         // DNS is still worth checking even when there is nowhere to connect.
         for host in ["tcp://docker.example", "tcp://docker.example:not-a-port"] {
-            let target = describe(host).unwrap_or_else(|| panic!("{host} names a host"));
+            let target = detached(host, &[])
+                .network_target()
+                .unwrap_or_else(|| panic!("{host} names a host"));
             assert_eq!(target.host, "docker.example");
             assert_eq!(target.port, None, "{host} names no usable port");
         }
     }
 
-    #[tokio::test]
-    async fn only_restart_is_marked_disruptive() {
-        let config = DockerConnectorConfig {
-            docker_host: "tcp://docker-proxy.example:2375".to_owned(),
-            container_name: Some("irrelevant".to_owned()),
-        };
-        let docker = config.connect().expect("building a client does no I/O");
-        let connector = DockerConnector {
-            docker: docker.clone(),
-            control: docker,
-            config,
-            history: Arc::new(Mutex::new(History::default())),
-        };
-
-        // `actions()` is a static list on this connector, so it answers without
-        // a daemon.
-        let disruptive: Vec<String> = connector
-            .actions()
-            .await
+    #[test]
+    fn only_restart_is_marked_disruptive_and_every_action_is_targeted() {
+        let actions = container_actions("web");
+        assert!(actions
+            .iter()
+            .all(|action| action.target_id.as_deref() == Some("web")));
+        let disruptive: Vec<String> = actions
             .into_iter()
             .filter(|action| action.is_disruptive)
             .map(|action| action.id)
@@ -954,44 +987,29 @@ mod tests {
         );
     }
 
-    #[tokio::test]
-    async fn host_and_container_modes_publish_different_capabilities() {
-        let build = |container_name: Option<&str>| {
-            let config = DockerConnectorConfig {
-                docker_host: "tcp://docker-proxy.example:2375".to_owned(),
-                container_name: container_name.map(str::to_owned),
-            };
-            let docker = config.connect().expect("building a client does no I/O");
-            DockerConnector {
-                docker: docker.clone(),
-                control: docker,
-                config,
-                history: Arc::new(Mutex::new(History::default())),
-            }
-        };
+    #[test]
+    fn host_and_container_descriptors_are_tagged_by_target() {
+        let connector = detached("tcp://docker-proxy.example:2375", &["web", "db"]);
+        assert!(connector.supports_sub_targets());
+        assert_eq!(connector.metadata().id, TYPE_ID);
+        assert_eq!(connector.metadata().min_size, (2, 2));
 
-        let host = build(None);
-        assert_eq!(host.metadata().id, TYPE_ID);
-        assert_eq!(host.metadata().min_size, (2, 2));
-        assert!(host.actions().await.is_empty());
-        assert_eq!(host.discoverable_type().as_deref(), Some(TYPE_ID));
+        let points = connector.data_points();
         assert_eq!(
-            host.discovery_target_field().as_deref(),
-            Some("containerName")
+            points
+                .iter()
+                .filter(|point| point.target_id.is_none())
+                .count(),
+            6
         );
-        assert_eq!(host.data_points().len(), 6);
-        assert_eq!(host.default_layout().bindings.len(), 6);
-
-        let container = build(Some("web"));
-        assert_eq!(container.metadata().id, TYPE_ID);
-        assert_eq!(container.metadata().min_size, (2, 2));
-        assert_eq!(container.actions().await.len(), 5);
-        assert_eq!(container.discoverable_type(), None);
-        assert_eq!(
-            container.discovery_target_field().as_deref(),
-            Some("containerName")
-        );
-        assert_eq!(container.data_points().len(), 7);
-        assert_eq!(container.default_layout().bindings.len(), 7);
+        for target in ["web", "db"] {
+            let targeted: Vec<_> = points
+                .iter()
+                .filter(|point| point.target_id.as_deref() == Some(target))
+                .collect();
+            assert_eq!(targeted.len(), 7);
+        }
+        assert_eq!(connector.default_layout_for(None).bindings.len(), 6);
+        assert_eq!(connector.default_layout_for(Some("web")).bindings.len(), 7);
     }
 }

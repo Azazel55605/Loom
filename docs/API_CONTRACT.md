@@ -481,7 +481,7 @@ The asymmetry is deliberate and load-bearing:
 | Route | Permission | Scope checked |
 | --- | --- | --- |
 | `GET /connector-types` | `connectors.manage` | global |
-| `GET /connector-instances`, `GET /connector-instances/{id}` | `connectors.view` | global |
+| `GET /connector-instances`, `GET /connector-instances/tags`, `GET /connector-instances/{id}` | `connectors.view` | global |
 | `POST /connector-instances`, `PATCH /connector-instances/{id}`, `DELETE /connector-instances/{id}` | `connectors.manage` | global |
 | `POST /connector-instances/{id}/actions/{actionId}` | `connectors.control` | `connector` / `{id}` |
 | `GET /users`, `POST /users`, `PATCH /users/{id}`, `DELETE /users/{id}` | `users.manage` | global |
@@ -736,11 +736,6 @@ the instances they may see are on `/connector-instances`, which asks only for
           "minLength": 1,
           "default": "unix:///var/run/docker.sock",
           "description": "Docker connection URI. …"
-        },
-        "containerName": {
-          "type": "string",
-          "minLength": 1,
-          "description": "Leave blank to monitor the whole Docker host. Set to a specific container's exact name to monitor and control just that container."
         }
       },
       "required": ["dockerHost"],
@@ -748,7 +743,7 @@ the instances they may see are on `/connector-instances`, which asks only for
     },
     "setupGuide": null,
     "discoverableType": null,
-    "discoveryTargetField": "containerName"
+    "discoveryTargetField": null
   }
 ]
 ```
@@ -785,28 +780,21 @@ is created, not here.
 | `typeId` | What one instance is | Configuration | Validated by |
 | --- | --- | --- | --- |
 | `debug` | A fixture that contacts nothing. Permanent — see `crates/core/src/connector/debug.rs`. | How it should pretend to behave. | Parsing alone; there is nothing to reach. |
-| `docker` | One Docker endpoint, viewed either as the whole host or one exact container. | Required `dockerHost` (`unix://` or `tcp://`); optional `containerName`. Blank/omitted selects host mode, set selects container mode. | A real daemon connection in both modes, plus a container inspect in container mode. |
+| `docker` | One Docker daemon connection and its host-level aggregate view. Containers are addressable sub-targets of that instance. | Required `dockerHost` (`unix://` or `tcp://`) only. | A real daemon connection and ping. |
 
 **Creating a `docker` instance actually connects.** `POST
-/connector-instances` opens the endpoint before writing a row. Host mode pings
-the daemon and skips container validation. Container mode additionally inspects
-the exact name, so its two failure classes remain different 400s:
+/connector-instances` opens and pings the endpoint before writing a row. An
+unreachable daemon returns a 400 carrying an `unreachable` connector error
+naming the configured endpoint.
 
-- the daemon could not be reached → an `unreachable` connector error naming the
-  host, pointing at the socket, the bind mount, or the network;
-- the daemon answered but has no such container → an `invalidParams` error
-  naming the container, pointing at the name field.
-
-Collapsing those into one "could not connect" is the difference between a
-two-minute fix and an afternoon.
-
-Container mode retains `status`, `cpuPercent`, `cpuHistory`,
-`memoryUsageBytes`, `memoryHistory`, `uptime`, and `logs`, plus start/stop/
-restart/pause/unpause actions. Host mode has no actions and publishes
+The host view publishes
 `totalContainers`, `runningContainers`, `stoppedContainers`, `totalImages`,
-`diskUsageBytes`, and `dockerVersion`. Both modes report metadata id `docker`;
-their data points and default layouts branch from the optional
-`containerName`.
+`diskUsageBytes`, and `dockerVersion`. Each container returned by the live
+sub-target endpoint has target-scoped `status`, `cpuPercent`, `cpuHistory`,
+`memoryUsageBytes`, `memoryHistory`, `uptime`, and `logs`, plus start/stop/
+restart/pause/unpause actions. Stored configuration containing a stale
+`containerName` property remains loadable: the parser ignores that unused key,
+but the schema no longer offers it for new instances.
 
 ### `GET /connector-instances`
 
@@ -824,6 +812,7 @@ Requires a **global** `connectors.view` grant.
     "name": "Fixture",
     "connectorType": "debug",
     "createdAt": "2026-08-21T09:14:03.914238771+00:00",
+    "tags": ["lab", "test"],
     "metadata": {
       "id": "debug",
       "name": "Debug Connector",
@@ -835,15 +824,18 @@ Requires a **global** `connectors.view` grant.
     "status": {
       "health": "healthy",
       "details": {
-        "load": 45.87,
-        "label": "debug-fixture",
-        "enabled": true,
-        "log": "2026-08-21T09:20:06.000Z INFO  simulated tick 41 — load 44.6%, enabled\n2026-08-21T09:20:11.000Z WARN  simulated tick 42 — load 45.9%, enabled",
-        "loadHistory": [
-          { "timestamp": "2026-08-21T09:20:01Z", "value": 42.1 },
-          { "timestamp": "2026-08-21T09:20:06Z", "value": 44.6 },
-          { "timestamp": "2026-08-21T09:20:11Z", "value": 45.87 }
-        ]
+        "": {
+          "load": 45.87,
+          "label": "debug-fixture",
+          "enabled": true,
+          "log": "2026-08-21T09:20:06.000Z INFO  simulated tick 41 — load 44.6%, enabled\n2026-08-21T09:20:11.000Z WARN  simulated tick 42 — load 45.9%, enabled",
+          "loadHistory": [
+            { "timestamp": "2026-08-21T09:20:01Z", "value": 42.1 },
+            { "timestamp": "2026-08-21T09:20:06Z", "value": 44.6 },
+            { "timestamp": "2026-08-21T09:20:11Z", "value": 45.87 }
+          ]
+        },
+        "fixture-a": { "load": 45.87, "enabled": true }
       },
       "lastChecked": "2026-08-21T09:20:11Z"
     },
@@ -861,6 +853,7 @@ Requires a **global** `connectors.view` grant.
 | `name` | string | The user's name for this instance. | Always present. |
 | `connectorType` | string | Which registered type it is. | Always present. |
 | `createdAt` | string | RFC 3339 timestamp, in the stored spelling — numeric offset, sub-second digits. See [Conventions](#conventions). | Always present. |
+| `tags` | array of strings | Free-form administrator labels assigned to this instance, sorted alphabetically. | Always present; may be empty. |
 | `metadata` | object | [`ConnectorMetadata`](#connectormetadata) from the live connector. | Always present. |
 | `iconOverride` | string | The user's icon for *this instance*, overriding `metadata.icon`. Same [reference convention](#icon-references). Set through `PATCH /connector-instances/{id}`. | **`null`** when no override is set — fall back to `metadata.icon`, then to the client's own default. |
 | `status` | object | [`ConnectorStatus`](#connectorstatus) from the latest successful poll. | **`null`** when the latest check itself failed. |
@@ -928,6 +921,26 @@ cannot be tested against reality.
 | 200 | The list was produced. This is the only success outcome, including when every connector failed. |
 | 403 | The caller lacks a global `connectors.view` grant. |
 
+### `GET /connector-instances/tags`
+
+Requires a **global** `connectors.view` grant. Returns the distinct tags
+currently assigned to at least one connector instance, sorted alphabetically.
+There is no tags master resource: deleting or replacing the final assignment
+removes that tag from this response automatically.
+
+**Request:** no body.
+
+**Response 200:**
+
+```json
+["lab", "production", "test"]
+```
+
+| Status | Meaning |
+| --- | --- |
+| 200 | The active tag vocabulary was produced; an empty array is valid. |
+| 403 | The caller lacks a global `connectors.view` grant. |
+
 ### `GET /connector-instances/{id}`
 
 Requires a **global** `connectors.view` grant. Everything the list entry
@@ -941,16 +954,17 @@ carries, plus what a dashboard placement UI needs.
   "name": "Fixture",
   "connectorType": "debug",
   "createdAt": "2026-08-21T09:14:03.914238771+00:00",
+  "tags": ["lab", "test"],
   "metadata": { "id": "debug", "name": "Debug Connector", "icon": "lucide:bug", "version": "0.1.0", "minSize": [2, 2] },
   "iconOverride": null,
-  "status": { "health": "healthy", "details": {}, "lastChecked": "2026-08-21T09:20:11Z" },
+  "status": { "health": "healthy", "details": { "": {} }, "lastChecked": "2026-08-21T09:20:11Z" },
   "displayFields": [{ "label": "Host", "value": "debug.invalid" }],
   "config": { "baseLoad": 10 },
   "actions": [
-    { "id": "ping", "label": "Ping", "description": "…", "paramsSchema": {} }
+    { "id": "ping", "targetId": null, "label": "Ping", "description": "…", "paramsSchema": {} }
   ],
   "dataPoints": [
-    { "id": "load", "label": "Load", "valueType": "number", "unit": "%" },
+    { "id": "load", "targetId": null, "label": "Load", "valueType": "number", "unit": "%" },
     { "id": "label", "label": "Label", "valueType": "string", "unit": null },
     { "id": "enabled", "label": "Enabled", "valueType": "bool", "unit": null },
     { "id": "loadHistory", "label": "Load history", "valueType": "timeSeries", "unit": "%" }
@@ -965,7 +979,8 @@ carries, plus what a dashboard placement UI needs.
       { "action": { "actionId": "set-enabled", "widgetType": "toggle", "config": {} } }
     ]
   },
-  "discoverableType": "debug"
+  "discoverableType": "debug",
+  "supportsSubTargets": true
 }
 ```
 
@@ -977,6 +992,7 @@ carries, plus what a dashboard placement UI needs.
 | `dataPoints` | array | [`DataPointDescriptor`](#datapointdescriptor) — what can be bound to a widget. | Always present; may be empty. |
 | `defaultLayout` | object | [`WidgetLayout`](#widgetlayout) the connector ships with. | Always present; `bindings` may be empty. |
 | `discoverableType` | string | Type id this live instance can discover. Clients use this to decide whether to offer discovery without guessing from `connectorType`. | **`null`** when unsupported or the stored instance is not loaded. |
+| `supportsSubTargets` | boolean | Whether this live instance exposes addressable views through the sub-target endpoint. | Always present; `false` for unloaded and ordinary single-view connectors. |
 
 **`config` is `connectors.view`-gated, which will not be good enough forever.**
 The currently registered types store no credentials. A future integration storing an
@@ -986,6 +1002,29 @@ this field; treat that as a known open item rather than a settled decision.
 | Status | Meaning |
 | --- | --- |
 | 200 | Found. |
+| 403 | The caller lacks a global `connectors.view` grant. |
+| 404 | No instance with that id. |
+
+### `GET /connector-instances/{id}/sub-targets`
+
+Requires a global `connectors.view` grant. Returns the live connector's cheap
+addressable-view enumeration; it does not fetch status, stats, or logs.
+
+```json
+[
+  { "id": "web", "label": "web (example/image:latest)" },
+  { "id": "database", "label": "database (example/database:latest)" }
+]
+```
+
+Sub-targets are not discovery proposals and do not create connector instances.
+They are views inside the already-configured connection. `discover()` retains
+its separate purpose of suggesting whole new connector instances.
+
+| Status | Meaning |
+| --- | --- |
+| 200 | Live sub-target list returned; it may be empty. |
+| 400 | This connector does not support sub-targets, is unloaded, or enumeration failed. |
 | 403 | The caller lacks a global `connectors.view` grant. |
 | 404 | No instance with that id. |
 
@@ -1059,23 +1098,17 @@ then creates accepted resources through the ordinary
 ### `POST /connector-types/{typeId}/discover`
 
 Requires a global `connectors.manage` grant. The JSON request body is a
-candidate connector configuration. It does not need to represent the final
-saved mode; it only needs to satisfy the connector factory. For Docker, host
-mode is the expected discovery candidate:
-
-```json
-{ "dockerHost": "unix:///var/run/docker.sock" }
-```
+candidate connector configuration. It only needs to satisfy the connector
+factory.
 
 The backend constructs the candidate, confirms that configuration supports
 discovery, calls it once, and discards it without inserting a row or adding it
 to the runtime map.
 
 **Response 200:** the same `{ discoveryTargetField, resources }` envelope as
-instance-scoped discovery. A Docker response uses
-`"discoveryTargetField": "containerName"`; each resource targets `docker`,
-copies the candidate `dockerHost`, supplies the exact `containerName`, and
-places that same name in `targetFieldValue`.
+instance-scoped discovery. Docker does not support discovery: its containers
+are sub-targets of one instance and are obtained from the read-only endpoint
+above instead.
 
 | Status | Meaning |
 | --- | --- |
@@ -1131,7 +1164,12 @@ Requires a global `connectors.manage` grant.
 **Request** — every field optional; an absent field is left alone:
 
 ```json
-{ "name": "Renamed", "config": { "label": "after-update" }, "iconOverride": "lucide:hard-drive" }
+{
+  "name": "Renamed",
+  "config": { "label": "after-update" },
+  "iconOverride": "lucide:hard-drive",
+  "tags": ["lab", "test"]
+}
 ```
 
 | Field | JSON type | Meaning |
@@ -1139,6 +1177,7 @@ Requires a global `connectors.manage` grant.
 | `name` | string | New display name. Must not be empty or whitespace. |
 | `config` | object | New configuration, **replacing** the stored one. |
 | `iconOverride` | string or `null` | This instance's icon, overriding its type's. See below. |
+| `tags` | array of strings | Complete replacement tag set. Values are trimmed, duplicates are collapsed, and an empty array clears all tags. |
 
 **`config` replaces the whole configuration**; it is not merged. A connector is
 rebuilt from its configuration wholesale, so there is no coherent meaning for a
@@ -1161,12 +1200,17 @@ The live connector is rebuilt and replaced on every successful update, whether
 or not `config` changed. That is also how an instance that failed to load at
 startup gets a second chance once its configuration is fixed.
 
+When `tags` is present, replacing the tag rows and updating the instance happen
+in one database transaction. Omitting `tags` leaves the existing set alone;
+sending an empty array removes every assignment. Empty or whitespace-only tag
+values are rejected.
+
 **Response 200** — the same body as `GET /connector-instances/{id}`.
 
 | Status | Meaning |
 | --- | --- |
 | 200 | Updated, persisted, and the live connector replaced. |
-| 400 | `name` was present and empty, or the connector refused the new `config`. Nothing is changed. |
+| 400 | `name` was present and empty, a tag was empty, or the connector refused the new `config`. Nothing is changed. |
 | 403 | The caller lacks a global `connectors.manage` grant. |
 | 404 | No instance with that id. |
 | 422 | `iconOverride` was present and was neither a string nor `null`. |
@@ -1194,13 +1238,15 @@ Requires `connectors.control` over **this instance**, checked as
 `connector` / `{id}`. A global grant covers every instance; a grant scoped to
 one instance covers only that one.
 
-**Request:** an **optional** JSON body, forwarded verbatim as the action's
-`params`. The handler reads raw bytes rather than using the `Json` extractor, so
-no `Content-Type` is required and an empty body is legal.
+**Request:** an optional JSON body. The target-aware envelope is:
 
 ```json
-{ "force": true }
+{ "targetId": "web", "params": { "force": true } }
 ```
+
+`targetId` is optional and `null` addresses the host/aggregate view. For wire
+compatibility, a body without `targetId` or `params` is treated as the params
+object directly. An empty body becomes JSON `null` params.
 
 **An absent or empty body becomes JSON `null`, not `{}`.** That is deliberate:
 `null` is what `Connector::execute_action` already treats as "no parameters",
@@ -1226,6 +1272,12 @@ A 403 is returned **before** the instance id is looked up, so an unauthorized
 caller gets the same response whether or not the id exists. Otherwise the
 endpoint would report 404 for unknown ids and 403 for real ones, which is a way
 to enumerate what is configured.
+
+Permission scoping remains instance-wide. A `connectors.control` grant over one
+Docker instance therefore permits actions on every container sub-target within
+that daemon connection. This is less granular than the former per-container
+instance model; per-target grants are a possible future extension, not part of
+this contract.
 
 | Status | Meaning |
 | --- | --- |
@@ -1348,15 +1400,12 @@ group, never in `placements`.
         },
         "status": {
           "health": "healthy",
-          "details": {},
+          "details": { "": {} },
           "lastChecked": "2026-08-21T18:00:05Z"
         },
         "displayFields": []
       },
-      "positionX": 0,
-      "positionY": 0,
-      "width": 2,
-      "height": 2,
+      "targetId": null,
       "positionX": 0,
       "positionY": 0,
       "width": 2,
@@ -1494,6 +1543,7 @@ Editor or Owner.
 ```json
 {
   "connectorInstanceId": "5aa2574d-9ba0-4af8-b7ae-74671fb48777",
+  "targetId": "web",
   "positionX": 0,
   "positionY": 0,
   "width": 3,
@@ -1505,17 +1555,19 @@ Editor or Owner.
 }
 ```
 
-`widgetBindings` may be omitted, in which case the connector's
-`defaultLayout.bindings` are stored. Width and height must each meet the live
-connector's `metadata.minSize`.
+`targetId` is optional/null for the host view. When present, the connector must
+support sub-targets and the id must appear in a live enumeration.
+`widgetBindings` may be omitted, in which case the connector's target-specific
+default layout is stored. Width and height must each meet the live connector's
+`metadata.minSize`.
 
 Each binding is validated against the namespace its own tag names — see
 [`WidgetLayout`](#widgetlayout):
 
-- a `display` binding's `dataPointId` must be declared by the connector's
-  `dataPoints`;
-- an `action` binding's `actionId` must be declared by the connector's
-  `actions`.
+- a `display` binding's `dataPointId` and descriptor `targetId` must match the
+  placement's `targetId`;
+- an `action` binding's `actionId` and descriptor `targetId` must match the
+  placement's `targetId`.
 
 A 400 lists every invalid id, and says which kind each one is, so the two are
 never confused: `widget bindings reference unknown data points: nope; unknown
@@ -1528,7 +1580,7 @@ metadata contract can be validated. No connector ownership or
 | Status | Meaning |
 | --- | --- |
 | 201 | Placement created; response is the placement shape from dashboard detail. |
-| 400 | Connector missing/unavailable, size below minimum, or invalid binding. |
+| 400 | Connector missing/unavailable, unknown/unsupported target, size below minimum, or invalid binding. |
 | 403 | Caller is not an Editor or Owner. |
 
 ### `PATCH /dashboards/{id}/placements/{placementId}`
@@ -1539,7 +1591,7 @@ Editor or Owner. Any omitted field remains unchanged:
 { "positionX": 2, "positionY": 1, "width": 4, "height": 3 }
 ```
 
-`positionX`, `positionY`, `width`, `height`, and `widgetBindings` are mutable;
+`positionX`, `positionY`, `width`, `height`, `targetId`, and `widgetBindings` are mutable;
 the connector instance is fixed. Size and binding validation is identical to
 create. Returns the updated placement on 200, 403 for insufficient role, 404
 when the placement does not belong to this dashboard, and 400 for validation
@@ -2178,14 +2230,17 @@ print_wire_shapes`.
 {
   "health": "degraded",
   "details": {
-    "load": 62.5,
-    "label": "debug-1",
-    "enabled": true,
-    "loadHistory": [
-      { "timestamp": "2026-08-19T11:59:55Z", "value": 61.2 },
-      { "timestamp": "2026-08-19T12:00:00Z", "value": 62.5 }
-    ],
-    "version": "1.2.3"
+    "": {
+      "load": 62.5,
+      "label": "debug-1",
+      "enabled": true,
+      "loadHistory": [
+        { "timestamp": "2026-08-19T11:59:55Z", "value": 61.2 },
+        { "timestamp": "2026-08-19T12:00:00Z", "value": 62.5 }
+      ],
+      "version": "1.2.3"
+    },
+    "fixture-a": { "load": 51.2, "enabled": true }
   },
   "lastChecked": "2026-08-19T12:00:00Z"
 }
@@ -2194,7 +2249,7 @@ print_wire_shapes`.
 | Field | JSON type | Meaning | Nullability |
 | --- | --- | --- | --- |
 | `health` | string | One of `"healthy"`, `"degraded"`, `"down"`, `"unknown"`. | Always present. |
-| `details` | object | The current reading for every data point, keyed by `DataPointDescriptor.id`. | Always present; `{}` only for a connector with no data points and nothing else to report. |
+| `details` | object | Readings nested first by target and then by `DataPointDescriptor.id`. The empty-string key `""` is the host/aggregate sentinel; every other key is a sub-target id. | Always present; `{}` only for a connector with no data points and nothing else to report. |
 | `lastChecked` | string | RFC 3339 UTC, `Z`-suffixed. When the reading was actually taken. | Always present. |
 
 `health` is a closed set of four rather than a free-form string because clients
@@ -2202,13 +2257,13 @@ sort, colour, and alert on it. `"unknown"` is distinct from `"down"` so a
 dashboard never reports an outage it has not observed — never-polled is not the
 same as broken.
 
-**`details` is a data-point-keyed object, not a free-form blob.** It is typed
-loosely in Rust for serialization flexibility, but the shape is a contract a
-client may rely on: every id returned by the instance's `dataPoints` appears as
-a key, and each value's JSON shape follows that data point's declared
-`valueType`.
+**`details` has the formal shape `details[targetKey][dataPointId]`.** It is
+typed loosely in Rust for serialization flexibility, but the nesting is a
+contract. `targetKey` is `""` when a descriptor's `targetId` is null, otherwise
+it is that exact target id. This permits the same data-point id on many targets
+without collisions.
 
-| `valueType` | JSON shape of `details[id]` |
+| `valueType` | JSON shape of `details[targetKey][id]` |
 | --- | --- |
 | `"number"` | a JSON number |
 | `"string"` | a JSON string |
@@ -2233,6 +2288,7 @@ the number is live.
 ```json
 {
   "id": "restart",
+  "targetId": "web",
   "label": "Restart",
   "description": "Restarts the service.",
   "paramsSchema": {},
@@ -2243,6 +2299,7 @@ the number is live.
 | Field | JSON type | Meaning | Nullability |
 | --- | --- | --- | --- |
 | `id` | string | Stable machine identifier, passed back in the action URL. | Always present. |
+| `targetId` | string | Addressed sub-target for this descriptor. | `null` for a host/aggregate action. |
 | `label` | string | Short human-facing name for a button or menu entry. | Always present. |
 | `description` | string | Longer explanation for tooltips and confirmation prompts — the place to warn that an action is disruptive. | Serialized as **`null`** when absent, never omitted. |
 | `paramsSchema` | object | JSON Schema for this action's parameters, driving client-side form generation and server-side validation. | Always present; `{}` for a parameterless action, never `null`. |
@@ -2266,6 +2323,20 @@ client never has to know an action id in advance. The list is not fixed for a
 connector type: it may vary with the connector's configuration or the remote
 service's state, so treat it as data to render, not as a schema to compile
 against.
+
+### `SubTarget`
+
+```json
+{ "id": "web", "label": "web (example/image:latest)" }
+```
+
+| Field | JSON type | Meaning | Nullability |
+| --- | --- | --- | --- |
+| `id` | string | Stable address used as `targetId` on placements, descriptors, and action requests. | Always present. |
+| `label` | string | Current human-facing label for pickers. It may include supplemental information and is not an identifier. | Always present. |
+
+Sub-target enumeration is intentionally cheap metadata. Values and action
+descriptors remain in the instance detail/status contracts.
 
 ### `ActionResult`
 
@@ -2361,18 +2432,19 @@ shell, and stored configuration is exactly where credentials live.
 ### `DataPointDescriptor`
 
 ```json
-{ "id": "load", "label": "Load", "valueType": "number", "unit": "%" }
+{ "id": "load", "targetId": "web", "label": "Load", "valueType": "number", "unit": "%" }
 ```
 
 | Field | JSON type | Meaning | Nullability |
 | --- | --- | --- | --- |
-| `id` | string | Stable machine identifier, **and** the key this data point's value appears under in `status.details`. Stored in saved layouts, so it must not change when the label does. | Always present. |
+| `id` | string | Stable machine identifier, and the second-level key under its target in `status.details`. Stored in saved layouts, so it must not change when the label does. | Always present. |
+| `targetId` | string | Addressed sub-target for this descriptor. | `null` for a host/aggregate data point. |
 | `label` | string | Human-facing name for a caption or legend entry. | Always present. |
 | `valueType` | string | One of `"number"`, `"string"`, `"bool"`, `"timeSeries"`. Constrains which widgets may render it. | Always present. |
 | `unit` | string | Display suffix (`"%"`, `"MiB"`, `"ms"`). A display concern only — the value is never scaled. | Serialized as **`null`** for a dimensionless value. |
 
 **Descriptors, not readings.** The current values arrive separately, in
-`status.details`, keyed by `id`. That split is what lets a dashboard be laid out
+`status.details`, keyed by target and then `id`. That split is what lets a dashboard be laid out
 once and re-rendered on every poll without re-reading the schema.
 
 ### `WidgetLayout`

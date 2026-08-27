@@ -27,6 +27,7 @@ use loom_core::connector::{
 };
 use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::Value;
+use std::collections::{BTreeSet, HashMap};
 use uuid::Uuid;
 
 use crate::auth::extract::{
@@ -148,6 +149,8 @@ pub struct ConnectorInstanceResponse {
     name: String,
     connector_type: String,
     created_at: String,
+    /// Free-form administrator labels, sorted alphabetically.
+    tags: Vec<String>,
     metadata: ConnectorMetadata,
     /// The user's per-instance icon choice, overriding `metadata.icon`.
     ///
@@ -202,6 +205,8 @@ pub struct ConnectorInstanceDetail {
     data_points: Vec<DataPointDescriptor>,
     /// The widget arrangement the connector ships with.
     default_layout: WidgetLayout,
+    /// Whether this instance exposes addressable views below itself.
+    supports_sub_targets: bool,
     /// Type id this live instance can discover, or null when unsupported.
     discoverable_type: Option<String>,
 }
@@ -232,6 +237,8 @@ pub struct UpdateInstanceRequest {
     /// undo a choice.
     #[serde(default, deserialize_with = "present_or_absent")]
     icon_override: Option<Option<String>>,
+    /// Absent leaves tags alone; present replaces the complete set.
+    tags: Option<Vec<String>>,
 }
 
 /// Distinguishes an absent JSON field from one explicitly set to `null`.
@@ -286,6 +293,11 @@ pub async fn list_instances(
         Err(error) => return internal_error("listing connector instances", error),
     };
 
+    let mut tags_by_instance = match load_all_tags(&state).await {
+        Ok(tags) => tags,
+        Err(response) => return *response,
+    };
+
     let mut entries = Vec::with_capacity(rows.len());
     for row in rows {
         // A row with no live connector is a row that failed to load at startup
@@ -300,10 +312,31 @@ pub async fn list_instances(
             Err(_) => (None, None),
         };
 
-        entries.push(entry_for(&row, live.as_deref(), snapshot.as_ref()));
+        let tags = tags_by_instance.remove(&row.id).unwrap_or_default();
+        entries.push(entry_for(&row, tags, live.as_deref(), snapshot.as_ref()));
     }
 
     Json(entries).into_response()
+}
+
+/// `GET /connector-instances/tags`
+///
+/// The vocabulary is derived from tags currently in use, so removing the last
+/// assignment removes that suggestion without maintaining a second table.
+pub async fn list_tags(
+    _caller: RequirePermission<ConnectorsView>,
+    State(state): State<AppState>,
+) -> Response {
+    let tags = sqlx::query_scalar::<_, String>(
+        "SELECT DISTINCT tag FROM connector_instance_tags ORDER BY tag COLLATE NOCASE, tag",
+    )
+    .fetch_all(&state.pool)
+    .await;
+
+    match tags {
+        Ok(tags) => Json(tags).into_response(),
+        Err(error) => internal_error("listing connector tags", error),
+    }
 }
 
 /// `GET /connector-instances/{id}`
@@ -329,7 +362,12 @@ pub async fn get_instance(
         Err(_) => (None, None),
     };
 
-    detail_for(&row, live.as_deref(), snapshot.as_ref()).await
+    let tags = match load_instance_tags(&state, &row.id).await {
+        Ok(tags) => tags,
+        Err(response) => return *response,
+    };
+
+    detail_for(&row, tags, live.as_deref(), snapshot.as_ref()).await
 }
 
 /// `POST /connector-instances/{id}/discover`
@@ -360,6 +398,43 @@ pub async fn discover_instance(
     discover_with(connector.as_ref(), "this connector instance").await
 }
 
+/// `GET /connector-instances/{id}/sub-targets`
+///
+/// A cheap live enumeration of addressable views inside one instance. This is
+/// read-only metadata and therefore uses `connectors.view`, unlike discovery,
+/// which proposes creating new instances and requires management authority.
+pub async fn list_sub_targets(
+    _caller: RequirePermission<ConnectorsView>,
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Response {
+    let row = match load_row(&state, &id).await {
+        Ok(Some(row)) => row,
+        Ok(None) => return not_found(&id),
+        Err(response) => return *response,
+    };
+    let Ok(uuid) = Uuid::parse_str(&row.id) else {
+        return not_found(&id);
+    };
+    let Some(connector) = state.connectors.get(&uuid).await else {
+        return ErrorBody::message(
+            StatusCode::BAD_REQUEST,
+            "sub-targets are unavailable because this connector instance is not loaded",
+        );
+    };
+    if !connector.supports_sub_targets() {
+        return ErrorBody::message(
+            StatusCode::BAD_REQUEST,
+            "this connector instance does not support sub-targets",
+        );
+    }
+
+    match connector.list_sub_targets().await {
+        Ok(targets) => Json(targets).into_response(),
+        Err(error) => ErrorBody::connector(status_for(&error), error),
+    }
+}
+
 /// Load the same cached connector summary used by the public list endpoint.
 ///
 /// Dashboard placements embed this value. Keeping construction here prevents
@@ -381,7 +456,14 @@ pub(crate) async fn instance_summary(
         Err(_) => (None, None),
     };
 
-    Ok(Some(entry_for(&row, live.as_deref(), snapshot.as_ref())))
+    let tags = load_instance_tags(state, &row.id).await?;
+
+    Ok(Some(entry_for(
+        &row,
+        tags,
+        live.as_deref(),
+        snapshot.as_ref(),
+    )))
 }
 
 /// `POST /connector-instances`
@@ -452,7 +534,13 @@ pub async fn create_instance(
         icon_override: None,
     };
 
-    let body = detail_for(&row, Some(connector.as_ref()), snapshot.as_ref()).await;
+    let body = detail_for(
+        &row,
+        Vec::new(),
+        Some(connector.as_ref()),
+        snapshot.as_ref(),
+    )
+    .await;
     (StatusCode::CREATED, body).into_response()
 }
 
@@ -506,7 +594,27 @@ pub async fn update_instance(
         None => row.icon_override.clone(),
     };
 
+    let replacement_tags = match request.tags {
+        Some(tags) => match normalize_tags(tags) {
+            Ok(tags) => Some(tags),
+            Err(message) => return ErrorBody::message(StatusCode::BAD_REQUEST, message),
+        },
+        None => None,
+    };
+    let response_tags = match replacement_tags.as_ref() {
+        Some(tags) => tags.clone(),
+        None => match load_instance_tags(&state, &row.id).await {
+            Ok(tags) => tags,
+            Err(response) => return *response,
+        },
+    };
+
     let serialized = config.to_string();
+    let mut transaction = match state.pool.begin().await {
+        Ok(transaction) => transaction,
+        Err(error) => return internal_error("starting connector instance update", error),
+    };
+
     let updated = sqlx::query(
         "UPDATE connector_instances SET name = ?, config = ?, icon_override = ? WHERE id = ?",
     )
@@ -514,11 +622,37 @@ pub async fn update_instance(
     .bind(&serialized)
     .bind(&icon_override)
     .bind(&row.id)
-    .execute(&state.pool)
+    .execute(&mut *transaction)
     .await;
 
     if let Err(error) = updated {
         return internal_error("updating a connector instance", error);
+    }
+
+    if let Some(tags) = replacement_tags {
+        if let Err(error) = sqlx::query("DELETE FROM connector_instance_tags WHERE instance_id = ?")
+            .bind(&row.id)
+            .execute(&mut *transaction)
+            .await
+        {
+            return internal_error("replacing connector tags", error);
+        }
+
+        for tag in tags {
+            if let Err(error) =
+                sqlx::query("INSERT INTO connector_instance_tags (instance_id, tag) VALUES (?, ?)")
+                    .bind(&row.id)
+                    .bind(tag)
+                    .execute(&mut *transaction)
+                    .await
+            {
+                return internal_error("replacing connector tags", error);
+            }
+        }
+    }
+
+    if let Err(error) = transaction.commit().await {
+        return internal_error("committing connector instance update", error);
     }
 
     if let Ok(uuid) = Uuid::parse_str(&row.id) {
@@ -537,7 +671,13 @@ pub async fn update_instance(
         Err(_) => None,
     };
 
-    detail_for(&row, Some(connector.as_ref()), snapshot.as_ref()).await
+    detail_for(
+        &row,
+        response_tags,
+        Some(connector.as_ref()),
+        snapshot.as_ref(),
+    )
+    .await
 }
 
 /// `DELETE /connector-instances/{id}`
@@ -619,7 +759,7 @@ pub async fn execute_action(
     // is legal and no `Content-Type` is demanded. An empty body becomes JSON
     // `null`, deliberately distinct from `{}`: "sent nothing" and "sent an
     // empty object" stay distinguishable.
-    let params: Value = if body.is_empty() {
+    let raw: Value = if body.is_empty() {
         Value::Null
     } else {
         match serde_json::from_slice(&body) {
@@ -631,6 +771,30 @@ pub async fn execute_action(
                 );
             }
         }
+    };
+
+    // New clients send `{ targetId, params }`. For compatibility with the
+    // already-shipped non-target action forms, a body without either envelope
+    // key remains the action params object itself. If `targetId` is present but
+    // `params` is not, the remaining fields are treated as params as well.
+    let (target_id, params) = match raw {
+        Value::Object(mut object)
+            if object.contains_key("targetId") || object.contains_key("params") =>
+        {
+            let target_id = match object.remove("targetId") {
+                None | Some(Value::Null) => None,
+                Some(Value::String(value)) if !value.trim().is_empty() => Some(value),
+                Some(_) => {
+                    return ErrorBody::message(
+                        StatusCode::BAD_REQUEST,
+                        "targetId must be a non-empty string or null",
+                    )
+                }
+            };
+            let params = object.remove("params").unwrap_or(Value::Object(object));
+            (target_id, params)
+        }
+        params => (None, params),
     };
 
     // A disruptive action makes the service stop answering for a while, and a
@@ -647,7 +811,9 @@ pub async fn execute_action(
         .actions()
         .await
         .into_iter()
-        .find(|action| action.id == action_id)
+        .find(|action| {
+            action.id == action_id && action.target_id.as_deref() == target_id.as_deref()
+        })
         .filter(|action| action.is_disruptive)
         .map(|action| action.label);
 
@@ -656,7 +822,9 @@ pub async fn execute_action(
         state.connectors.begin_operation(uuid, label).await;
     }
 
-    let outcome = connector.execute_action(&action_id, params).await;
+    let outcome = connector
+        .execute_action(&action_id, target_id.as_deref(), params)
+        .await;
 
     if let Some(uuid) = instance_id {
         if disruptive.is_some() {
@@ -694,6 +862,45 @@ async fn load_row(state: &AppState, id: &str) -> RouteResult<Option<InstanceRow>
     .fetch_optional(&state.pool)
     .await
     .map_err(|error| Box::new(internal_error("loading a connector instance", error)))
+}
+
+async fn load_instance_tags(state: &AppState, id: &str) -> RouteResult<Vec<String>> {
+    sqlx::query_scalar::<_, String>(
+        "SELECT tag FROM connector_instance_tags WHERE instance_id = ? \
+         ORDER BY tag COLLATE NOCASE, tag",
+    )
+    .bind(id)
+    .fetch_all(&state.pool)
+    .await
+    .map_err(|error| Box::new(internal_error("loading connector tags", error)))
+}
+
+async fn load_all_tags(state: &AppState) -> RouteResult<HashMap<String, Vec<String>>> {
+    let rows = sqlx::query_as::<_, (String, String)>(
+        "SELECT instance_id, tag FROM connector_instance_tags \
+         ORDER BY instance_id, tag COLLATE NOCASE, tag",
+    )
+    .fetch_all(&state.pool)
+    .await
+    .map_err(|error| Box::new(internal_error("loading connector tags", error)))?;
+
+    let mut tags_by_instance: HashMap<String, Vec<String>> = HashMap::new();
+    for (instance_id, tag) in rows {
+        tags_by_instance.entry(instance_id).or_default().push(tag);
+    }
+    Ok(tags_by_instance)
+}
+
+fn normalize_tags(tags: Vec<String>) -> Result<Vec<String>, String> {
+    let mut normalized = BTreeSet::new();
+    for tag in tags {
+        let tag = tag.trim();
+        if tag.is_empty() {
+            return Err("tags must not be empty".to_owned());
+        }
+        normalized.insert(tag.to_owned());
+    }
+    Ok(normalized.into_iter().collect())
 }
 
 /// The 404 body, phrased identically wherever it comes from.
@@ -744,6 +951,7 @@ async fn discover_with(connector: &dyn Connector, subject: &str) -> Response {
 /// and therefore undeletable.
 fn entry_for(
     row: &InstanceRow,
+    tags: Vec<String>,
     live: Option<&dyn Connector>,
     snapshot: Option<&ConnectorStatusSnapshot>,
 ) -> ConnectorInstanceResponse {
@@ -783,6 +991,7 @@ fn entry_for(
         name: row.name.clone(),
         connector_type: row.connector_type.clone(),
         created_at: row.created_at.clone(),
+        tags,
         metadata,
         icon_override: row.icon_override.clone(),
         status,
@@ -796,19 +1005,22 @@ fn entry_for(
 /// Builds the full detail response for one row.
 async fn detail_for(
     row: &InstanceRow,
+    tags: Vec<String>,
     live: Option<&dyn Connector>,
     snapshot: Option<&ConnectorStatusSnapshot>,
 ) -> Response {
-    let instance = entry_for(row, live, snapshot);
+    let instance = entry_for(row, tags, live, snapshot);
 
-    let (actions, data_points, default_layout, discoverable_type) = match live {
+    let (actions, data_points, default_layout, supports_sub_targets, discoverable_type) = match live
+    {
         Some(connector) => (
             connector.actions().await,
             connector.data_points(),
             connector.default_layout(),
+            connector.supports_sub_targets(),
             connector.discoverable_type(),
         ),
-        None => (Vec::new(), Vec::new(), WidgetLayout::default(), None),
+        None => (Vec::new(), Vec::new(), WidgetLayout::default(), false, None),
     };
 
     Json(ConnectorInstanceDetail {
@@ -817,6 +1029,7 @@ async fn detail_for(
         actions,
         data_points,
         default_layout,
+        supports_sub_targets,
         discoverable_type,
     })
     .into_response()

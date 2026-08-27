@@ -64,10 +64,10 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
 
 use super::{
-    ActionResult, ActionWidgetType, ChartType, Connector, ConnectorAction, ConnectorError,
-    ConnectorMetadata, ConnectorStatus, DataPointDescriptor, DataPointValueType,
+    details::set_detail, ActionResult, ActionWidgetType, ChartType, Connector, ConnectorAction,
+    ConnectorError, ConnectorMetadata, ConnectorStatus, DataPointDescriptor, DataPointValueType,
     DiscoveredResource, DisplayField, DisplayWidgetType, HealthState, NetworkTarget, SetupGuide,
-    WidgetBinding, WidgetLayout,
+    SubTarget, WidgetBinding, WidgetLayout,
 };
 
 /// The connector type id this fixture registers under.
@@ -116,6 +116,9 @@ pub const DATA_POINT_LOG: &str = "log";
 /// and the fixture's job is to give `LogStream` something to scroll — not to
 /// simulate log retention, which is a real connector's problem.
 pub const LOG_CAPACITY: usize = 10;
+
+/// Stable fake targets used to exercise target-aware clients without a service.
+pub const FIXTURE_TARGETS: [&str; 2] = ["fixture-a", "fixture-b"];
 
 /// The fake hostname shown in [`Connector::display_fields`].
 ///
@@ -552,20 +555,48 @@ impl Connector for DebugConnector {
     async fn status(&self) -> Result<ConnectorStatus, ConnectorError> {
         self.gate().await?;
 
-        let mut details = match self.config.simulated_status.details.clone() {
-            Value::Object(map) => map,
-            // A non-object `details` cannot be merged into; the simulated data
-            // points matter more to the fixture's purpose than a configured
-            // scalar does, so they win.
-            _ => Map::new(),
-        };
-        if let Value::Object(simulated) = self.advance() {
-            details.extend(simulated);
+        let mut details = Value::Object(Map::new());
+        if let Value::Object(configured) = self.config.simulated_status.details.clone() {
+            for (id, value) in configured {
+                set_detail(&mut details, None, &id, value);
+            }
+        }
+        let simulated = self.advance();
+        if let Value::Object(values) = &simulated {
+            for (id, value) in values {
+                set_detail(&mut details, None, id, value.clone());
+            }
+        }
+
+        // Two fake addressable views deliberately expose different point sets.
+        // Besides exercising nested status, this lets backend tests prove that
+        // a placement cannot bind a point belonging to another target.
+        for (index, target) in FIXTURE_TARGETS.iter().enumerate() {
+            let load = simulated
+                .get(DATA_POINT_LOAD)
+                .and_then(Value::as_f64)
+                .unwrap_or_default();
+            if index == 0 {
+                set_detail(&mut details, Some(target), DATA_POINT_LOAD, json!(load));
+            } else {
+                set_detail(
+                    &mut details,
+                    Some(target),
+                    DATA_POINT_LABEL,
+                    json!(self.lock().label.clone()),
+                );
+            }
+            set_detail(
+                &mut details,
+                Some(target),
+                DATA_POINT_ENABLED,
+                json!(index == 0),
+            );
         }
 
         Ok(ConnectorStatus::new(
             self.config.simulated_status.health,
-            Value::Object(details),
+            details,
         ))
     }
 
@@ -597,6 +628,7 @@ impl Connector for DebugConnector {
                 .with_description("Pretends to check that the simulated service answers."),
             ConnectorAction {
                 id: ACTION_SET_ENABLED.to_string(),
+                target_id: None,
                 label: "Enabled".to_string(),
                 description: Some("Flips the simulated on/off state.".to_string()),
                 params_schema: json!({
@@ -611,6 +643,7 @@ impl Connector for DebugConnector {
             },
             ConnectorAction {
                 id: ACTION_SET_LOAD.to_string(),
+                target_id: None,
                 label: "Load".to_string(),
                 description: Some(
                     "Moves the centre the simulated load oscillates around.".to_string(),
@@ -627,6 +660,7 @@ impl Connector for DebugConnector {
             },
             ConnectorAction {
                 id: ACTION_SET_LABEL.to_string(),
+                target_id: None,
                 label: "Label".to_string(),
                 description: Some("Rewrites the simulated label text.".to_string()),
                 params_schema: json!({
@@ -640,11 +674,23 @@ impl Connector for DebugConnector {
                 is_disruptive: false,
             },
         ]
+        .into_iter()
+        .chain(FIXTURE_TARGETS.into_iter().flat_map(|target| {
+            [
+                ConnectorAction::simple(ACTION_PING, "Ping fixture").for_target(target),
+                ConnectorAction::simple(ACTION_RESTART, "Restart fixture")
+                    .with_description("Pretends to restart this simulated sub-target.")
+                    .disruptive()
+                    .for_target(target),
+            ]
+        }))
+        .collect()
     }
 
     async fn execute_action(
         &self,
         action_id: &str,
+        _target_id: Option<&str>,
         params: Value,
     ) -> Result<ActionResult, ConnectorError> {
         self.gate().await?;
@@ -777,6 +823,21 @@ impl Connector for DebugConnector {
         Some(TYPE_ID.to_owned())
     }
 
+    fn supports_sub_targets(&self) -> bool {
+        true
+    }
+
+    async fn list_sub_targets(&self) -> Result<Vec<SubTarget>, ConnectorError> {
+        self.gate().await?;
+        Ok(FIXTURE_TARGETS
+            .into_iter()
+            .map(|id| SubTarget {
+                id: id.to_owned(),
+                label: id.to_owned(),
+            })
+            .collect())
+    }
+
     async fn discover(&self) -> Result<Vec<DiscoveredResource>, ConnectorError> {
         self.gate().await?;
 
@@ -860,7 +921,7 @@ impl Connector for DebugConnector {
     /// One data point of every [`DataPointValueType`], so a renderer can be
     /// built against all four without a real service.
     fn data_points(&self) -> Vec<DataPointDescriptor> {
-        vec![
+        let host = vec![
             DataPointDescriptor::new(DATA_POINT_LOAD, "Load", DataPointValueType::Number)
                 .with_unit("%"),
             DataPointDescriptor::new(DATA_POINT_LABEL, "Label", DataPointValueType::String),
@@ -876,7 +937,20 @@ impl Connector for DebugConnector {
                 "Recent activity",
                 DataPointValueType::String,
             ),
-        ]
+        ];
+        host.into_iter()
+            .chain([
+                DataPointDescriptor::new(DATA_POINT_LOAD, "Load", DataPointValueType::Number)
+                    .with_unit("%")
+                    .for_target(FIXTURE_TARGETS[0]),
+                DataPointDescriptor::new(DATA_POINT_ENABLED, "Enabled", DataPointValueType::Bool)
+                    .for_target(FIXTURE_TARGETS[0]),
+                DataPointDescriptor::new(DATA_POINT_LABEL, "Label", DataPointValueType::String)
+                    .for_target(FIXTURE_TARGETS[1]),
+                DataPointDescriptor::new(DATA_POINT_ENABLED, "Enabled", DataPointValueType::Bool)
+                    .for_target(FIXTURE_TARGETS[1]),
+            ])
+            .collect()
     }
 
     /// A spread across both binding kinds rather than the minimum that
@@ -917,6 +991,22 @@ impl Connector for DebugConnector {
             WidgetBinding::action(ACTION_RESTART, ActionWidgetType::Button),
         ])
     }
+
+    fn default_layout_for(&self, target_id: Option<&str>) -> WidgetLayout {
+        match target_id {
+            None => self.default_layout(),
+            Some("fixture-a") => WidgetLayout::new(vec![
+                WidgetBinding::display(DATA_POINT_LOAD, DisplayWidgetType::StatTile),
+                WidgetBinding::display(DATA_POINT_ENABLED, DisplayWidgetType::StatusDot),
+                WidgetBinding::action(ACTION_PING, ActionWidgetType::Button),
+            ]),
+            Some(_) => WidgetLayout::new(vec![
+                WidgetBinding::display(DATA_POINT_LABEL, DisplayWidgetType::StatTile),
+                WidgetBinding::display(DATA_POINT_ENABLED, DisplayWidgetType::StatusDot),
+                WidgetBinding::action(ACTION_RESTART, ActionWidgetType::Button),
+            ]),
+        }
+    }
 }
 
 #[cfg(test)]
@@ -936,6 +1026,7 @@ mod tests {
             .actions()
             .await
             .into_iter()
+            .filter(|action| action.target_id.is_none())
             .map(|action| action.id)
             .collect();
         assert_eq!(
@@ -1027,13 +1118,15 @@ mod tests {
         let status = connector.status().await.unwrap();
         assert_eq!(status.health, HealthState::Degraded);
         // The configured detail is still there...
-        assert_eq!(status.details["queueDepth"], json!(7));
+        assert_eq!(status.data_point_value("queueDepth"), Some(&json!(7)));
         // ...alongside every data point's current value, keyed by its own id
         // and shaped by its declared value type.
         for descriptor in connector.data_points() {
-            let value = status.data_point_value(&descriptor.id).unwrap_or_else(|| {
-                panic!("status details is missing data point {}", descriptor.id)
-            });
+            let value = status
+                .data_point_value_for(descriptor.target_id.as_deref(), &descriptor.id)
+                .unwrap_or_else(|| {
+                    panic!("status details is missing data point {}", descriptor.id)
+                });
             match descriptor.value_type {
                 DataPointValueType::Number => assert!(
                     value.is_number(),
@@ -1074,9 +1167,12 @@ mod tests {
     #[tokio::test]
     async fn data_points_cover_every_value_type_and_have_unique_ids() {
         let points = DebugConnector::default().data_points();
-        assert_eq!(points.len(), 5);
+        assert_eq!(points.len(), 9);
 
-        let ids: HashSet<&str> = points.iter().map(|p| p.id.as_str()).collect();
+        let ids: HashSet<(&str, Option<&str>)> = points
+            .iter()
+            .map(|p| (p.id.as_str(), p.target_id.as_deref()))
+            .collect();
         assert_eq!(ids.len(), points.len(), "data point ids must be unique");
 
         let types: HashSet<DataPointValueType> = points.iter().map(|p| p.value_type).collect();
@@ -1094,7 +1190,8 @@ mod tests {
         let connector = DebugConnector::default();
 
         let lines = |details: &Value| -> Vec<String> {
-            details[DATA_POINT_LOG]
+            super::super::details::get_detail(details, None, DATA_POINT_LOG)
+                .expect("the log detail must exist")
                 .as_str()
                 .expect("the log data point must be a JSON string")
                 .lines()
@@ -1273,7 +1370,12 @@ mod tests {
         for _ in 0..(HISTORY_CAPACITY + 10) {
             connector.status().await.unwrap();
         }
-        let series = connector.status().await.unwrap().details[DATA_POINT_LOAD_HISTORY]
+        let series = connector
+            .status()
+            .await
+            .unwrap()
+            .data_point_value(DATA_POINT_LOAD_HISTORY)
+            .expect("load history detail")
             .as_array()
             .expect("a time series")
             .len();
@@ -1286,7 +1388,12 @@ mod tests {
 
         let mut seen = HashSet::new();
         for _ in 0..10 {
-            let load = connector.status().await.unwrap().details[DATA_POINT_LOAD]
+            let load = connector
+                .status()
+                .await
+                .unwrap()
+                .data_point_value(DATA_POINT_LOAD)
+                .expect("load detail")
                 .as_f64()
                 .expect("a number");
             assert!(
@@ -1307,14 +1414,14 @@ mod tests {
         let connector = DebugConnector::default();
 
         let restart = connector
-            .execute_action(ACTION_RESTART, json!({ "force": true }))
+            .execute_action(ACTION_RESTART, None, json!({ "force": true }))
             .await
             .unwrap();
         assert!(restart.success);
         assert_eq!(restart.payload.unwrap()["params"], json!({ "force": true }));
 
         let ping = connector
-            .execute_action(ACTION_PING, Value::Null)
+            .execute_action(ACTION_PING, None, Value::Null)
             .await
             .unwrap();
         assert!(ping.success);
@@ -1325,17 +1432,23 @@ mod tests {
         let connector = DebugConnector::default();
 
         connector
-            .execute_action(ACTION_SET_ENABLED, json!({ "enabled": false }))
+            .execute_action(ACTION_SET_ENABLED, None, json!({ "enabled": false }))
             .await
             .unwrap();
         connector
-            .execute_action(ACTION_SET_LABEL, json!({ "label": "renamed" }))
+            .execute_action(ACTION_SET_LABEL, None, json!({ "label": "renamed" }))
             .await
             .unwrap();
 
-        let details = connector.status().await.unwrap().details;
-        assert_eq!(details[DATA_POINT_ENABLED], json!(false));
-        assert_eq!(details[DATA_POINT_LABEL], json!("renamed"));
+        let status = connector.status().await.unwrap();
+        assert_eq!(
+            status.data_point_value(DATA_POINT_ENABLED),
+            Some(&json!(false))
+        );
+        assert_eq!(
+            status.data_point_value(DATA_POINT_LABEL),
+            Some(&json!("renamed"))
+        );
 
         // The label is a display field too, so the shell shows the new value
         // without waiting for a poll.
@@ -1345,7 +1458,7 @@ mod tests {
             .any(|field| field.value == "renamed"));
 
         let result = connector
-            .execute_action(ACTION_SET_LOAD, json!({ "value": 12.5 }))
+            .execute_action(ACTION_SET_LOAD, None, json!({ "value": 12.5 }))
             .await
             .unwrap();
         assert_eq!(result.payload.unwrap()[DATA_POINT_LOAD], json!(12.5));
@@ -1362,7 +1475,7 @@ mod tests {
             (ACTION_SET_LABEL, json!({ "label": "  " }), "label"),
         ] {
             let error = connector
-                .execute_action(action, params.clone())
+                .execute_action(action, None, params.clone())
                 .await
                 .expect_err("bad params must be refused");
             match error {
@@ -1377,7 +1490,7 @@ mod tests {
         // Out of range is a different failure from the wrong type, and both are
         // the connector's to detect.
         let error = connector
-            .execute_action(ACTION_SET_LOAD, json!({ "value": 900 }))
+            .execute_action(ACTION_SET_LOAD, None, json!({ "value": 900 }))
             .await
             .expect_err("out of range must be refused");
         assert!(matches!(error, ConnectorError::InvalidParams { .. }));
@@ -1386,7 +1499,7 @@ mod tests {
     #[tokio::test]
     async fn unknown_action_id_is_rejected() {
         let error = DebugConnector::default()
-            .execute_action("not-a-real-action", Value::Null)
+            .execute_action("not-a-real-action", None, Value::Null)
             .await
             .expect_err("unknown ids must not silently succeed");
 
@@ -1413,7 +1526,7 @@ mod tests {
 
         let started = Instant::now();
         connector
-            .execute_action(ACTION_PING, Value::Null)
+            .execute_action(ACTION_PING, None, Value::Null)
             .await
             .unwrap();
         assert!(started.elapsed().as_millis() >= 50);
@@ -1429,7 +1542,7 @@ mod tests {
         assert_eq!(connector.status().await.unwrap_err(), configured);
         assert_eq!(
             connector
-                .execute_action(ACTION_RESTART, Value::Null)
+                .execute_action(ACTION_RESTART, None, Value::Null)
                 .await
                 .unwrap_err(),
             configured
@@ -1439,7 +1552,7 @@ mod tests {
         // to look the id up.
         assert_eq!(
             connector
-                .execute_action("not-a-real-action", Value::Null)
+                .execute_action("not-a-real-action", None, Value::Null)
                 .await
                 .unwrap_err(),
             configured
@@ -1448,7 +1561,7 @@ mod tests {
         // connector reports being broken rather than complaining about params.
         assert_eq!(
             connector
-                .execute_action(ACTION_SET_ENABLED, json!({}))
+                .execute_action(ACTION_SET_ENABLED, None, json!({}))
                 .await
                 .unwrap_err(),
             configured
@@ -1558,13 +1671,42 @@ mod tests {
         let clone = connector.clone();
 
         connector
-            .execute_action(ACTION_SET_LABEL, json!({ "label": "shared" }))
+            .execute_action(ACTION_SET_LABEL, None, json!({ "label": "shared" }))
             .await
             .unwrap();
 
         assert_eq!(
-            clone.status().await.unwrap().details[DATA_POINT_LABEL],
-            json!("shared")
+            clone
+                .status()
+                .await
+                .unwrap()
+                .data_point_value(DATA_POINT_LABEL),
+            Some(&json!("shared"))
         );
+    }
+
+    #[tokio::test]
+    async fn sub_targets_and_their_default_layouts_are_distinct() {
+        let connector = DebugConnector::default();
+        assert!(connector.supports_sub_targets());
+        assert_eq!(
+            connector.list_sub_targets().await.unwrap(),
+            vec![
+                SubTarget {
+                    id: "fixture-a".to_owned(),
+                    label: "fixture-a".to_owned(),
+                },
+                SubTarget {
+                    id: "fixture-b".to_owned(),
+                    label: "fixture-b".to_owned(),
+                },
+            ]
+        );
+        let host = connector.default_layout_for(None);
+        let fixture_a = connector.default_layout_for(Some("fixture-a"));
+        let fixture_b = connector.default_layout_for(Some("fixture-b"));
+        assert_ne!(host, fixture_a);
+        assert_ne!(fixture_a, fixture_b);
+        assert_eq!(fixture_a.bindings.len(), 3);
     }
 }

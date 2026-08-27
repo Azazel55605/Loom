@@ -56,10 +56,10 @@ export type HealthState = "healthy" | "degraded" | "down" | "unknown";
 export type ConnectorStatus = {
   health: HealthState;
   /**
-   * The current reading for every data point, keyed by `DataPointDescriptor.id`.
+   * Readings nested by target key, then `DataPointDescriptor.id`.
    *
-   * Typed loosely, but the shape is a contract: a JSON object whose values
-   * follow each data point's declared `valueType` — `number` → number,
+   * The empty-string target key is the host/aggregate view; every other key is
+   * a sub-target id. Values follow each data point's declared `valueType` — `number` → number,
    * `string` → string, `bool` → boolean, `timeSeries` → an array of
    * `{ timestamp, value }` objects, oldest first. A connector may add keys that
    * are not data points (a version string, a queue depth) and a client that
@@ -76,6 +76,8 @@ export type ConnectorStatus = {
 /** One operation a connector is willing to perform. */
 export type ConnectorAction = {
   id: string;
+  /** Addressed sub-target, or `null` for the host/aggregate view. */
+  targetId: string | null;
   label: string;
   description: string | null;
   /** JSON Schema for this action's params; `{}` when it takes none. */
@@ -167,6 +169,8 @@ export type DataPointValueType = "number" | "string" | "bool" | "timeSeries";
  */
 export type DataPointDescriptor = {
   id: string;
+  /** Addressed sub-target, or `null` for the host/aggregate view. */
+  targetId: string | null;
   label: string;
   valueType: DataPointValueType;
   /** Display suffix (`"%"`, `"MiB"`). `null` for a dimensionless value; the
@@ -313,6 +317,8 @@ export type ConnectorInstanceSummary = {
   connectorType: string;
   /** RFC 3339. */
   createdAt: string;
+  /** Free-form administrator labels, sorted by the backend. */
+  tags: string[];
   metadata: ConnectorMetadata;
   /** The user's per-instance icon choice, in the same reference convention as
    *  `metadata.icon`. `null` means "no override" — fall back to the connector
@@ -363,6 +369,8 @@ export type ConnectorInstanceDetail = ConnectorInstanceSummary & {
   /** The arrangement the connector ships with. Seeds a new placement's
    *  bindings, which the user then owns — nothing re-applies it afterwards. */
   defaultLayout: WidgetLayout;
+  /** Whether this instance exposes addressable views below its host view. */
+  supportsSubTargets: boolean;
   /** Type id this live instance can discover, or null when unsupported. */
   discoverableType: string | null;
 };
@@ -389,6 +397,8 @@ export type DashboardOwner = {
 export type DashboardPlacement = {
   id: string;
   connector: ConnectorInstanceSummary;
+  /** Addressed connector sub-target, or `null` for its host/aggregate view. */
+  targetId: string | null;
   /**
    * The placement's **standalone** geometry.
    *
@@ -508,13 +518,15 @@ export type CreateDashboardShareRequest = {
  * `POST /dashboards/{id}/placements` body — Editor or Owner.
  *
  * `widgetBindings` may be omitted, in which case the backend stores the
- * connector's own `defaultLayout.bindings`. Width and height must each meet the
- * connector's `metadata.minSize`, and every binding is validated against the
- * namespace its tag names — a `display` against the connector's `dataPoints`, an
- * `action` against its `actions`.
+ * connector's `default_layout_for(targetId)` bindings. Width and height must
+ * each meet the connector's `metadata.minSize`, and every binding is validated
+ * against the selected target's descriptors — a `display` against the
+ * connector's `dataPoints`, an `action` against its `actions`.
  */
 export type CreateDashboardPlacementRequest = {
   connectorInstanceId: string;
+  /** Omit or send `null` for the connector's host/aggregate view. */
+  targetId?: string | null;
   positionX: number;
   positionY: number;
   width: number;
@@ -535,7 +547,15 @@ export type UpdateDashboardPlacementRequest = {
   positionY?: number;
   width?: number;
   height?: number;
+  /** `null` selects the host view. Existing placement UI keeps this read-only. */
+  targetId?: string | null;
   widgetBindings?: WidgetBinding[];
+};
+
+/** One cheap, addressable view inside a connector instance. */
+export type SubTarget = {
+  id: string;
+  label: string;
 };
 
 /** `POST /connector-instances` body. */
@@ -549,8 +569,8 @@ export type CreateConnectorInstanceRequest = {
 };
 
 /**
- * `PATCH /connector-instances/{id}` body. Both fields optional; an absent field
- * is left alone.
+ * `PATCH /connector-instances/{id}` body. Every field is optional; an absent
+ * field is left alone.
  *
  * `config` **replaces** the whole configuration rather than merging into it — a
  * connector is rebuilt from its configuration wholesale, so a partial one has
@@ -559,6 +579,8 @@ export type CreateConnectorInstanceRequest = {
 export type UpdateConnectorInstanceRequest = {
   name?: string;
   config?: unknown;
+  /** Complete replacement set. Omit to leave tags unchanged. */
+  tags?: string[];
   /**
    * Three states, and the distinction matters: **omit** the key to leave the
    * override alone, send **`null`** to clear it back to the connector type's
@@ -1123,6 +1145,11 @@ function getConnectorInstances(
   });
 }
 
+/** `GET /connector-instances/tags` — distinct tags currently in use. */
+function getConnectorTags(runtime: ApiRuntime, signal?: AbortSignal): Promise<string[]> {
+  return authorizedRequest<string[]>(runtime, "/connector-instances/tags", { signal });
+}
+
 /** `GET /connector-instances/{id}` — the same entry plus actions, data points,
  *  the shipped layout, and the stored configuration. */
 function getConnectorInstance(
@@ -1133,6 +1160,19 @@ function getConnectorInstance(
   return authorizedRequest<ConnectorInstanceDetail>(
     runtime,
     `/connector-instances/${encodeURIComponent(id)}`,
+    { signal },
+  );
+}
+
+/** `GET /connector-instances/{id}/sub-targets` — live names/labels only. */
+function getSubTargets(
+  runtime: ApiRuntime,
+  id: string,
+  signal?: AbortSignal,
+): Promise<SubTarget[]> {
+  return authorizedRequest<SubTarget[]>(
+    runtime,
+    `/connector-instances/${encodeURIComponent(id)}/sub-targets`,
     { signal },
   );
 }
@@ -1214,21 +1254,26 @@ function deleteConnectorInstance(
 /**
  * `POST /connector-instances/{id}/actions/{actionId}`.
  *
- * `params` is forwarded as the request body. Omitting it sends no body at all,
- * which the backend reads as JSON `null` — deliberately distinct from an empty
- * object, so "sent nothing" and "sent {}" stay distinguishable.
+ * When `targetId` is supplied, the target-aware `{ targetId, params }`
+ * envelope is sent. Omitting it preserves the direct-params form used by
+ * instance-level callers.
  */
 function executeConnectorAction(
   runtime: ApiRuntime,
   instanceId: string,
   actionId: string,
   params?: unknown,
+  targetId?: string | null,
   signal?: AbortSignal,
 ): Promise<ActionResult> {
   return authorizedRequest<ActionResult>(
     runtime,
     `/connector-instances/${encodeURIComponent(instanceId)}/actions/${encodeURIComponent(actionId)}`,
-    { method: "POST", body: params, signal },
+    {
+      method: "POST",
+      body: targetId === undefined ? params : { targetId, params: params ?? null },
+      signal,
+    },
   );
 }
 
@@ -1852,8 +1897,10 @@ export function createApiClient(options: {
     getSession: (signal?: AbortSignal) => getSession(runtime, signal),
     getConnectorTypes: (signal?: AbortSignal) => getConnectorTypes(runtime, signal),
     getConnectorInstances: (signal?: AbortSignal) => getConnectorInstances(runtime, signal),
+    getConnectorTags: (signal?: AbortSignal) => getConnectorTags(runtime, signal),
     getConnectorInstance: (id: string, signal?: AbortSignal) =>
       getConnectorInstance(runtime, id, signal),
+    getSubTargets: (id: string, signal?: AbortSignal) => getSubTargets(runtime, id, signal),
     discoverConnectorResources: (id: string, signal?: AbortSignal) =>
       discoverConnectorResources(runtime, id, signal),
     discoverForType: (typeId: string, candidateConfig: unknown, signal?: AbortSignal) =>
@@ -1871,8 +1918,9 @@ export function createApiClient(options: {
       instanceId: string,
       actionId: string,
       params?: unknown,
+      targetId?: string | null,
       signal?: AbortSignal,
-    ) => executeConnectorAction(runtime, instanceId, actionId, params, signal),
+    ) => executeConnectorAction(runtime, instanceId, actionId, params, targetId, signal),
     getDashboards: (signal?: AbortSignal) => getDashboards(runtime, signal),
     createDashboard: (name: string, signal?: AbortSignal) =>
       createDashboard(runtime, name, signal),

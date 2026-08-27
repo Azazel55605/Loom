@@ -41,6 +41,9 @@ export function ActionButtonWidget({
   // the descriptor is reassembled here from what the binding was given.
   const action: ConnectorAction = {
     id: actionId,
+    // Routing is owned by the placement-level `onExecute`; this temporary
+    // descriptor exists only to drive the parameter dialog.
+    targetId: null,
     label,
     description: description ?? null,
     paramsSchema: paramsSchema ?? {},

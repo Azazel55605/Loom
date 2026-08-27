@@ -26,6 +26,10 @@ import { connectorAvailability } from "@loom/ui-kit/lib/connector-availability";
 import { useApiClient, useConnectorStatusSocket } from "@loom/ui-kit/lib/api-context";
 import { useAuth } from "@loom/ui-kit/lib/auth-context";
 import { describeConnectorError } from "@loom/ui-kit/lib/connector-error";
+import {
+  matchesTarget,
+  statusDetailsForTarget,
+} from "@loom/ui-kit/lib/connector-details";
 import { hasPermission, PERMISSION_KEYS } from "@loom/ui-kit/lib/permissions";
 import { useRetainedStatusDetails } from "@loom/ui-kit/lib/use-retained-status-details";
 
@@ -75,11 +79,13 @@ export function ConnectorDetailModal({
 
   const execute = useMutation({
     mutationFn: ({ actionId, params }: { actionId: string; params: Record<string, unknown> }) =>
-      api.executeConnectorAction(instance.id, actionId, params),
+      api.executeConnectorAction(instance.id, actionId, params, placement.targetId),
     onSettled: () => void detail.refetch(),
   });
   const runAction = React.useCallback(async (actionId: string, params: Record<string, unknown>) => {
-    const label = detail.data?.actions.find((action) => action.id === actionId)?.label ?? actionId;
+    const label = detail.data?.actions.find(
+      (action) => matchesTarget(action, placement.targetId) && action.id === actionId,
+    )?.label ?? actionId;
     try {
       const result = await execute.mutateAsync({ actionId, params });
       if (result.success) toast.success(`${instance.name}: ${label}`, { description: result.message });
@@ -89,7 +95,7 @@ export function ConnectorDetailModal({
       toast.error(`${instance.name}: ${label} failed`, { description: describeConnectorError(error) });
       throw error;
     }
-  }, [detail.data, execute, instance.name]);
+  }, [detail.data, execute, instance.name, placement.targetId]);
 
   const reading: LiveReading = live ?? {
     status: detail.data?.status ?? instance.status,
@@ -98,11 +104,15 @@ export function ConnectorDetailModal({
     diagnosis: detail.data?.diagnosis ?? instance.diagnosis,
   };
   const availability = connectorAvailability(reading);
-  const rawDetails =
-    typeof reading.status?.details === "object" && reading.status.details !== null && !Array.isArray(reading.status.details)
-      ? reading.status.details as Record<string, unknown>
-      : {};
-  const statusDetails = useRetainedStatusDetails(instance.id, rawDetails);
+  const rawDetails = statusDetailsForTarget(reading.status?.details, placement.targetId);
+  const statusDetails = useRetainedStatusDetails(
+    `${instance.id}:${placement.targetId ?? ""}`,
+    rawDetails,
+  );
+  const targetDataPoints =
+    detail.data?.dataPoints.filter((point) => matchesTarget(point, placement.targetId)) ?? [];
+  const targetActions =
+    detail.data?.actions.filter((action) => matchesTarget(action, placement.targetId)) ?? [];
   const boundActions = new Set(
     placement.widgetBindings.flatMap((binding) => "action" in binding ? [binding.action.actionId] : []),
   );
@@ -117,7 +127,10 @@ export function ConnectorDetailModal({
               iconOverride={instance.iconOverride}
               size={22}
             />
-            <DialogTitle>{instance.name}</DialogTitle>
+            <DialogTitle>
+              {instance.name}
+              {placement.targetId === null ? null : ` · ${placement.targetId}`}
+            </DialogTitle>
             <Badge variant={availability.tone}>{availability.label}</Badge>
           </div>
           <DialogDescription>
@@ -150,14 +163,14 @@ export function ConnectorDetailModal({
               {reading.statusError !== undefined ? <Alert variant="destructive"><AlertCircle aria-hidden="true" /><AlertDescription>{describeConnectorError(reading.statusError)}</AlertDescription></Alert> : null}
               <div className="grid gap-5 md:grid-cols-2">
                 {placement.widgetBindings.map((binding, index) => (
-                  <React.Fragment key={index}>{renderWidget({ binding, statusDetails, dataPoints: detail.data.dataPoints, actions: detail.data.actions, onExecute: runAction, disabled: !canControl, unavailableReason: availability.unavailableReason, size: "expanded", className: "min-h-[5rem]" })}</React.Fragment>
+                  <React.Fragment key={index}>{renderWidget({ binding, statusDetails, dataPoints: targetDataPoints, actions: targetActions, onExecute: runAction, disabled: !canControl, unavailableReason: availability.unavailableReason, size: "expanded", className: "min-h-[5rem]" })}</React.Fragment>
                 ))}
               </div>
-              {detail.data.actions.some((action) => !boundActions.has(action.id)) ? (
+              {targetActions.some((action) => !boundActions.has(action.id)) ? (
                 <section className="space-y-3 border-t pt-5">
                   <h3 className="text-sm font-semibold">Other actions</h3>
                   <div className="grid gap-2 sm:grid-cols-2">
-                    {detail.data.actions.filter((action) => !boundActions.has(action.id)).map((action) => (
+                    {targetActions.filter((action) => !boundActions.has(action.id)).map((action) => (
                       <ActionButtonWidget key={action.id} label={action.label} actionId={action.id} description={action.description} paramsSchema={action.paramsSchema} config={{}} onExecute={runAction} disabled={!canControl || availability.actionsDisabled} />
                     ))}
                   </div>

@@ -85,6 +85,7 @@ pub fn routes() -> Router<AppState> {
             "/connector-instances",
             get(connectors::list_instances).post(connectors::create_instance),
         )
+        .route("/connector-instances/tags", get(connectors::list_tags))
         .route(
             "/connector-instances/{id}",
             get(connectors::get_instance)
@@ -98,6 +99,10 @@ pub fn routes() -> Router<AppState> {
         .route(
             "/connector-instances/{id}/discover",
             post(connectors::discover_instance),
+        )
+        .route(
+            "/connector-instances/{id}/sub-targets",
+            get(connectors::list_sub_targets),
         )
         .route("/ws", get(connector_socket::connector_status_socket))
         .route(

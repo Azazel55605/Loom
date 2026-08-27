@@ -164,7 +164,10 @@ export function ConnectorCard({
     mutation.mutate({ action });
   }
 
-  const actions = detail.data?.actions ?? [];
+  // The management card represents the connector instance itself. Sub-target
+  // actions belong on target-scoped dashboard placements, where their target
+  // identity is visible and explicitly threaded through execution.
+  const actions = detail.data?.actions.filter((action) => action.targetId === null) ?? [];
   const showActionRow = canControl && (detail.isPending || actions.length > 0);
   const canDiscover =
     onDiscover !== undefined &&

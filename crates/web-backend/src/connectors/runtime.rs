@@ -1133,7 +1133,7 @@ mod tests {
         assert!(initial.snapshot.status.is_some());
 
         connector
-            .execute_action("set-label", json!({ "label": "after" }))
+            .execute_action("set-label", None, json!({ "label": "after" }))
             .await
             .expect("debug action must succeed");
         runtime.poll_once().await;
@@ -1146,7 +1146,10 @@ mod tests {
             .as_ref()
             .expect("successful status")
             .details;
-        assert_eq!(details.get("label"), Some(&json!("after")));
+        assert_eq!(
+            loom_core::connector::details::get_detail(details, None, "label"),
+            Some(&json!("after"))
+        );
         assert_eq!(runtime.cached_status(&id).await, Some(changed.snapshot));
     }
 
@@ -1201,12 +1204,9 @@ mod tests {
         old_poll.await.expect("poll task must finish");
 
         let snapshot = runtime.cached_status(&id).await.expect("new snapshot");
+        let details = snapshot.status.expect("successful status").details;
         assert_eq!(
-            snapshot
-                .status
-                .expect("successful status")
-                .details
-                .get("label"),
+            loom_core::connector::details::get_detail(&details, None, "label"),
             Some(&json!("new"))
         );
     }

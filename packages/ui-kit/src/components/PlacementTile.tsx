@@ -34,6 +34,10 @@ import { useAuth } from "@loom/ui-kit/lib/auth-context";
 import { ConnectorIcon } from "@loom/ui-kit/components/ConnectorIcon";
 import { cn } from "@loom/ui-kit/lib/utils";
 import { describeConnectorError } from "@loom/ui-kit/lib/connector-error";
+import {
+  matchesTarget,
+  statusDetailsForTarget,
+} from "@loom/ui-kit/lib/connector-details";
 import { hasPermission, PERMISSION_KEYS } from "@loom/ui-kit/lib/permissions";
 import { useRetainedStatusDetails } from "@loom/ui-kit/lib/use-retained-status-details";
 import { renderWidget } from "@loom/ui-kit/widgets/renderWidget";
@@ -135,7 +139,7 @@ export function PlacementTile({
 
   const execute = useMutation({
     mutationFn: ({ actionId, params }: { actionId: string; params: Record<string, unknown> }) =>
-      api.executeConnectorAction(instance.id, actionId, params),
+      api.executeConnectorAction(instance.id, actionId, params, placement.targetId),
     onSettled: () => {
       // The action list can shift with the service's state. Status itself
       // arrives on the socket, so nothing re-reads it here.
@@ -146,7 +150,9 @@ export function PlacementTile({
   const runAction = React.useCallback(
     async (actionId: string, params: Record<string, unknown>) => {
       const label =
-        detail.data?.actions.find((action) => action.id === actionId)?.label ?? actionId;
+        detail.data?.actions.find(
+          (action) => matchesTarget(action, placement.targetId) && action.id === actionId,
+        )?.label ?? actionId;
       try {
         const result = await execute.mutateAsync({ actionId, params });
         // A 200 with `success: false` means the service was reached and
@@ -167,7 +173,7 @@ export function PlacementTile({
         throw error;
       }
     },
-    [detail.data, execute, instance.name],
+    [detail.data, execute, instance.name, placement.targetId],
   );
 
   const status = live?.status ?? instance.status;
@@ -181,11 +187,15 @@ export function PlacementTile({
     pendingOperation: live === undefined ? instance.pendingOperation : live.pendingOperation,
     diagnosis: live === undefined ? instance.diagnosis : live.diagnosis,
   });
-  const currentDetails =
-    typeof status?.details === "object" && status.details !== null && !Array.isArray(status.details)
-      ? (status.details as Record<string, unknown>)
-      : {};
-  const details = useRetainedStatusDetails(instance.id, currentDetails);
+  const currentDetails = statusDetailsForTarget(status?.details, placement.targetId);
+  const details = useRetainedStatusDetails(
+    `${instance.id}:${placement.targetId ?? ""}`,
+    currentDetails,
+  );
+  const targetDataPoints =
+    detail.data?.dataPoints.filter((point) => matchesTarget(point, placement.targetId)) ?? [];
+  const targetActions =
+    detail.data?.actions.filter((action) => matchesTarget(action, placement.targetId)) ?? [];
 
   if (detail.isPending) {
     return <PlacementTileSkeleton placement={placement} />;
@@ -222,7 +232,17 @@ export function PlacementTile({
             <p className="truncate text-sm font-semibold leading-none" title={instance.name}>
               {instance.name}
             </p>
-            <p className="truncate text-xs text-muted-foreground">{instance.metadata.name}</p>
+            <p
+              className="truncate text-xs text-muted-foreground"
+              title={
+                placement.targetId === null
+                  ? instance.metadata.name
+                  : `${instance.metadata.name} · ${placement.targetId}`
+              }
+            >
+              {instance.metadata.name}
+              {placement.targetId === null ? null : ` · ${placement.targetId}`}
+            </p>
           </div>
         </div>
 
@@ -372,8 +392,8 @@ export function PlacementTile({
                 {renderWidget({
                   binding,
                   statusDetails: details,
-                  dataPoints: detail.data.dataPoints,
-                  actions: detail.data.actions,
+                  dataPoints: targetDataPoints,
+                  actions: targetActions,
                   onExecute: runAction,
                   // Controls are dead while the layout is being rearranged: a
                   // click meant to grab a card should not restart a service.

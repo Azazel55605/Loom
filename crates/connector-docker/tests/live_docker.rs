@@ -217,10 +217,9 @@ async fn start_test_container(docker: &Docker, suffix: &str) -> TestContainer {
     guard
 }
 
-fn config_for(name: &str) -> DockerConnectorConfig {
+fn config_for(_name: &str) -> DockerConnectorConfig {
     DockerConnectorConfig {
         docker_host: test_docker_host(),
-        container_name: Some(name.to_owned()),
     }
 }
 
@@ -232,12 +231,16 @@ fn config_for(name: &str) -> DockerConnectorConfig {
 /// rather than a hang.
 async fn wait_for_state(
     connector: &DockerConnector,
+    target_id: &str,
     predicate: impl Fn(&str) -> bool,
     what: &str,
 ) -> loom_core::connector::ConnectorStatus {
     for _ in 0..40 {
         let status = connector.status().await.expect("status must not error");
-        let state = status.details[DATA_POINT_STATUS].as_str().unwrap_or("");
+        let state = status
+            .data_point_value_for(Some(target_id), DATA_POINT_STATUS)
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("");
         if predicate(state) {
             return status;
         }
@@ -257,26 +260,28 @@ async fn a_running_container_reports_healthy_with_every_data_point() {
     let connector = DockerConnector::connect(config_for(&container.name))
         .await
         .expect("connecting to a container that exists must succeed");
-    assert_eq!(connector.discoverable_type(), None);
-    assert_eq!(
-        connector.discovery_target_field().as_deref(),
-        Some("containerName")
-    );
+    assert!(connector.supports_sub_targets());
     assert!(connector
-        .discover()
+        .list_sub_targets()
         .await
-        .expect("container mode discovery is a safe no-op")
-        .is_empty());
+        .expect("target enumeration")
+        .iter()
+        .any(|target| target.id == container.name));
 
-    let status = wait_for_state(&connector, |state| state == "running", "running").await;
+    let status = wait_for_state(
+        &connector,
+        &container.name,
+        |state| state == "running",
+        "running",
+    )
+    .await;
     assert_eq!(status.health, HealthState::Healthy);
 
     // Every declared data point resolves, and with the shape its declared value
     // type promises — this is the contract a saved dashboard layout relies on.
-    let details = status.details.as_object().expect("details is an object");
     for descriptor in connector.data_points() {
-        let value = details
-            .get(&descriptor.id)
+        let value = status
+            .data_point_value_for(descriptor.target_id.as_deref(), &descriptor.id)
             .unwrap_or_else(|| panic!("details is missing data point {}", descriptor.id));
         match descriptor.value_type {
             loom_core::connector::DataPointValueType::Number => assert!(
@@ -307,7 +312,9 @@ async fn a_running_container_reports_healthy_with_every_data_point() {
 
     // The container is deliberately spinning, so this is a real measurement
     // rather than a zero that would also pass if the formula were broken.
-    let cpu = details[DATA_POINT_CPU_PERCENT]
+    let cpu = status
+        .data_point_value_for(Some(&container.name), DATA_POINT_CPU_PERCENT)
+        .expect("cpu detail")
         .as_f64()
         .expect("cpu is a number");
     assert!(
@@ -315,7 +322,9 @@ async fn a_running_container_reports_healthy_with_every_data_point() {
         "a container in a busy loop must report non-zero CPU, got {cpu}. \
          If this is 0, precpu_stats is probably not being populated."
     );
-    let memory = details[DATA_POINT_MEMORY_USAGE_BYTES]
+    let memory = status
+        .data_point_value_for(Some(&container.name), DATA_POINT_MEMORY_USAGE_BYTES)
+        .expect("memory detail")
         .as_f64()
         .expect("memory is a number");
     assert!(
@@ -324,26 +333,35 @@ async fn a_running_container_reports_healthy_with_every_data_point() {
     );
 
     // Uptime is a duration, not a timestamp and not the "not running" sentinel.
-    let uptime = details[DATA_POINT_UPTIME]
+    let uptime = status
+        .data_point_value_for(Some(&container.name), DATA_POINT_UPTIME)
+        .expect("uptime detail")
         .as_str()
         .expect("uptime is a string");
     assert_ne!(uptime, "not running");
     assert_ne!(uptime, "unknown");
 
     // Logs come back, and carry what this test put in them.
-    let logs = details[DATA_POINT_LOGS].as_str().expect("logs is a string");
+    let logs = status
+        .data_point_value_for(Some(&container.name), DATA_POINT_LOGS)
+        .and_then(serde_json::Value::as_str)
+        .expect("logs is a string");
     assert!(
         logs.contains(LOG_MARKER),
         "the log tail should contain the marker the container printed, got {logs:?}"
     );
 
     // History accumulates across polls rather than only holding the latest.
-    let before = status.details[DATA_POINT_CPU_HISTORY]
+    let before = status
+        .data_point_value_for(Some(&container.name), DATA_POINT_CPU_HISTORY)
+        .expect("cpu history detail")
         .as_array()
         .expect("cpu history")
         .len();
     let later = connector.status().await.expect("second poll");
-    let after = later.details[DATA_POINT_CPU_HISTORY]
+    let after = later
+        .data_point_value_for(Some(&container.name), DATA_POINT_CPU_HISTORY)
+        .expect("cpu history detail")
         .as_array()
         .expect("cpu history")
         .len();
@@ -354,8 +372,8 @@ async fn a_running_container_reports_healthy_with_every_data_point() {
 }
 
 #[tokio::test]
-async fn host_mode_reports_the_daemon_and_discovers_real_containers() {
-    let test_name = "host_mode_reports_the_daemon_and_discovers_real_containers";
+async fn one_host_instance_reports_the_daemon_and_lists_real_sub_targets() {
+    let test_name = "one_host_instance_reports_the_daemon_and_lists_real_sub_targets";
     let Some(docker) = docker_or_skip(test_name).await else {
         return;
     };
@@ -363,32 +381,36 @@ async fn host_mode_reports_the_daemon_and_discovers_real_containers() {
 
     let connector = DockerConnector::connect(DockerConnectorConfig {
         docker_host: test_docker_host(),
-        container_name: None,
     })
     .await
     .expect("host mode validates only daemon reachability");
 
     assert_eq!(connector.metadata().id, "docker");
-    assert_eq!(connector.discoverable_type().as_deref(), Some("docker"));
-    assert_eq!(
-        connector.discovery_target_field().as_deref(),
-        Some("containerName")
+    assert!(connector.supports_sub_targets());
+    let targets = connector.list_sub_targets().await.expect("sub-target list");
+    assert!(targets.iter().any(|target| target.id == container.name));
+    let actions = connector.actions().await;
+    assert!(
+        actions
+            .iter()
+            .filter(|action| action.target_id.as_deref() == Some(&container.name))
+            .count()
+            >= 5
     );
-    assert!(connector.actions().await.is_empty());
+    let points = connector.data_points();
     assert_eq!(
-        connector
-            .data_points()
-            .into_iter()
-            .map(|point| point.id)
-            .collect::<Vec<_>>(),
-        [
-            DATA_POINT_TOTAL_CONTAINERS,
-            DATA_POINT_RUNNING_CONTAINERS,
-            DATA_POINT_STOPPED_CONTAINERS,
-            DATA_POINT_TOTAL_IMAGES,
-            DATA_POINT_DISK_USAGE_BYTES,
-            DATA_POINT_DOCKER_VERSION,
-        ]
+        points
+            .iter()
+            .filter(|point| point.target_id.is_none())
+            .count(),
+        6
+    );
+    assert_eq!(
+        points
+            .iter()
+            .filter(|point| point.target_id.as_deref() == Some(&container.name))
+            .count(),
+        7
     );
 
     let status = connector.status().await.expect("host status");
@@ -396,33 +418,32 @@ async fn host_mode_reports_the_daemon_and_discovers_real_containers() {
         matches!(status.health, HealthState::Healthy | HealthState::Degraded),
         "a reachable daemon may degrade if an optional metric times out: {status:?}"
     );
-    assert!(status.details[DATA_POINT_TOTAL_CONTAINERS]
+    assert!(status
+        .data_point_value(DATA_POINT_TOTAL_CONTAINERS)
+        .expect("container count")
         .as_i64()
         .is_some_and(|count| count >= 1));
-    assert!(status.details[DATA_POINT_RUNNING_CONTAINERS]
+    assert!(status
+        .data_point_value(DATA_POINT_RUNNING_CONTAINERS)
+        .expect("running count")
         .as_i64()
         .is_some_and(|count| count >= 1));
-    assert!(status.details[DATA_POINT_STOPPED_CONTAINERS].is_number());
-    assert!(status.details[DATA_POINT_TOTAL_IMAGES].is_number());
-    assert!(status.details[DATA_POINT_DISK_USAGE_BYTES]
+    assert!(status
+        .data_point_value(DATA_POINT_STOPPED_CONTAINERS)
+        .is_some_and(serde_json::Value::is_number));
+    assert!(status
+        .data_point_value(DATA_POINT_TOTAL_IMAGES)
+        .is_some_and(serde_json::Value::is_number));
+    assert!(status
+        .data_point_value(DATA_POINT_DISK_USAGE_BYTES)
+        .expect("disk usage")
         .as_i64()
         .is_some_and(|bytes| bytes >= 0));
-    assert!(status.details[DATA_POINT_DOCKER_VERSION]
+    assert!(status
+        .data_point_value(DATA_POINT_DOCKER_VERSION)
+        .expect("Docker version")
         .as_str()
         .is_some_and(|version| !version.is_empty()));
-
-    let resources = connector.discover().await.expect("host discovery");
-    let discovered = resources
-        .iter()
-        .find(|resource| resource.suggested_name == container.name)
-        .unwrap_or_else(|| panic!("test container was not discovered: {resources:#?}"));
-    assert_eq!(discovered.target_connector_type, "docker");
-    assert_eq!(discovered.config["dockerHost"], test_docker_host());
-    assert_eq!(discovered.config["containerName"], container.name);
-    assert_eq!(
-        discovered.target_field_value.as_ref(),
-        Some(&serde_json::json!(container.name))
-    );
 }
 
 #[tokio::test]
@@ -436,20 +457,39 @@ async fn stopping_and_restarting_a_container_moves_its_reported_state() {
     let connector = DockerConnector::connect(config_for(&container.name))
         .await
         .expect("connecting must succeed");
-    wait_for_state(&connector, |state| state == "running", "running").await;
+    wait_for_state(
+        &connector,
+        &container.name,
+        |state| state == "running",
+        "running",
+    )
+    .await;
 
     let result = connector
-        .execute_action(ACTION_STOP, serde_json::Value::Null)
+        .execute_action(ACTION_STOP, Some(&container.name), serde_json::Value::Null)
         .await
         .expect("stop must reach Docker");
     assert!(result.success, "stop was refused: {}", result.message);
 
-    let stopped = wait_for_state(&connector, |state| state == "exited", "exited").await;
-    assert_eq!(stopped.health, HealthState::Down);
-    assert_eq!(stopped.details[DATA_POINT_UPTIME], "not running");
+    let stopped = wait_for_state(
+        &connector,
+        &container.name,
+        |state| state == "exited",
+        "exited",
+    )
+    .await;
+    // The daemon remains healthy; the addressed container's own status is the
+    // state a target placement renders.
+    assert_eq!(stopped.health, HealthState::Healthy);
+    assert_eq!(
+        stopped.data_point_value_for(Some(&container.name), DATA_POINT_UPTIME),
+        Some(&serde_json::json!("not running"))
+    );
     // The last lines before it exited are still readable, which is the whole
     // reason logs are fetched for a stopped container.
-    assert!(stopped.details[DATA_POINT_LOGS]
+    assert!(stopped
+        .data_point_value_for(Some(&container.name), DATA_POINT_LOGS)
+        .expect("logs")
         .as_str()
         .is_some_and(|logs| logs.contains(LOG_MARKER)));
 
@@ -457,7 +497,7 @@ async fn stopping_and_restarting_a_container_moves_its_reported_state() {
     // so this must be `success: false` carrying Docker's own words rather than
     // an `Err` that would read as "Loom could not talk to Docker".
     let again = connector
-        .execute_action(ACTION_STOP, serde_json::Value::Null)
+        .execute_action(ACTION_STOP, Some(&container.name), serde_json::Value::Null)
         .await
         .expect("a refusal is still a reachable service");
     assert!(
@@ -466,19 +506,30 @@ async fn stopping_and_restarting_a_container_moves_its_reported_state() {
     );
 
     let result = connector
-        .execute_action(ACTION_START, serde_json::Value::Null)
+        .execute_action(ACTION_START, Some(&container.name), serde_json::Value::Null)
         .await
         .expect("start must reach Docker");
     assert!(result.success, "start was refused: {}", result.message);
-    wait_for_state(&connector, |state| state == "running", "running again").await;
+    wait_for_state(
+        &connector,
+        &container.name,
+        |state| state == "running",
+        "running again",
+    )
+    .await;
 
     let result = connector
-        .execute_action(ACTION_RESTART, serde_json::Value::Null)
+        .execute_action(
+            ACTION_RESTART,
+            Some(&container.name),
+            serde_json::Value::Null,
+        )
         .await
         .expect("restart must reach Docker");
     assert!(result.success, "restart was refused: {}", result.message);
     wait_for_state(
         &connector,
+        &container.name,
         |state| state == "running",
         "running after restart",
     )
@@ -487,42 +538,28 @@ async fn stopping_and_restarting_a_container_moves_its_reported_state() {
     // An action this connector does not expose is refused by id, before
     // anything is sent to Docker.
     let error = connector
-        .execute_action("delete-everything", serde_json::Value::Null)
+        .execute_action(
+            "delete-everything",
+            Some(&container.name),
+            serde_json::Value::Null,
+        )
         .await
         .expect_err("an unknown action id must be refused");
     assert!(matches!(error, ConnectorError::InvalidAction { .. }));
 }
 
-/// The two ways a configuration can be wrong have to stay distinguishable —
-/// that distinction is most of the value of validating at construction time.
 #[tokio::test]
-async fn a_bad_configuration_says_which_half_is_wrong() {
-    let test_name = "a_bad_configuration_says_which_half_is_wrong";
+async fn an_unreachable_host_is_rejected_at_construction() {
+    let test_name = "an_unreachable_host_is_rejected_at_construction";
     let Some(_docker) = docker_or_skip(test_name).await else {
         return;
     };
-
-    // Reached the daemon; it has no such container. The name field is at fault.
-    let error = DockerConnector::connect(config_for(
-        "loom-connector-docker-test-no-such-container-ever",
-    ))
-    .await
-    .expect_err("a container that does not exist must be refused");
-    assert!(
-        matches!(error, ConnectorError::InvalidParams { .. }),
-        "a missing container is a bad parameter, not an unreachable host: {error}"
-    );
-    assert!(
-        error.to_string().contains("no container named"),
-        "the message must point at the name: {error}"
-    );
 
     // Never reached a daemon. The host field is at fault. Port 1 is reserved
     // and nothing listens on it, so this is a connection refusal rather than a
     // timeout — and it is a loopback address, so the test needs no network.
     let error = DockerConnector::connect(DockerConnectorConfig {
         docker_host: "tcp://127.0.0.1:1".to_owned(),
-        container_name: Some("anything".to_owned()),
     })
     .await
     .expect_err("an unreachable host must be refused");

@@ -33,21 +33,18 @@ pub(crate) const CONTROL_TIMEOUT_SECONDS: u64 = 90;
 /// The default Docker endpoint: the local daemon socket.
 pub const DEFAULT_DOCKER_HOST: &str = "unix:///var/run/docker.sock";
 
-/// A validated configuration for a Docker host or one container on it.
+/// A validated configuration for one Docker host.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DockerConnectorConfig {
     /// Connection URI — `unix:///path/to.sock` or `tcp://host:port`.
     pub docker_host: String,
-    /// Exact container name or id in container mode. `None` selects host mode.
-    pub container_name: Option<String>,
 }
 
 /// The wire shape, before validation.
 #[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[serde(rename_all = "camelCase")]
 struct RawConfig {
     docker_host: Option<String>,
-    container_name: Option<String>,
 }
 
 impl DockerConnectorConfig {
@@ -58,10 +55,7 @@ impl DockerConnectorConfig {
     /// and because the two failures need different error variants.
     pub fn from_value(config: Value) -> Result<Self, ConnectorError> {
         let raw: RawConfig = match config {
-            Value::Null => RawConfig {
-                docker_host: None,
-                container_name: None,
-            },
+            Value::Null => RawConfig { docker_host: None },
             other => serde_json::from_value(other)
                 .map_err(|error| ConnectorError::invalid_config(error.to_string()))?,
         };
@@ -72,15 +66,7 @@ impl DockerConnectorConfig {
             .filter(|value| !value.is_empty())
             .unwrap_or_else(|| DEFAULT_DOCKER_HOST.to_owned());
 
-        let container_name = raw
-            .container_name
-            .map(|value| value.trim().to_owned())
-            .filter(|value| !value.is_empty());
-
-        Ok(Self {
-            docker_host,
-            container_name,
-        })
+        Ok(Self { docker_host })
     }
 
     /// Builds a Docker client for this configuration.
@@ -154,11 +140,6 @@ pub fn config_schema() -> Value {
                 "description": "Docker connection URI. Use `unix:///var/run/docker.sock` for a \
                                 local socket, or `tcp://host:port` for a remote host or a \
                                 docker-socket-proxy container."
-            },
-            "containerName": {
-                "type": "string",
-                "minLength": 1,
-                "description": "Leave blank to monitor the whole Docker host. Set to a specific container's exact name to monitor and control just that container."
             }
         },
         "required": ["dockerHost"],
@@ -171,35 +152,34 @@ mod tests {
     use super::*;
 
     #[test]
-    fn a_container_name_is_optional_and_the_host_defaults() {
+    fn the_host_defaults_and_stale_container_configuration_is_ignored() {
         let config = DockerConnectorConfig::from_value(json!({ "containerName": "web" }))
-            .expect("containerName alone is enough");
+            .expect("the stale per-container key must not prevent startup");
         assert_eq!(config.docker_host, DEFAULT_DOCKER_HOST);
-        assert_eq!(config.container_name.as_deref(), Some("web"));
-
-        for host_mode in [json!({}), Value::Null, json!({ "containerName": "   " })] {
-            let config = DockerConnectorConfig::from_value(host_mode)
-                .expect("an omitted or blank container selects host mode");
-            assert_eq!(config.container_name, None);
-        }
+        assert_eq!(
+            DockerConnectorConfig::from_value(Value::Null)
+                .expect("null uses defaults")
+                .docker_host,
+            DEFAULT_DOCKER_HOST
+        );
     }
 
     #[test]
-    fn values_are_trimmed_and_unknown_keys_are_refused() {
+    fn values_are_trimmed_and_unknown_keys_are_ignored_for_stale_rows() {
         let config = DockerConnectorConfig::from_value(
             json!({ "containerName": "  web  ", "dockerHost": "  tcp://example:2375  " }),
         )
-        .expect("surrounding whitespace is a typo, not a different container");
-        assert_eq!(config.container_name.as_deref(), Some("web"));
+        .expect("legacy per-container configuration remains loadable");
         assert_eq!(config.docker_host, "tcp://example:2375");
 
-        // A misspelled key is a configuration that will not do what its author
-        // meant, so it is refused rather than silently defaulted.
-        let error = DockerConnectorConfig::from_value(
+        // Pre-release rows may carry fields from an older connector shape.
+        // Serde intentionally ignores them instead of making the whole runtime
+        // skip a connector that still has a valid Docker endpoint.
+        let config = DockerConnectorConfig::from_value(
             json!({ "containerName": "web", "dockerHostt": "tcp://example:2375" }),
         )
-        .expect_err("unknown keys must be refused");
-        assert!(matches!(error, ConnectorError::InvalidConfig { .. }));
+        .expect("unused fields are harmless");
+        assert_eq!(config.docker_host, DEFAULT_DOCKER_HOST);
     }
 
     #[test]
@@ -208,7 +188,6 @@ mod tests {
         // succeeds against a host that does not exist.
         let config = DockerConnectorConfig {
             docker_host: "tcp://docker-proxy.example:2375".to_owned(),
-            container_name: Some("web".to_owned()),
         };
         assert!(config.connect().is_ok());
 
@@ -216,7 +195,6 @@ mod tests {
         // the fix is at the infrastructure level, usually a missing bind mount.
         let config = DockerConnectorConfig {
             docker_host: "unix:///nonexistent/loom-test/docker.sock".to_owned(),
-            container_name: Some("web".to_owned()),
         };
         assert!(matches!(
             config.connect(),
@@ -233,7 +211,6 @@ mod tests {
         ] {
             let config = DockerConnectorConfig {
                 docker_host: unsupported.to_owned(),
-                container_name: Some("web".to_owned()),
             };
             assert!(
                 matches!(config.connect(), Err(ConnectorError::InvalidConfig { .. })),
@@ -246,11 +223,11 @@ mod tests {
     fn the_schema_describes_exactly_the_keys_the_parser_accepts() {
         let schema = config_schema();
         let properties = schema["properties"].as_object().expect("properties");
-        assert_eq!(properties.len(), 2);
+        assert_eq!(properties.len(), 1);
         assert_eq!(schema["required"], json!(["dockerHost"]));
         assert_eq!(properties["dockerHost"]["default"], DEFAULT_DOCKER_HOST);
-        // `additionalProperties: false` has to agree with `deny_unknown_fields`,
-        // or the generated form and the parser disagree about what is legal.
+        // New clients should only offer the current field. The parser is
+        // intentionally more tolerant so stale persisted rows still load.
         assert_eq!(schema["additionalProperties"], json!(false));
     }
 }

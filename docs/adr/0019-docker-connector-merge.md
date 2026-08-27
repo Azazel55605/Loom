@@ -1,6 +1,6 @@
 # 0019 — Docker host and container views share one connector type
 
-- Status: accepted
+- Status: superseded by [0016 — Connector sub-targets](./0016-connector-sub-targets.md)
 - Date: 2026-08-27
 
 ## Context

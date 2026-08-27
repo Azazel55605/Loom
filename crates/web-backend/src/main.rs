@@ -307,54 +307,6 @@ mod tests {
         }
     }
 
-    #[tokio::test]
-    async fn docker_type_merge_migration_relabels_both_legacy_modes() {
-        let pool = SqlitePoolOptions::new()
-            .max_connections(1)
-            .connect("sqlite::memory:")
-            .await
-            .expect("in-memory database");
-        sqlx::query(
-            "CREATE TABLE connector_instances (id TEXT PRIMARY KEY, connector_type TEXT NOT NULL)",
-        )
-        .execute(&pool)
-        .await
-        .expect("representative legacy table");
-        for (id, connector_type) in [
-            ("container", "docker-container"),
-            ("host", "docker-host"),
-            ("debug", "debug"),
-        ] {
-            sqlx::query("INSERT INTO connector_instances (id, connector_type) VALUES (?, ?)")
-                .bind(id)
-                .bind(connector_type)
-                .execute(&pool)
-                .await
-                .expect("representative pre-existing row");
-        }
-
-        sqlx::raw_sql(include_str!(
-            "../migrations/20260827000001_merge_docker_connector_types.sql"
-        ))
-        .execute(&pool)
-        .await
-        .expect("Docker connector merge migration");
-
-        let rows: Vec<(String, String)> =
-            sqlx::query_as("SELECT id, connector_type FROM connector_instances ORDER BY id")
-                .fetch_all(&pool)
-                .await
-                .expect("migrated rows");
-        assert_eq!(
-            rows,
-            vec![
-                ("container".to_owned(), "docker".to_owned()),
-                ("debug".to_owned(), "debug".to_owned()),
-                ("host".to_owned(), "docker".to_owned()),
-            ]
-        );
-    }
-
     async fn send(app: &Router, request: Request<Body>) -> (StatusCode, serde_json::Value) {
         let response = app
             .clone()
@@ -983,9 +935,10 @@ mod tests {
         async fn execute_action(
             &self,
             action_id: &str,
+            target_id: Option<&str>,
             params: Value,
         ) -> Result<ActionResult, ConnectorError> {
-            self.0.execute_action(action_id, params).await
+            self.0.execute_action(action_id, target_id, params).await
         }
 
         fn config_schema(&self) -> Value {
@@ -1080,7 +1033,9 @@ mod tests {
         assert_eq!(docker["displayName"], "Docker");
         assert_eq!(docker["icon"], "brand:docker");
         assert!(docker["configSchema"]["properties"]["dockerHost"].is_object());
-        assert!(docker["configSchema"]["properties"]["containerName"].is_object());
+        assert!(docker["configSchema"]["properties"]
+            .get("containerName")
+            .is_none());
         assert_eq!(
             docker["configSchema"]["properties"]["dockerHost"]["default"],
             "unix:///var/run/docker.sock"
@@ -1089,7 +1044,7 @@ mod tests {
         // either later is a visible decision rather than a drive-by.
         assert_eq!(docker["setupGuide"], serde_json::Value::Null);
         assert_eq!(docker["discoverableType"], serde_json::Value::Null);
-        assert_eq!(docker["discoveryTargetField"], "containerName");
+        assert_eq!(docker["discoveryTargetField"], serde_json::Value::Null);
     }
 
     #[tokio::test]
@@ -1152,6 +1107,52 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn sub_targets_are_live_read_only_instance_metadata() {
+        let app = test_app().await;
+        let (access, _) = setup_and_login(&app.router).await;
+        let id = create_debug_instance(&app.router, &access, "Target source").await;
+
+        let (status, targets) = send(
+            &app.router,
+            get_with_auth(
+                &format!("/connector-instances/{id}/sub-targets"),
+                &bearer(&access),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{targets:#}");
+        assert_eq!(
+            targets,
+            serde_json::json!([
+                { "id": "fixture-a", "label": "fixture-a" },
+                { "id": "fixture-b", "label": "fixture-b" },
+            ])
+        );
+
+        // Replace only the live implementation with one using the trait's
+        // sub-target opt-out defaults. The durable row remains addressable.
+        let uuid = uuid::Uuid::parse_str(&id).expect("instance uuid");
+        app.connectors
+            .insert(
+                uuid,
+                Arc::new(NonDiscoverableConnector(DebugConnector::default())),
+            )
+            .await;
+        let (status, body) = send(
+            &app.router,
+            get_with_auth(
+                &format!("/connector-instances/{id}/sub-targets"),
+                &bearer(&access),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{body:#}");
+        assert!(body["error"]
+            .as_str()
+            .is_some_and(|message| message.contains("does not support")));
+    }
+
+    #[tokio::test]
     async fn type_scoped_discovery_uses_a_candidate_without_persisting_it() {
         let app = test_app().await;
         let (access, _) = setup_and_login(&app.router).await;
@@ -1200,7 +1201,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn docker_type_discovery_uses_host_mode_without_persisting_it() {
+    async fn docker_type_discovery_is_unsupported_and_never_persists_a_candidate() {
         let app = test_app().await;
         let candidate = serde_json::json!({
             "dockerHost": loom_connector_docker::DEFAULT_DOCKER_HOST,
@@ -1225,9 +1226,10 @@ mod tests {
             post_json_auth("/connector-types/docker/discover", &access, candidate),
         )
         .await;
-        assert_eq!(status, StatusCode::OK, "discovery failed: {discovery:#}");
-        assert_eq!(discovery["discoveryTargetField"], "containerName");
-        assert!(discovery["resources"].is_array());
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{discovery:#}");
+        assert!(discovery["error"]
+            .as_str()
+            .is_some_and(|message| message.contains("not supported")));
 
         let after: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM connector_instances")
             .fetch_one(&app.pool)
@@ -1278,17 +1280,19 @@ mod tests {
         // A fresh instance inherits its type's icon; the override only exists
         // once someone sets one.
         assert_eq!(created["iconOverride"], serde_json::Value::Null);
+        assert_eq!(created["tags"], serde_json::json!([]));
         assert_eq!(created["status"]["health"], "healthy");
         assert!(!created["displayFields"]
             .as_array()
             .expect("array")
             .is_empty());
-        assert_eq!(created["dataPoints"].as_array().expect("array").len(), 5);
+        assert_eq!(created["dataPoints"].as_array().expect("array").len(), 9);
         assert!(!created["defaultLayout"]["bindings"]
             .as_array()
             .expect("array")
             .is_empty());
         assert_eq!(created["discoverableType"], "debug");
+        assert_eq!(created["supportsSubTargets"], true);
 
         // Detail carries what a placement UI needs.
         let (status, detail) = send(
@@ -1351,6 +1355,114 @@ mod tests {
         )
         .await;
         assert_eq!(status, StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn connector_tags_are_replace_all_listed_and_cascade_with_the_instance() {
+        let app = test_app().await;
+        let (access, _) = setup_and_login(&app.router).await;
+        let first = create_debug_instance(&app.router, &access, "First").await;
+        let second = create_debug_instance(&app.router, &access, "Second").await;
+
+        let (status, updated) = send(
+            &app.router,
+            patch_json_auth(
+                &format!("/connector-instances/{first}"),
+                &access,
+                serde_json::json!({ "tags": [" test ", "production", "test"] }),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "tagging failed: {updated:#}");
+        assert_eq!(updated["tags"], serde_json::json!(["production", "test"]));
+
+        let (status, second_updated) = send(
+            &app.router,
+            patch_json_auth(
+                &format!("/connector-instances/{second}"),
+                &access,
+                serde_json::json!({ "tags": ["lab", "test"] }),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "tagging failed: {second_updated:#}");
+
+        let (status, tags) = send(
+            &app.router,
+            get_with_auth("/connector-instances/tags", &bearer(&access)),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(tags, serde_json::json!(["lab", "production", "test"]));
+
+        let (status, replaced) = send(
+            &app.router,
+            patch_json_auth(
+                &format!("/connector-instances/{first}"),
+                &access,
+                serde_json::json!({ "tags": ["staging"] }),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "replacement failed: {replaced:#}");
+        assert_eq!(replaced["tags"], serde_json::json!(["staging"]));
+
+        let (status, renamed) = send(
+            &app.router,
+            patch_json_auth(
+                &format!("/connector-instances/{first}"),
+                &access,
+                serde_json::json!({ "name": "First renamed" }),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "rename failed: {renamed:#}");
+        assert_eq!(renamed["tags"], serde_json::json!(["staging"]));
+
+        let (status, invalid) = send(
+            &app.router,
+            patch_json_auth(
+                &format!("/connector-instances/{first}"),
+                &access,
+                serde_json::json!({ "tags": ["  "] }),
+            ),
+        )
+        .await;
+        assert_eq!(
+            status,
+            StatusCode::BAD_REQUEST,
+            "invalid tags accepted: {invalid:#}"
+        );
+
+        let (status, listed) = send(
+            &app.router,
+            get_with_auth("/connector-instances", &bearer(&access)),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let first_entry = listed
+            .as_array()
+            .expect("instances")
+            .iter()
+            .find(|entry| entry["id"] == first)
+            .expect("first instance");
+        assert_eq!(first_entry["tags"], serde_json::json!(["staging"]));
+
+        let (status, _) = send(
+            &app.router,
+            delete_auth(&format!("/connector-instances/{first}"), &access),
+        )
+        .await;
+        assert_eq!(status, StatusCode::NO_CONTENT);
+
+        let remaining: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM connector_instance_tags WHERE instance_id = ?",
+        )
+        .bind(&first)
+        .fetch_one(&app.pool)
+        .await
+        .expect("count cascaded tags");
+        assert_eq!(remaining, 0);
     }
 
     /// The factory is the validator: a configuration it refuses must never be
@@ -1550,6 +1662,22 @@ mod tests {
         assert_eq!(status, StatusCode::OK, "action failed: {body:#}");
         assert_eq!(body["success"], true);
 
+        let (status, targeted) = send(
+            &app.router,
+            post_json_auth(
+                &format!("/connector-instances/{first}/actions/ping"),
+                &access,
+                serde_json::json!({ "targetId": "fixture-a", "params": {} }),
+            ),
+        )
+        .await;
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "targeted action failed: {targeted:#}"
+        );
+        assert_eq!(targeted["success"], true);
+
         // Actions mutate the connector, while reads intentionally use the last
         // completed poll. Drive that boundary explicitly instead of relying on
         // wall-clock timing in the test.
@@ -1566,8 +1694,14 @@ mod tests {
             get_with_auth(&format!("/connector-instances/{second}"), &bearer(&access)),
         )
         .await;
-        assert_eq!(first_detail["status"]["details"]["label"], "only-the-first");
-        assert_eq!(second_detail["status"]["details"]["label"], "debug-fixture");
+        assert_eq!(
+            first_detail["status"]["details"][""]["label"],
+            "only-the-first"
+        );
+        assert_eq!(
+            second_detail["status"]["details"][""]["label"],
+            "debug-fixture"
+        );
 
         // Bad parameters are the connector's objection, reported as a 400.
         let (status, body) = send(
@@ -1636,7 +1770,7 @@ mod tests {
         let actions = created["actions"].as_array().expect("actions");
         let disruptive: Vec<&str> = actions
             .iter()
-            .filter(|action| action["isDisruptive"] == true)
+            .filter(|action| action["isDisruptive"] == true && action["targetId"].is_null())
             .map(|action| action["id"].as_str().expect("id"))
             .collect();
         assert_eq!(disruptive, vec!["restart"]);
@@ -1778,6 +1912,7 @@ mod tests {
         for request in [
             get("/connector-types"),
             get("/connector-instances"),
+            get("/connector-instances/tags"),
             get("/connector-instances/whatever"),
         ] {
             let (status, _) = send(&app.router, request).await;
@@ -1826,6 +1961,12 @@ mod tests {
         let (status, _) = send(
             &app.router,
             get_with_auth("/connector-instances", &bearer(&viewer)),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let (status, _) = send(
+            &app.router,
+            get_with_auth("/connector-instances/tags", &bearer(&viewer)),
         )
         .await;
         assert_eq!(status, StatusCode::OK);
@@ -1917,6 +2058,12 @@ mod tests {
         let (status, _) = send(
             &app.router,
             get_with_auth("/connector-instances", &bearer(&manager)),
+        )
+        .await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        let (status, _) = send(
+            &app.router,
+            get_with_auth("/connector-instances/tags", &bearer(&manager)),
         )
         .await;
         assert_eq!(status, StatusCode::FORBIDDEN);
@@ -2291,6 +2438,68 @@ mod tests {
         // An action id is not a data point id: the error has to send the reader
         // to the right half of the connector.
         assert!(!message.contains("unknown data points"), "{message}");
+
+        // A target is checked live, and its binding namespace is coupled to
+        // that exact target rather than merely to the connector instance.
+        let target_placement = |target_id: &str, data_point_id: &str| {
+            serde_json::json!({
+                "connectorInstanceId": connector_id,
+                "targetId": target_id,
+                "positionX": 0,
+                "positionY": 0,
+                "width": 2,
+                "height": 2,
+                "widgetBindings": [{
+                    "display": {
+                        "dataPointId": data_point_id,
+                        "widgetType": "statTile",
+                        "config": {},
+                    }
+                }],
+            })
+        };
+        let (status, wrong_target_binding) = send(
+            &app.router,
+            post_json_auth(
+                &format!("/dashboards/{dashboard_id}/placements"),
+                &owner,
+                target_placement("fixture-a", loom_core::connector::debug::DATA_POINT_LABEL),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{wrong_target_binding:#}");
+        assert!(wrong_target_binding["error"]
+            .as_str()
+            .is_some_and(|message| message.contains("unknown data points")));
+
+        let (status, targeted) = send(
+            &app.router,
+            post_json_auth(
+                &format!("/dashboards/{dashboard_id}/placements"),
+                &owner,
+                target_placement("fixture-b", loom_core::connector::debug::DATA_POINT_LABEL),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED, "{targeted:#}");
+        assert_eq!(targeted["targetId"], "fixture-b");
+
+        let (status, missing_target) = send(
+            &app.router,
+            post_json_auth(
+                &format!("/dashboards/{dashboard_id}/placements"),
+                &owner,
+                target_placement(
+                    "fixture-missing",
+                    loom_core::connector::debug::DATA_POINT_LABEL,
+                ),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{missing_target:#}");
+        assert!(missing_target["error"]
+            .as_str()
+            .is_some_and(|message| message.contains("no such connector sub-target")));
 
         // ...and a layout mixing both kinds, all of them real, is accepted.
         let mixed_bindings = serde_json::json!([

@@ -43,6 +43,7 @@ struct DashboardRow {
 struct PlacementRow {
     id: String,
     connector_instance_id: String,
+    target_id: Option<String>,
     /// Retained while the placement is grouped, and not read by the renderer
     /// then — the group's bounding box governs instead. This is the geometry
     /// the placement returns to when it is ungrouped, which is what makes
@@ -160,6 +161,8 @@ struct DashboardDetail {
 struct PlacementResponse {
     id: String,
     connector: ConnectorInstanceResponse,
+    /// Addressed connector sub-target, or null for the aggregate view.
+    target_id: Option<String>,
     /// The placement's *standalone* geometry. Ignored by the grid while this
     /// placement is a group member, and preserved so ungrouping restores it.
     position_x: i64,
@@ -227,6 +230,7 @@ pub(super) struct CreateShareRequest {
 #[serde(rename_all = "camelCase")]
 pub(super) struct CreatePlacementRequest {
     connector_instance_id: String,
+    target_id: Option<String>,
     position_x: i64,
     position_y: i64,
     width: i64,
@@ -280,6 +284,9 @@ pub(super) struct AddPlacementGroupMemberRequest {
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub(super) struct UpdatePlacementRequest {
+    /// Absent leaves the target unchanged; null returns to the aggregate view.
+    #[serde(default, deserialize_with = "present_option")]
+    target_id: Option<Option<String>>,
     position_x: Option<i64>,
     position_y: Option<i64>,
     width: Option<i64>,
@@ -655,6 +662,7 @@ pub(super) async fn create_placement(
     let bindings = match validate_placement(
         &state,
         &request.connector_instance_id,
+        request.target_id.as_deref(),
         request.width,
         request.height,
         request.widget_bindings,
@@ -675,8 +683,8 @@ pub(super) async fn create_placement(
     if let Err(error) = sqlx::query(
         "INSERT INTO dashboard_placements \
          (id, dashboard_id, connector_instance_id, position_x, position_y, width, height, \
-          widget_bindings, created_at) \
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+          target_id, widget_bindings, created_at) \
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
     )
     .bind(&placement_id)
     .bind(&id)
@@ -685,6 +693,7 @@ pub(super) async fn create_placement(
     .bind(request.position_y)
     .bind(request.width)
     .bind(request.height)
+    .bind(&request.target_id)
     .bind(&serialized)
     .bind(&created_at)
     .execute(&state.pool)
@@ -696,6 +705,7 @@ pub(super) async fn create_placement(
     let row = PlacementRow {
         id: placement_id,
         connector_instance_id: request.connector_instance_id,
+        target_id: request.target_id,
         position_x: request.position_x,
         position_y: request.position_y,
         width: request.width,
@@ -725,7 +735,7 @@ pub(super) async fn update_placement(
     }
 
     let existing = sqlx::query_as::<_, PlacementRow>(
-        "SELECT id, connector_instance_id, position_x, position_y, width, height, \
+        "SELECT id, connector_instance_id, target_id, position_x, position_y, width, height, \
                 widget_bindings, created_at, group_id \
          FROM dashboard_placements WHERE id = ? AND dashboard_id = ?",
     )
@@ -751,9 +761,13 @@ pub(super) async fn update_placement(
     };
     let width = request.width.unwrap_or(existing.width);
     let height = request.height.unwrap_or(existing.height);
+    let target_id = request
+        .target_id
+        .unwrap_or_else(|| existing.target_id.clone());
     let bindings = match validate_placement(
         &state,
         &existing.connector_instance_id,
+        target_id.as_deref(),
         width,
         height,
         request.widget_bindings,
@@ -773,13 +787,14 @@ pub(super) async fn update_placement(
     let position_y = request.position_y.unwrap_or(existing.position_y);
     if let Err(error) = sqlx::query(
         "UPDATE dashboard_placements \
-         SET position_x = ?, position_y = ?, width = ?, height = ?, widget_bindings = ? \
+         SET position_x = ?, position_y = ?, width = ?, height = ?, target_id = ?, widget_bindings = ? \
          WHERE id = ? AND dashboard_id = ?",
     )
     .bind(position_x)
     .bind(position_y)
     .bind(width)
     .bind(height)
+    .bind(&target_id)
     .bind(&serialized)
     .bind(&placement_id)
     .bind(&id)
@@ -794,6 +809,7 @@ pub(super) async fn update_placement(
         position_y,
         width,
         height,
+        target_id,
         widget_bindings: serialized,
         ..existing
     };
@@ -1495,7 +1511,7 @@ async fn load_placements(
     // `group_order` is the tiebreak for members and is NULL here, so one query
     // serves both: the ordering clause is simply inert for the standalone half.
     let rows = sqlx::query_as::<_, PlacementRow>(
-        "SELECT id, connector_instance_id, position_x, position_y, width, height, \
+        "SELECT id, connector_instance_id, target_id, position_x, position_y, width, height, \
                 widget_bindings, created_at, group_id \
          FROM dashboard_placements WHERE dashboard_id = ? \
          ORDER BY group_order, position_y, position_x, created_at",
@@ -1559,6 +1575,7 @@ async fn placement_response(state: &AppState, row: PlacementRow) -> RouteResult<
     Ok(PlacementResponse {
         id: row.id,
         connector,
+        target_id: row.target_id,
         position_x: row.position_x,
         position_y: row.position_y,
         width: row.width,
@@ -1572,6 +1589,7 @@ async fn placement_response(state: &AppState, row: PlacementRow) -> RouteResult<
 async fn validate_placement(
     state: &AppState,
     connector_id: &str,
+    target_id: Option<&str>,
     width: i64,
     height: i64,
     requested_bindings: Option<Vec<WidgetBinding>>,
@@ -1610,36 +1628,57 @@ async fn validate_placement(
         )));
     }
 
+    if let Some(target_id) = target_id {
+        if !connector.supports_sub_targets() {
+            return Err(Box::new(bad_request(
+                "this connector instance does not support targetId",
+            )));
+        }
+        let targets = connector.list_sub_targets().await.map_err(|error| {
+            Box::new(bad_request(format!(
+                "could not validate targetId against the live connector: {error}"
+            )))
+        })?;
+        if !targets.iter().any(|target| target.id == target_id) {
+            return Err(Box::new(bad_request(format!(
+                "no such connector sub-target: {target_id}"
+            ))));
+        }
+    }
+
     let bindings = requested_bindings
         .or(existing_bindings)
-        .unwrap_or_else(|| connector.default_layout().bindings);
+        .unwrap_or_else(|| connector.default_layout_for(target_id).bindings);
     // Each binding kind resolves against its own namespace: a display binding
     // names a data point, an action binding names an action. They are both
     // strings and they are not interchangeable, so checking one list for both
     // would either reject valid action bindings or wave through bindings that
     // can never fire.
-    let data_point_ids: HashSet<String> = connector
+    let data_point_ids: HashSet<(String, Option<String>)> = connector
         .data_points()
         .into_iter()
-        .map(|point| point.id)
+        .map(|point| (point.id, point.target_id))
         .collect();
-    let action_ids: HashSet<String> = connector
+    let action_ids: HashSet<(String, Option<String>)> = connector
         .actions()
         .await
         .into_iter()
-        .map(|action| action.id)
+        .map(|action| (action.id, action.target_id))
         .collect();
+    let selected_target = target_id.map(str::to_owned);
 
     let mut unknown_data_points: Vec<&str> = Vec::new();
     let mut unknown_actions: Vec<&str> = Vec::new();
     for binding in &bindings {
         match binding {
             WidgetBinding::Display { data_point_id, .. }
-                if !data_point_ids.contains(data_point_id) =>
+                if !data_point_ids.contains(&(data_point_id.clone(), selected_target.clone())) =>
             {
                 unknown_data_points.push(data_point_id);
             }
-            WidgetBinding::Action { action_id, .. } if !action_ids.contains(action_id) => {
+            WidgetBinding::Action { action_id, .. }
+                if !action_ids.contains(&(action_id.clone(), selected_target.clone())) =>
+            {
                 unknown_actions.push(action_id);
             }
             _ => {}

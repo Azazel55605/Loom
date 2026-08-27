@@ -3,6 +3,7 @@ import { useMutation, useQuery } from "@tanstack/react-query";
 import { AlertCircle, Loader2 } from "lucide-react";
 
 import { Alert, AlertDescription } from "@loom/ui-kit/components/ui/alert";
+import { Badge } from "@loom/ui-kit/components/ui/badge";
 import { Button } from "@loom/ui-kit/components/ui/button";
 import {
   Dialog,
@@ -13,6 +14,7 @@ import {
   DialogTitle,
 } from "@loom/ui-kit/components/ui/dialog";
 import { Skeleton } from "@loom/ui-kit/components/ui/skeleton";
+import { Label } from "@loom/ui-kit/components/ui/label";
 import { PlacementBindingEditor } from "@loom/ui-kit/components/PlacementBindingEditor";
 import type { DashboardPlacement, WidgetBinding } from "@loom/ui-kit/lib/api";
 import { useApiClient } from "@loom/ui-kit/lib/api-context";
@@ -98,7 +100,7 @@ export function PlacementBindingsDialog({
         </DialogHeader>
 
         <form
-          className="space-y-5"
+          className="flex flex-col gap-5"
           // See AddPlacementDialog: native bubbles would pre-empt the backend's
           // own message about a binding it refused.
           noValidate
@@ -107,6 +109,18 @@ export function PlacementBindingsDialog({
             save.mutate();
           }}
         >
+          {/* Target identity is intentionally read-only in this pass. Changing
+              it would require discarding and re-seeding the entire binding
+              set; delete and recreate the placement instead. */}
+          <div className="flex flex-col gap-2">
+            <Label>View</Label>
+            <div>
+              <Badge variant="secondary">
+                {placement.targetId === null ? "Server info" : placement.targetId}
+              </Badge>
+            </div>
+          </div>
+
           {detail.isPending ? (
             <Skeleton className="h-32 w-full" />
           ) : detail.isError ? (
@@ -118,6 +132,7 @@ export function PlacementBindingsDialog({
             <PlacementBindingEditor
               dataPoints={detail.data.dataPoints}
               actions={detail.data.actions}
+              targetId={placement.targetId}
               value={bindings}
               onChange={setBindings}
               disabled={save.isPending}

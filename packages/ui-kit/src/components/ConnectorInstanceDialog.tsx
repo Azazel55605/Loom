@@ -25,50 +25,17 @@ import {
 import { ConnectorIcon } from "@loom/ui-kit/components/ConnectorIcon";
 import { ConnectorIconPicker } from "@loom/ui-kit/components/ConnectorIconPicker";
 import { SetupGuidePanel } from "@loom/ui-kit/components/SetupGuidePanel";
+import { TagChipEditor } from "@loom/ui-kit/components/TagChipEditor";
 import {
   defaultsForSchema,
   SchemaForm,
   validateSchemaValues,
 } from "@loom/ui-kit/components/SchemaForm";
 import { Skeleton } from "@loom/ui-kit/components/ui/skeleton";
-import { Tabs, TabsList, TabsTrigger } from "@loom/ui-kit/components/ui/tabs";
 import type { ConnectorInstanceSummary } from "@loom/ui-kit/lib/api";
 import { useApiClient } from "@loom/ui-kit/lib/api-context";
 import { describeAdminFailure } from "@loom/ui-kit/lib/admin-error";
 import { cn } from "@loom/ui-kit/lib/utils";
-
-type DockerMode = "host" | "container";
-
-function hasContainerName(value: unknown): boolean {
-  if (typeof value !== "object" || value === null) return false;
-  const containerName = (value as Record<string, unknown>).containerName;
-  return typeof containerName === "string" && containerName.trim() !== "";
-}
-
-/** Remove one top-level property without mutating the registry-owned schema. */
-function schemaWithoutProperty(schema: unknown, field: string): unknown {
-  if (typeof schema !== "object" || schema === null) return schema;
-
-  const clone = { ...(schema as Record<string, unknown>) };
-  if (typeof clone.properties === "object" && clone.properties !== null) {
-    const properties = { ...(clone.properties as Record<string, unknown>) };
-    delete properties[field];
-    clone.properties = properties;
-  }
-  if (Array.isArray(clone.required)) {
-    clone.required = clone.required.filter((entry) => entry !== field);
-  }
-  return clone;
-}
-
-function configWithoutField(
-  value: Record<string, unknown>,
-  field: string,
-): Record<string, unknown> {
-  const clone = { ...value };
-  delete clone[field];
-  return clone;
-}
 
 /**
  * Add or reconfigure a connector instance.
@@ -80,8 +47,8 @@ function configWithoutField(
  *
  * The type list comes from `GET /connector-types` and the configuration form is
  * generated from each type's published `configSchema`, so integrations remain
- * data-driven by default. Docker adds one deliberate product affordance here:
- * a host/container mode choice around its otherwise-generic schema form.
+ * data-driven. Sub-target selection belongs to dashboard placement creation;
+ * one configured connector instance represents the whole remote server.
  */
 export function ConnectorInstanceDialog({
   open,
@@ -118,6 +85,13 @@ export function ConnectorInstanceDialog({
     retry: false,
   });
 
+  const knownTags = useQuery({
+    queryKey: ["connector-tags"],
+    queryFn: ({ signal }) => api.getConnectorTags(signal),
+    enabled: open && isEditing,
+    retry: false,
+  });
+
   const [typeId, setTypeId] = React.useState<string>(instance?.connectorType ?? "");
   const [name, setName] = React.useState<string>(instance?.name ?? "");
   const [config, setConfig] = React.useState<Record<string, unknown>>({});
@@ -126,22 +100,14 @@ export function ConnectorInstanceDialog({
   const [iconOverride, setIconOverride] = React.useState<string | null>(
     instance?.iconOverride ?? null,
   );
+  const [tags, setTags] = React.useState<string[]>(instance?.tags ?? []);
   const [errors, setErrors] = React.useState<Record<string, string>>({});
   const [nameError, setNameError] = React.useState<string | null>(null);
   const [failure, setFailure] = React.useState<string | null>(null);
   const [isSubmitting, setIsSubmitting] = React.useState(false);
-  const [dockerMode, setDockerMode] = React.useState<DockerMode>("host");
 
   const selectedType = types.data?.find((candidate) => candidate.typeId === typeId) ?? null;
   const setupGuide = !isEditing ? (selectedType?.setupGuide ?? null) : null;
-  const isDocker = selectedType?.typeId === "docker";
-  const formSchema = React.useMemo(
-    () =>
-      isDocker && dockerMode === "host"
-        ? schemaWithoutProperty(selectedType.configSchema, "containerName")
-        : selectedType?.configSchema,
-    [dockerMode, isDocker, selectedType],
-  );
 
   // Seed the config form once the schema is known: on create from the schema's
   // own defaults, on edit from what is actually stored. Keyed on the schema and
@@ -165,9 +131,6 @@ export function ConnectorInstanceDialog({
         ? { ...(stored as Record<string, unknown>) }
         : defaultsForSchema(selectedType.configSchema);
     setConfig(seededConfig);
-    if (selectedType.typeId === "docker") {
-      setDockerMode(isEditing && hasContainerName(seededConfig) ? "container" : "host");
-    }
     setErrors({});
   }, [open, selectedType, typeId, isEditing, detail.isSuccess, detail.data, detail.dataUpdatedAt]);
 
@@ -180,6 +143,7 @@ export function ConnectorInstanceDialog({
       // initialised from props once would show the previously edited
       // connector's icon.
       setIconOverride(instance?.iconOverride ?? null);
+      setTags(instance?.tags ?? []);
     }
   }, [open, instance]);
 
@@ -210,11 +174,7 @@ export function ConnectorInstanceDialog({
     // Local checks are `required` and basic types only. The connector's factory
     // on the backend is the real validator, and its refusal is reported below
     // as a form-level Alert rather than a toast — it names the field to fix.
-    const submittedConfig =
-      isDocker && dockerMode === "host"
-        ? configWithoutField(config, "containerName")
-        : config;
-    const found = validateSchemaValues(formSchema, submittedConfig);
+    const found = validateSchemaValues(selectedType.configSchema, config);
     setErrors(found);
     if (Object.keys(found).length > 0) return;
 
@@ -225,14 +185,15 @@ export function ConnectorInstanceDialog({
         // "leave it alone", which would make clearing an override impossible.
         await api.updateConnectorInstance(instance.id, {
           name: trimmed,
-          config: submittedConfig,
+          config,
           iconOverride,
+          tags,
         });
       } else {
         await api.createConnectorInstance({
           connectorType: selectedType.typeId,
           name: trimmed,
-          config: submittedConfig,
+          config,
         });
       }
     } catch (error: unknown) {
@@ -369,35 +330,35 @@ export function ConnectorInstanceDialog({
             </div>
           )}
 
+          {isEditing && !isLoading ? (
+            <div className="flex flex-col gap-2 border-t border-border pt-4">
+              <div>
+                <p className="text-sm font-medium">Tags</p>
+                <p className="text-xs text-muted-foreground">
+                  Free-form labels used to search and filter the connectors table.
+                </p>
+              </div>
+              {knownTags.isError ? (
+                <Alert>
+                  <AlertCircle aria-hidden="true" />
+                  <AlertTitle>Tag suggestions unavailable</AlertTitle>
+                  <AlertDescription>
+                    Existing assignments can still be changed and new tags can still be entered.
+                  </AlertDescription>
+                </Alert>
+              ) : null}
+              <TagChipEditor
+                value={tags}
+                suggestions={knownTags.data ?? []}
+                onChange={setTags}
+                disabled={isSubmitting}
+              />
+            </div>
+          ) : null}
+
           {selectedType !== null && !isLoading && (
             <div className="space-y-2 border-t border-border pt-4">
               <p className="text-sm font-medium">{selectedType.displayName} configuration</p>
-              {isDocker ? (
-                <Tabs
-                  value={dockerMode}
-                  onValueChange={(next) => {
-                    const mode = next as DockerMode;
-                    setDockerMode(mode);
-                    if (mode === "host") {
-                      setConfig((current) => configWithoutField(current, "containerName"));
-                      setErrors((current) => {
-                        const next = { ...current };
-                        delete next.containerName;
-                        return next;
-                      });
-                    }
-                  }}
-                >
-                  <TabsList className="grid w-full grid-cols-2">
-                    <TabsTrigger value="host" disabled={isSubmitting}>
-                      Whole host
-                    </TabsTrigger>
-                    <TabsTrigger value="container" disabled={isSubmitting}>
-                      Single container
-                    </TabsTrigger>
-                  </TabsList>
-                </Tabs>
-              ) : null}
               <div
                 className={cn(
                   "grid gap-4",
@@ -405,29 +366,12 @@ export function ConnectorInstanceDialog({
                 )}
               >
                 <SchemaForm
-                  schema={formSchema}
+                  schema={selectedType.configSchema}
                   value={config}
                   onChange={setConfig}
                   errors={errors}
                   disabled={isSubmitting}
                   idPrefix={`config-${selectedType.typeId}`}
-                  discovery={
-                    isDocker && dockerMode === "container"
-                      ? {
-                          targetField: "containerName",
-                          canDiscover: (values) =>
-                            typeof values.dockerHost === "string" &&
-                            values.dockerHost.trim() !== "",
-                          onDiscover: async (values) => {
-                            // The candidate must be host mode even while
-                            // editing an existing container-mode instance.
-                            const candidate = configWithoutField(values, "containerName");
-                            const response = await api.discoverForType("docker", candidate);
-                            return response.resources;
-                          },
-                        }
-                      : undefined
-                  }
                 />
                 {setupGuide !== null ? (
                   <SetupGuidePanel guide={setupGuide} formValues={config} />

@@ -28,6 +28,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 pub mod debug;
+pub mod details;
 
 /// An adapter for one manageable service.
 ///
@@ -64,7 +65,8 @@ pub trait Connector: Send + Sync {
     /// depend on its configuration or state.
     async fn actions(&self) -> Vec<ConnectorAction>;
 
-    /// Performs the action named by `action_id`, passing `params` through.
+    /// Performs the action named by `action_id` for the optional sub-target,
+    /// passing `params` through.
     ///
     /// `params` is validated against the matching
     /// [`ConnectorAction::params_schema`]; an implementation that receives
@@ -79,8 +81,27 @@ pub trait Connector: Send + Sync {
     async fn execute_action(
         &self,
         action_id: &str,
+        target_id: Option<&str>,
         params: Value,
     ) -> Result<ActionResult, ConnectorError>;
+
+    /// Whether this connector exposes addressable views below the instance.
+    fn supports_sub_targets(&self) -> bool {
+        false
+    }
+
+    /// Cheaply enumerates addressable views within this connector instance.
+    ///
+    /// This returns names/labels only: detailed readings still come from
+    /// [`Connector::status`]. It is deliberately distinct from
+    /// [`Connector::discover`], which proposes configurations for creating
+    /// whole new connector instances. `target_id: None` names the connector's
+    /// host/aggregate action; `Some(id)` must match the action descriptor. A
+    /// sub-target remains inside this
+    /// instance and shares its connection and permission boundary.
+    async fn list_sub_targets(&self) -> Result<Vec<SubTarget>, ConnectorError> {
+        Ok(Vec::new())
+    }
 
     /// The JSON Schema for the configuration this connector needs.
     ///
@@ -95,7 +116,10 @@ pub trait Connector: Send + Sync {
     /// The connector type this live instance can discover child resources for.
     ///
     /// Discovery is instance-scoped because it commonly needs an already
-    /// configured connection. `None` means this connector does not support it.
+    /// configured connection. It proposes whole new connector instances and is
+    /// deliberately distinct from [`Connector::list_sub_targets`], which names
+    /// addressable views inside this same instance. `None` means this connector
+    /// does not support discovery.
     fn discoverable_type(&self) -> Option<String> {
         None
     }
@@ -115,7 +139,10 @@ pub trait Connector: Send + Sync {
     /// Implementations return suggested configurations; they never create
     /// connector instances themselves. The backend remains responsible for
     /// authorization and persistence. Connectors opt in by overriding this
-    /// method together with [`Connector::discoverable_type`].
+    /// method together with [`Connector::discoverable_type`]. This is not
+    /// sub-target enumeration: discovery proposes whole new connector
+    /// instances, while [`Connector::list_sub_targets`] names addressable views
+    /// that remain within this instance.
     async fn discover(&self) -> Result<Vec<DiscoveredResource>, ConnectorError> {
         Ok(Vec::new())
     }
@@ -163,6 +190,12 @@ pub trait Connector: Send + Sync {
     /// anything. It is a starting point the user then owns, not a constraint —
     /// nothing re-applies it after placement.
     fn default_layout(&self) -> WidgetLayout;
+
+    /// The starting widget arrangement for one connector-level or sub-target
+    /// view. Connectors without sub-targets inherit their existing layout.
+    fn default_layout_for(&self, _target_id: Option<&str>) -> WidgetLayout {
+        self.default_layout()
+    }
 
     /// The host and port a *network-level* probe should try when this connector
     /// stops answering, if probing one would mean anything.
@@ -257,13 +290,15 @@ pub struct SetupGuide {
 pub struct ConnectorStatus {
     /// The coarse verdict clients act on.
     pub health: HealthState,
-    /// The current reading for every data point, keyed by id.
+    /// The current reading for every data point, nested by target and then id.
     ///
     /// Typed as [`Value`] for serialization flexibility, but the shape is not
     /// free-form and consumers may rely on it: it **MUST** be a JSON object
-    /// keyed by `data_point_id`, matching the ids returned by
-    /// [`Connector::data_points`]. Each value's shape follows that data point's
-    /// declared [`DataPointDescriptor::value_type`]:
+    /// keyed first by target (`""` for connector-level values, otherwise the
+    /// sub-target id) and then by `data_point_id`, matching the descriptors
+    /// returned by [`Connector::data_points`]. Use the helpers in
+    /// [`details`] rather than constructing this shape by hand. Each value's
+    /// shape follows that data point's declared [`DataPointDescriptor::value_type`]:
     ///
     /// | `value_type` | JSON shape |
     /// | --- | --- |
@@ -272,12 +307,12 @@ pub struct ConnectorStatus {
     /// | [`Bool`](DataPointValueType::Bool) | a JSON boolean |
     /// | [`TimeSeries`](DataPointValueType::TimeSeries) | a JSON array of `{ "timestamp": <ISO 8601>, "value": <number> }` objects, oldest first |
     ///
-    /// A connector may include extra keys that are not data points — a version
+    /// A connector may include extra keys within a target object that are not data points — a version
     /// string, a queue depth — and a client that does not recognise one ignores
     /// it. What it may not do is key a data point's value under anything but
-    /// that data point's id, because a saved layout stores ids and resolves
-    /// them here on every poll. [`ConnectorStatus::data_point_value`] is the
-    /// intended way to read one.
+    /// that target and data point id, because a saved layout stores both and
+    /// resolves them here on every poll. [`ConnectorStatus::data_point_value_for`]
+    /// is the intended way to read one.
     pub details: Value,
     /// When this reading was actually taken, so stale data is visible as stale.
     pub last_checked: DateTime<Utc>,
@@ -316,8 +351,27 @@ impl ConnectorStatus {
     /// [`value_type`](DataPointDescriptor::value_type) — this says what is
     /// there, not what shape it should have been.
     pub fn data_point_value(&self, data_point_id: &str) -> Option<&Value> {
-        self.details.as_object()?.get(data_point_id)
+        self.data_point_value_for(None, data_point_id)
     }
+
+    /// The current value of one target-scoped data point.
+    pub fn data_point_value_for(
+        &self,
+        target_id: Option<&str>,
+        data_point_id: &str,
+    ) -> Option<&Value> {
+        details::get_detail(&self.details, target_id, data_point_id)
+    }
+}
+
+/// One addressable view below a connector instance.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SubTarget {
+    /// Stable id used by descriptors, placements, status details, and actions.
+    pub id: String,
+    /// Human-facing name shown when choosing a target.
+    pub label: String,
 }
 
 /// The coarse health verdict for a service.
@@ -352,6 +406,9 @@ pub struct ConnectorAction {
     /// Machine-facing: it belongs in URLs and stored automations, so it should
     /// not change when the label does.
     pub id: String,
+    /// `None` for an instance-level action; otherwise the addressed sub-target.
+    #[serde(default)]
+    pub target_id: Option<String>,
     /// Short human-facing name for the button or menu entry.
     pub label: String,
     /// Optional longer explanation, for tooltips and confirmation prompts —
@@ -393,6 +450,7 @@ impl ConnectorAction {
     pub fn simple(id: impl Into<String>, label: impl Into<String>) -> Self {
         Self {
             id: id.into(),
+            target_id: None,
             label: label.into(),
             description: None,
             params_schema: Value::Object(Default::default()),
@@ -404,6 +462,13 @@ impl ConnectorAction {
     #[must_use]
     pub fn with_description(mut self, description: impl Into<String>) -> Self {
         self.description = Some(description.into());
+        self
+    }
+
+    /// Scopes this action descriptor to one addressable sub-target.
+    #[must_use]
+    pub fn for_target(mut self, target_id: impl Into<String>) -> Self {
+        self.target_id = Some(target_id.into());
         self
     }
 
@@ -580,6 +645,9 @@ pub struct DataPointDescriptor {
     /// under in [`ConnectorStatus::details`]. Stored in saved layouts, so it
     /// must not change when the label does.
     pub id: String,
+    /// `None` for an instance-level reading; otherwise the addressed sub-target.
+    #[serde(default)]
+    pub target_id: Option<String>,
     /// Human-facing name for the widget's caption or legend entry.
     pub label: String,
     /// What kind of value this is, which constrains the widgets it can drive.
@@ -598,6 +666,7 @@ impl DataPointDescriptor {
     ) -> Self {
         Self {
             id: id.into(),
+            target_id: None,
             label: label.into(),
             value_type,
             unit: None,
@@ -608,6 +677,13 @@ impl DataPointDescriptor {
     #[must_use]
     pub fn with_unit(mut self, unit: impl Into<String>) -> Self {
         self.unit = Some(unit.into());
+        self
+    }
+
+    /// Scopes this descriptor to one addressable sub-target.
+    #[must_use]
+    pub fn for_target(mut self, target_id: impl Into<String>) -> Self {
+        self.target_id = Some(target_id.into());
         self
     }
 }
@@ -918,7 +994,7 @@ mod tests {
             // `ConnectorStatus::details` contract.
             Ok(ConnectorStatus::new(
                 self.health,
-                json!({ "reading": 42.0 }),
+                json!({ "": { "reading": 42.0 } }),
             ))
         }
 
@@ -929,6 +1005,7 @@ mod tests {
         async fn execute_action(
             &self,
             action_id: &str,
+            _target_id: Option<&str>,
             _params: Value,
         ) -> Result<ActionResult, ConnectorError> {
             if action_id == "noop" {
@@ -1012,7 +1089,9 @@ mod tests {
             // reading, because that is what a widget binding looks up.
             for point in &data_points {
                 assert!(
-                    status.data_point_value(&point.id).is_some(),
+                    status
+                        .data_point_value_for(point.target_id.as_deref(), &point.id)
+                        .is_some(),
                     "status details is missing data point {}",
                     point.id
                 );
@@ -1042,7 +1121,7 @@ mod tests {
 
         assert_eq!(
             connectors[0]
-                .execute_action("noop", Value::Null)
+                .execute_action("noop", None, Value::Null)
                 .await
                 .expect("noop should succeed")
                 .message,
@@ -1050,7 +1129,7 @@ mod tests {
         );
         assert_eq!(
             connectors[1]
-                .execute_action("nope", Value::Null)
+                .execute_action("nope", None, Value::Null)
                 .await
                 .expect_err("unknown action should fail"),
             ConnectorError::invalid_action("nope")
@@ -1101,6 +1180,7 @@ mod tests {
             value,
             json!({
                 "id": "restart",
+                "targetId": null,
                 "label": "Restart",
                 "description": "Restarts it.",
                 "paramsSchema": {},
@@ -1319,11 +1399,15 @@ mod tests {
     fn data_point_value_reads_the_keyed_details_object() {
         let status = ConnectorStatus::new(
             HealthState::Healthy,
-            json!({ "load": 12.5, "enabled": true }),
+            json!({ "": { "load": 12.5, "enabled": true }, "worker": { "load": 8 } }),
         );
         assert_eq!(status.data_point_value("load"), Some(&json!(12.5)));
         assert_eq!(status.data_point_value("enabled"), Some(&json!(true)));
         assert_eq!(status.data_point_value("missing"), None);
+        assert_eq!(
+            status.data_point_value_for(Some("worker"), "load"),
+            Some(&json!(8))
+        );
 
         // A `details` payload that is not an object breaks the contract; the
         // accessor reports "nothing there" rather than inventing a reading.

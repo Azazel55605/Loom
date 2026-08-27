@@ -2,7 +2,7 @@ import * as React from "react";
 import { useMutation, useQuery } from "@tanstack/react-query";
 import { AlertCircle, Loader2 } from "lucide-react";
 
-import { Alert, AlertDescription } from "@loom/ui-kit/components/ui/alert";
+import { Alert, AlertDescription, AlertTitle } from "@loom/ui-kit/components/ui/alert";
 import { Button } from "@loom/ui-kit/components/ui/button";
 import {
   Dialog,
@@ -22,6 +22,8 @@ import {
 } from "@loom/ui-kit/components/ui/select";
 import { Skeleton } from "@loom/ui-kit/components/ui/skeleton";
 import { PlacementBindingEditor } from "@loom/ui-kit/components/PlacementBindingEditor";
+import { SearchablePickerList } from "@loom/ui-kit/components/SearchablePickerList";
+import { SegmentedControl } from "@loom/ui-kit/components/SegmentedControl";
 import type {
   DashboardPlacement,
   DashboardPlacementGroup,
@@ -29,6 +31,8 @@ import type {
 } from "@loom/ui-kit/lib/api";
 import { useApiClient } from "@loom/ui-kit/lib/api-context";
 import { describeConnectorError } from "@loom/ui-kit/lib/connector-error";
+
+type PlacementMode = "server" | "target";
 
 /**
  * The next free row, given what is already placed.
@@ -58,11 +62,11 @@ function nextFreeRow(
 /**
  * Adds a connector to a dashboard.
  *
- * One dialog rather than a wizard: choosing the instance reveals its widgets
- * below, pre-filled from the connector's own `defaultLayout`, and both are
- * submitted together. The default layout is a *suggestion* — the whole editor
- * is live before anything is created, so a user who wants three of the six
- * widgets deletes three rows rather than placing the card and pruning it after.
+ * One dialog rather than a wizard. A host view reveals editable widgets,
+ * pre-filled from the connector's own `defaultLayout`. A sub-target-capable
+ * connector also offers one searchable target picker; target bindings are
+ * seeded by the backend's target-aware default layout when the placement is
+ * created.
  *
  * Size defaults to the connector's `metadata.minSize`, which is also the floor
  * the grid and the backend enforce, so a new card is never born too small to
@@ -86,6 +90,8 @@ export function AddPlacementDialog({
   const api = useApiClient();
   const [instanceId, setInstanceId] = React.useState<string | null>(null);
   const [bindings, setBindings] = React.useState<WidgetBinding[]>([]);
+  const [mode, setMode] = React.useState<PlacementMode>("server");
+  const [targetId, setTargetId] = React.useState<string | null>(null);
   // Which instance's default layout has already been copied in, so re-renders
   // do not overwrite edits but choosing a different connector does.
   const seededFor = React.useRef<string | null>(null);
@@ -102,10 +108,22 @@ export function AddPlacementDialog({
     enabled: open && instanceId !== null,
   });
 
+  const subTargets = useQuery({
+    queryKey: ["connector-instance-sub-targets", instanceId],
+    queryFn: ({ signal }) => api.getSubTargets(instanceId as string, signal),
+    enabled:
+      open &&
+      instanceId !== null &&
+      detail.data?.supportsSubTargets === true &&
+      mode === "target",
+  });
+
   React.useEffect(() => {
     if (detail.data === undefined) return;
     if (seededFor.current === detail.data.id) return;
     seededFor.current = detail.data.id;
+    setMode("server");
+    setTargetId(null);
     setBindings(detail.data.defaultLayout.bindings);
   }, [detail.data]);
 
@@ -124,15 +142,21 @@ export function AddPlacementDialog({
       const [width, height] = connector.metadata.minSize;
       return api.createDashboardPlacement(dashboardId, {
         connectorInstanceId: connector.id,
+        targetId: mode === "target" ? targetId : null,
         positionX: 0,
         positionY: nextFreeRow(existingPlacements, existingPlacementGroups),
         width,
         height,
-        widgetBindings: bindings,
+        // The detail endpoint publishes the host layout only. For a sub-target
+        // the backend already applies `default_layout_for(targetId)` whenever
+        // bindings are omitted, so it remains the one source of the initial
+        // container layout rather than a second preview contract being added.
+        ...(mode === "server" ? { widgetBindings: bindings } : {}),
       });
     },
     onSuccess: async () => {
       await onCreated();
+      reset();
       onOpenChange(false);
     },
   });
@@ -140,6 +164,8 @@ export function AddPlacementDialog({
   function reset() {
     setInstanceId(null);
     setBindings([]);
+    setMode("server");
+    setTargetId(null);
     seededFor.current = null;
     create.reset();
   }
@@ -156,20 +182,22 @@ export function AddPlacementDialog({
         <DialogHeader>
           <DialogTitle>Add a connector</DialogTitle>
           <DialogDescription>
-            Choose a connector instance and the widgets to show for it. You can rearrange and
-            resize the card afterwards.
+            Choose a connector instance and what the tile should show. You can rearrange and
+            resize it afterwards.
           </DialogDescription>
         </DialogHeader>
 
         <form
-          className="space-y-5"
+          className="flex flex-col gap-5"
           // Native validation bubbles are a browser-default control per
           // docs/UI_GUIDELINES.md, and they would pre-empt the backend's own
           // message about a binding or a size it refused.
           noValidate
           onSubmit={(event) => {
             event.preventDefault();
-            if (instanceId !== null) create.mutate();
+            if (instanceId !== null && (mode === "server" || targetId !== null)) {
+              create.mutate();
+            }
           }}
         >
           <div className="flex flex-col gap-1.5">
@@ -194,6 +222,10 @@ export function AddPlacementDialog({
                 disabled={create.isPending}
                 onValueChange={(next) => {
                   setInstanceId(next);
+                  setMode("server");
+                  setTargetId(null);
+                  setBindings([]);
+                  seededFor.current = null;
                   create.reset();
                 }}
               >
@@ -219,22 +251,83 @@ export function AddPlacementDialog({
               <AlertDescription>{describeConnectorError(detail.error)}</AlertDescription>
             </Alert>
           ) : (
-            <div className="space-y-3">
-              <div>
-                <h3 className="text-sm font-medium">Widgets</h3>
-                <p className="text-xs text-muted-foreground">
-                  Pre-filled from what {detail.data.metadata.name} suggests. The card starts at{" "}
-                  {detail.data.metadata.minSize[0]}×{detail.data.metadata.minSize[1]} grid units,
-                  its smallest readable size.
-                </p>
-              </div>
-              <PlacementBindingEditor
-                dataPoints={detail.data.dataPoints}
-                actions={detail.data.actions}
-                value={bindings}
-                onChange={setBindings}
-                disabled={create.isPending}
-              />
+            <div className="flex flex-col gap-4">
+              {detail.data.supportsSubTargets ? (
+                <div className="flex flex-col gap-2">
+                  <Label>View</Label>
+                  <SegmentedControl
+                    label="Placement view"
+                    value={mode}
+                    options={[
+                      { value: "server", label: "Server info" },
+                      { value: "target", label: "Single container" },
+                    ]}
+                    onChange={(next) => {
+                      setMode(next);
+                      setTargetId(null);
+                      create.reset();
+                    }}
+                  />
+                </div>
+              ) : null}
+
+              {mode === "target" && detail.data.supportsSubTargets ? (
+                <div className="flex min-h-0 flex-col gap-3">
+                  <div>
+                    <h3 className="text-sm font-medium">Container</h3>
+                    <p className="text-xs text-muted-foreground">
+                      Choose one container on {detail.data.metadata.name}. Its recommended
+                      container widgets will be added automatically.
+                    </p>
+                  </div>
+                  {subTargets.isPending ? (
+                    <div className="flex flex-col gap-2" aria-label="Loading containers">
+                      <Skeleton className="h-9 w-full" />
+                      <Skeleton className="h-9 w-full" />
+                      <Skeleton className="h-9 w-3/4" />
+                    </div>
+                  ) : subTargets.isError ? (
+                    <Alert variant="destructive">
+                      <AlertCircle aria-hidden="true" />
+                      <AlertTitle>Could not load containers</AlertTitle>
+                      <AlertDescription>
+                        {describeConnectorError(subTargets.error)}
+                      </AlertDescription>
+                    </Alert>
+                  ) : (
+                    <SearchablePickerList
+                      options={subTargets.data}
+                      searchLabel="Search containers"
+                      emptyMessage="No containers found"
+                      selectedId={targetId}
+                      disabled={create.isPending}
+                      onSelect={(next) => {
+                        setTargetId(next);
+                        create.reset();
+                      }}
+                    />
+                  )}
+                </div>
+              ) : (
+                <>
+                  <div>
+                    <h3 className="text-sm font-medium">Widgets</h3>
+                    <p className="text-xs text-muted-foreground">
+                      Pre-filled from what {detail.data.metadata.name} suggests. The card starts
+                      at {detail.data.metadata.minSize[0]}×{detail.data.metadata.minSize[1]} grid
+                      units, its smallest readable size.
+                    </p>
+                  </div>
+                  <PlacementBindingEditor
+                    dataPoints={detail.data.dataPoints}
+                    actions={detail.data.actions}
+                    targetId={null}
+                    value={bindings}
+                    onChange={setBindings}
+                    disabled={create.isPending}
+                  />
+                </>
+              )}
             </div>
           )}
 
@@ -250,11 +343,22 @@ export function AddPlacementDialog({
               type="button"
               variant="outline"
               disabled={create.isPending}
-              onClick={() => onOpenChange(false)}
+              onClick={() => {
+                reset();
+                onOpenChange(false);
+              }}
             >
               Cancel
             </Button>
-            <Button type="submit" disabled={instanceId === null || create.isPending}>
+            <Button
+              type="submit"
+              disabled={
+                instanceId === null ||
+                detail.data === undefined ||
+                create.isPending ||
+                (mode === "target" && targetId === null)
+              }
+            >
               {create.isPending && <Loader2 className="animate-spin" aria-hidden="true" />}
               Add to dashboard
             </Button>

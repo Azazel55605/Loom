@@ -45,6 +45,16 @@ hand-written `cargo` commands.
 Every real connector is its own crate, and adding one adds a row here — see
 [`adr/0017`](./adr/0017-connector-crates-and-async-factories.md).
 
+### Docker sub-target migration note
+
+The Docker connector now models one daemon connection as one connector
+instance, with containers selected as placement sub-targets. There is no
+automatic migration from pre-release per-container `docker-container` or
+container-mode `docker` instances. Delete and recreate those instances and
+their placements against one host-level `docker` instance. A stale
+`containerName` key in stored configuration is ignored safely while the row is
+being recreated; it does not select a container under the new model.
+
 ### `pnpm build` builds frontend apps and shared packages only
 
 ```sh

@@ -10,6 +10,7 @@ import {
   PopoverTrigger,
 } from "@loom/ui-kit/components/ui/popover";
 import { Skeleton } from "@loom/ui-kit/components/ui/skeleton";
+import { SearchablePickerList } from "@loom/ui-kit/components/SearchablePickerList";
 import { describeAdminFailure } from "@loom/ui-kit/lib/admin-error";
 import type { DiscoveredResource } from "@loom/ui-kit/lib/api";
 
@@ -42,19 +43,10 @@ export function DiscoveryFieldPicker({
   ariaDescribedBy?: string;
 }) {
   const [open, setOpen] = React.useState(false);
-  const [query, setQuery] = React.useState("");
   const [resources, setResources] = React.useState<DiscoveredResource[]>([]);
   const [failure, setFailure] = React.useState<string | null>(null);
   const [isLoading, setIsLoading] = React.useState(false);
   const requestId = React.useRef(0);
-
-  const filteredResources = React.useMemo(() => {
-    const needle = query.trim().toLocaleLowerCase();
-    if (needle === "") return resources;
-    return resources.filter((resource) =>
-      resource.suggestedName.toLocaleLowerCase().includes(needle),
-    );
-  }, [query, resources]);
 
   async function loadResources() {
     const currentRequest = requestId.current + 1;
@@ -81,7 +73,6 @@ export function DiscoveryFieldPicker({
       requestId.current += 1;
       return;
     }
-    setQuery("");
     void loadResources();
   }
 
@@ -115,13 +106,6 @@ export function DiscoveryFieldPicker({
         align="end"
         className="flex max-h-[min(24rem,var(--radix-popover-content-available-height))] w-[min(24rem,var(--radix-popover-content-available-width))] flex-col gap-3"
       >
-        <Input
-          aria-label={`Search ${fieldName}`}
-          placeholder="Search options"
-          value={query}
-          onChange={(event) => setQuery(event.target.value)}
-        />
-
         {failure !== null ? (
           <Alert variant="destructive">
             <AlertCircle aria-hidden="true" />
@@ -134,25 +118,20 @@ export function DiscoveryFieldPicker({
             <Skeleton className="h-9 w-full" />
             <Skeleton className="h-9 w-3/4" />
           </div>
-        ) : filteredResources.length === 0 ? (
-          <p className="py-3 text-center text-sm text-muted-foreground">No options found</p>
         ) : (
-          <div className="flex min-h-0 flex-col gap-1 overflow-y-auto">
-            {filteredResources.map((resource, index) => (
-              <Button
-                key={`${resource.suggestedName}:${index}`}
-                type="button"
-                variant="ghost"
-                className="h-auto justify-start whitespace-normal text-left"
-                onClick={() => {
-                  onSelect(resource.targetFieldValue);
-                  setOpen(false);
-                }}
-              >
-                {resource.suggestedName}
-              </Button>
-            ))}
-          </div>
+          <SearchablePickerList
+            options={resources.map((resource, index) => ({
+              id: String(index),
+              label: resource.suggestedName,
+            }))}
+            searchLabel={`Search ${fieldName}`}
+            onSelect={(id) => {
+              const resource = resources[Number(id)];
+              if (resource === undefined) return;
+              onSelect(resource.targetFieldValue);
+              setOpen(false);
+            }}
+          />
         )}
       </PopoverContent>
     </Popover>

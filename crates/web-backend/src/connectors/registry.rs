@@ -121,8 +121,8 @@ pub fn builtin_registry() -> ConnectorTypeRegistry {
             display_name: loom_connector_docker::DISPLAY_NAME,
             icon: Some(loom_connector_docker::ICON.to_owned()),
             // This factory really does await: it opens the endpoint and
-            // pings the host and, in container mode, inspects the container, so
-            // the two validation failures remain distinct and actionable.
+            // pings the host, so an invalid config and an unreachable endpoint
+            // remain distinct and actionable failures.
             factory: |config| {
                 Box::pin(async move {
                     DockerConnector::from_config_value(config)
@@ -131,13 +131,11 @@ pub fn builtin_registry() -> ConnectorTypeRegistry {
                 })
             },
             schema: loom_connector_docker::config_schema(),
-            // Discovery capability depends on the candidate configuration:
-            // host mode supports it and container mode does not. The dynamic
-            // value is therefore returned by the discovery endpoints rather
-            // than advertised as one unconditional type-level value here.
+            // Containers are addressable sub-targets of this one connection,
+            // not proposals for separate connector instances.
             setup_guide: None,
             discoverable_type: None,
-            discovery_target_field: Some("containerName".to_owned()),
+            discovery_target_field: None,
         },
     );
 
@@ -201,16 +199,15 @@ mod tests {
         assert_eq!(registration.type_id, "docker");
         assert_eq!(registration.icon.as_deref(), Some("brand:docker"));
         assert!(registration.schema["properties"]["dockerHost"].is_object());
-        assert!(registration.schema["properties"]["containerName"].is_object());
+        assert!(registration.schema["properties"]
+            .get("containerName")
+            .is_none());
 
         // Setup remains absent. Discovery is configuration-dependent, so the
         // static catalog does not claim it unconditionally.
         assert!(registration.setup_guide.is_none());
         assert!(registration.discoverable_type.is_none());
-        assert_eq!(
-            registration.discovery_target_field.as_deref(),
-            Some("containerName")
-        );
+        assert!(registration.discovery_target_field.is_none());
     }
 
     #[tokio::test]
@@ -290,7 +287,7 @@ mod tests {
             .factory;
 
         // Loopback port 1 is reserved and has no daemon. If the factory still
-        // treated containerName as required this would be InvalidConfig
+        // treated stale containerName as an error this would be InvalidConfig
         // instead of the reachability failure host mode must report.
         let error = factory(json!({ "dockerHost": "tcp://127.0.0.1:1" }))
             .await

@@ -13,6 +13,7 @@ import {
 } from "@loom/ui-kit/components/ui/select";
 import { SegmentedControl } from "@loom/ui-kit/components/SegmentedControl";
 import { cn } from "@loom/ui-kit/lib/utils";
+import { matchesTarget } from "@loom/ui-kit/lib/connector-details";
 import type {
   ActionWidgetType,
   ChartType,
@@ -75,6 +76,7 @@ function numberField(config: Record<string, unknown>, key: string): string {
 export function PlacementBindingEditor({
   dataPoints,
   actions,
+  targetId,
   value,
   onChange,
   disabled,
@@ -82,11 +84,15 @@ export function PlacementBindingEditor({
 }: {
   dataPoints: DataPointDescriptor[];
   actions: ConnectorAction[];
+  /** The placement view whose descriptors may be bound. */
+  targetId: string | null;
   value: WidgetBinding[];
   onChange: (next: WidgetBinding[]) => void;
   disabled?: boolean;
   className?: string;
 }) {
+  const availableDataPoints = dataPoints.filter((point) => matchesTarget(point, targetId));
+  const availableActions = actions.filter((action) => matchesTarget(action, targetId));
   // Stable identity per row, so removing one does not shift every row below it
   // onto a different React key. Radix `Select` keeps internal state keyed by
   // component identity, and a reused instance whose controlled value is no
@@ -110,8 +116,8 @@ export function PlacementBindingEditor({
   }
 
   function addBinding() {
-    if (dataPoints.length > 0) {
-      const point = dataPoints[0];
+    if (availableDataPoints.length > 0) {
+      const point = availableDataPoints[0];
       const [widget] = getCompatibleWidgetTypes(point.valueType);
       onChange([
         ...value,
@@ -125,8 +131,8 @@ export function PlacementBindingEditor({
       ]);
       return;
     }
-    if (actions.length > 0) {
-      const action = actions[0];
+    if (availableActions.length > 0) {
+      const action = availableActions[0];
       onChange([
         ...value,
         {
@@ -140,7 +146,7 @@ export function PlacementBindingEditor({
     }
   }
 
-  const canAdd = dataPoints.length > 0 || actions.length > 0;
+  const canAdd = availableDataPoints.length > 0 || availableActions.length > 0;
 
   return (
     <div className={cn("flex flex-col gap-3", className)}>
@@ -155,8 +161,8 @@ export function PlacementBindingEditor({
             <li key={rowKeys.current[index]} className="surface-panel rounded-lg border p-3">
               <BindingRow
                 binding={binding}
-                dataPoints={dataPoints}
-                actions={actions}
+                dataPoints={availableDataPoints}
+                actions={availableActions}
                 disabled={disabled}
                 idPrefix={`binding-${index}`}
                 onChange={(next) => replace(index, next)}

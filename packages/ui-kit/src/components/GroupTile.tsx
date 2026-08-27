@@ -157,7 +157,13 @@ export function GroupTile({
             <div className="min-w-0">
               <CardTitle className="truncate text-sm">{group.name}</CardTitle>
               <p className="truncate text-xs text-muted-foreground">
-                {group.members.map((member) => member.connector.name).join(" · ")}
+                {group.members
+                  .map((member) =>
+                    member.targetId === null
+                      ? member.connector.name
+                      : `${member.connector.name} · ${member.targetId}`,
+                  )
+                  .join(" · ")}
               </p>
             </div>
           </div>
