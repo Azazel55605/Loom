@@ -480,7 +480,7 @@ The asymmetry is deliberate and load-bearing:
 
 | Route | Permission | Scope checked |
 | --- | --- | --- |
-| `GET /connector-types` | `connectors.manage` | global |
+| `GET /connector-types`, `POST /connector-types/{typeId}/discover`, `POST /connector-types/{typeId}/test-connection` | `connectors.manage` | global |
 | `GET /connector-instances`, `GET /connector-instances/tags`, `GET /connector-instances/{id}` | `connectors.view` | global |
 | `POST /connector-instances`, `PATCH /connector-instances/{id}`, `DELETE /connector-instances/{id}` | `connectors.manage` | global |
 | `POST /connector-instances/{id}/actions/{actionId}` | `connectors.control` | `connector` / `{id}` |
@@ -716,8 +716,52 @@ the instances they may see are on `/connector-instances`, which asks only for
       "additionalProperties": false
     },
     "setupGuide": {
-      "description": "No real setup required — this is an internal test fixture.",
-      "template": "# Debug connector\nFixture label: {{label}}"
+      "variants": [
+        {
+          "id": "simple",
+          "label": "Simple",
+          "description": "Uses the live connection test for capability detail.",
+          "template": "No setup needed — this is an internal test fixture.",
+          "toggles": [],
+          "capabilityRequirements": []
+        },
+        {
+          "id": "configurable",
+          "label": "Configurable",
+          "description": "Exercises UI-only setup toggles and declarative capabilities.",
+          "template": "Debug setup for {{label}}\nLOOM_DEBUG_WIDGETS={{LOOM_DEBUG_WIDGETS}}\nLOOM_DEBUG_ACTIONS={{LOOM_DEBUG_ACTIONS}}",
+          "toggles": [
+            {
+              "key": "enableWidgets",
+              "envVar": "LOOM_DEBUG_WIDGETS",
+              "label": "Enable widgets",
+              "description": "Includes read-only widget support in the example setup.",
+              "default": true,
+              "recommended": true
+            },
+            {
+              "key": "enableActions",
+              "envVar": "LOOM_DEBUG_ACTIONS",
+              "label": "Enable actions",
+              "description": "Includes mutating action support in the example setup.",
+              "default": false,
+              "recommended": false
+            }
+          ],
+          "capabilityRequirements": [
+            {
+              "capabilityKey": "view-widgets",
+              "label": "View widgets",
+              "requiredToggleKeys": ["enableWidgets"]
+            },
+            {
+              "capabilityKey": "perform-actions",
+              "label": "Perform actions",
+              "requiredToggleKeys": ["enableActions"]
+            }
+          ]
+        }
+      ]
     },
     "discoverableType": "debug",
     "discoveryTargetField": null
@@ -741,7 +785,40 @@ the instances they may see are on `/connector-instances`, which asks only for
       "required": ["dockerHost"],
       "additionalProperties": false
     },
-    "setupGuide": null,
+    "setupGuide": {
+      "variants": [
+        {
+          "id": "socket",
+          "label": "Direct socket",
+          "description": "Same-host raw socket access; root-equivalent Docker authority.",
+          "template": "services:\n  web-backend:\n    volumes:\n      - /var/run/docker.sock:/var/run/docker.sock\n\ndockerHost: {{dockerHost}}",
+          "toggles": [],
+          "capabilityRequirements": []
+        },
+        {
+          "id": "proxy",
+          "label": "Via socket proxy",
+          "description": "Network-isolated docker-socket-proxy setup with an upstream security caveat.",
+          "template": "services:\n  docker-socket-proxy:\n    image: ghcr.io/tecnativa/docker-socket-proxy:<reviewed-tag>\n    environment:\n      PING: \"{{PING}}\"\n      VERSION: \"{{VERSION}}\"\n      CONTAINERS: \"{{CONTAINERS}}\"\n      POST: \"{{POST}}\"\n      ALLOW_RESTARTS: \"{{ALLOW_RESTARTS}}\"\n      INFO: \"{{INFO}}\"\n      SYSTEM: \"{{SYSTEM}}\"\n    networks: [loom-docker-api]\n\ndockerHost: tcp://docker-socket-proxy:2375",
+          "toggles": [
+            { "key": "ping", "envVar": "PING", "label": "Allow ping", "description": "Reachability check.", "default": true, "recommended": true },
+            { "key": "version", "envVar": "VERSION", "label": "Allow version", "description": "Version check and host-summary version.", "default": true, "recommended": true },
+            { "key": "containers", "envVar": "CONTAINERS", "label": "Allow container access", "description": "Listing, inspect, stats, and logs.", "default": true, "recommended": true },
+            { "key": "post", "envVar": "POST", "label": "Allow container actions", "description": "Container lifecycle POST calls.", "default": true, "recommended": true },
+            { "key": "allowRestarts", "envVar": "ALLOW_RESTARTS", "label": "Allow restarts", "description": "Visible upstream flag; not an effective extra boundary with POST plus CONTAINERS in the current rules.", "default": false, "recommended": false },
+            { "key": "info", "envVar": "INFO", "label": "Allow host information", "description": "Host container and image totals.", "default": false, "recommended": false },
+            { "key": "system", "envVar": "SYSTEM", "label": "Allow disk-usage information", "description": "Docker disk usage from /system/df.", "default": false, "recommended": false }
+          ],
+          "capabilityRequirements": [
+            { "capabilityKey": "list-containers", "label": "List containers", "requiredToggleKeys": ["containers"] },
+            { "capabilityKey": "read-logs", "label": "Read container logs", "requiredToggleKeys": ["containers"] },
+            { "capabilityKey": "start-stop-containers", "label": "Start, stop, pause, and resume containers", "requiredToggleKeys": ["containers", "post"] },
+            { "capabilityKey": "restart-containers", "label": "Restart containers", "requiredToggleKeys": ["containers", "post"] },
+            { "capabilityKey": "host-summary", "label": "View host summary", "requiredToggleKeys": ["info", "system", "version"] }
+          ]
+        }
+      ]
+    },
     "discoverableType": null,
     "discoveryTargetField": null
   }
@@ -754,7 +831,7 @@ the instances they may see are on `/connector-instances`, which asks only for
 | `displayName` | string | Human-facing name for the type picker. | Always present. |
 | `icon` | string | The type's icon reference, in the same convention as [`ConnectorMetadata.icon`](#connectormetadata). Carried here so the type picker can draw an icon *before* any instance of the type exists. | **`null`** when the type declares none. |
 | `configSchema` | object | JSON Schema for this type's configuration, published by the connector itself. | Always present; an object, never `null`. A type needing no configuration returns an empty schema object. |
-| `setupGuide` | object | Descriptive client-rendered help: `{ description, template }`. See [Discovery & Setup Guides](#discovery--setup-guides). | **`null`** when the type publishes no guide. |
+| `setupGuide` | object | Descriptive client-rendered setup paths: `{ variants: SetupGuideVariant[] }`. See [Discovery & Setup Guides](#discovery--setup-guides). | **`null`** when the type publishes no guide. |
 | `discoverableType` | string | Type id this connector can discover through a configured live instance. | **`null`** when discovery is unsupported. |
 | `discoveryTargetField` | string | Candidate configuration field populated by a type-scoped discovery result's `targetFieldValue`. Clients use it to attach generic discovery assistance to the matching schema field. | **`null`** when discovery does not target one field. |
 
@@ -795,6 +872,29 @@ sub-target endpoint has target-scoped `status`, `cpuPercent`, `cpuHistory`,
 restart/pause/unpause actions. Stored configuration containing a stale
 `containerName` property remains loadable: the parser ignores that unused key,
 but the schema no longer offers it for new instances.
+
+#### Docker socket-proxy mapping and security status
+
+The Docker setup guide is derived from Tecnativa's current
+[`Dockerfile`](https://github.com/Tecnativa/docker-socket-proxy/blob/master/Dockerfile),
+[`haproxy.cfg`](https://github.com/Tecnativa/docker-socket-proxy/blob/master/haproxy.cfg),
+and [README](https://github.com/Tecnativa/docker-socket-proxy/blob/master/README.md).
+The upstream defaults are `PING=1`, `VERSION=1`, and `EVENTS=1`; the Loom-relevant
+`CONTAINERS`, `POST`, `ALLOW_RESTARTS`, `INFO`, and `SYSTEM` gates default to
+`0`. Loom does not call `/images`: image totals come from `/info` (`INFO`) and
+disk usage comes from `/system/df` (`SYSTEM`). Container listing, inspect,
+stats, and logs all fall under the broad `CONTAINERS` path gate.
+
+As verified on 2026-08-28, the supplied `CVE-2026-78122` identifier has no
+public CVE/NVD record that could be corroborated. The underlying disclosure is
+nevertheless concrete: upstream [issue #182](https://github.com/Tecnativa/docker-socket-proxy/issues/182)
+documents that `CONTAINERS=1` also permits GET-based archive/export/log/process
+access. The proposed granular fix is still an open
+[pull request #183](https://github.com/Tecnativa/docker-socket-proxy/pull/183),
+and the latest tagged [v0.5.0 release](https://github.com/Tecnativa/docker-socket-proxy/releases/tag/v0.5.0)
+predates the report, so there is no verified patched release to recommend yet.
+The guide therefore states the caveat prominently and keeps the proxy on an
+internal Compose network with no published host port.
 
 ### `GET /connector-instances`
 
@@ -1034,15 +1134,28 @@ Discovery has two complementary entry points. Instance-scoped discovery runs
 through an already-configured live connector and is useful for bulk proposals.
 Type-scoped discovery constructs and immediately discards a connector from a
 candidate configuration, allowing setup forms to discover one field before an
-instance exists. Setup guides remain type-scoped descriptive content returned
-by `GET /connector-types`; they do not execute code in Core.
+instance exists. Setup guides and connection tests are also type-scoped:
+guides describe independent setup paths, while a test constructs a candidate
+connector and asks it for live reachability and capability detail. Neither
+operation persists an instance.
 
-### Setup guide template substitution
+### Setup guide variants, toggles, and template substitution
 
-`setupGuide.template` is text containing zero or more literal
-`{{fieldName}}` placeholders. `fieldName` must be the exact camelCase property
-name from that type's `configSchema.properties`. Clients substitute the current
-form value when rendering the guide. Substitution is entirely client-side:
+Each `setupGuide.variants` element is an independent way to prepare the service.
+A variant contains an id, label, description, plain-text template, optional
+UI-only toggles, and declarative capability requirements. Toggle values never
+enter the submitted connector configuration and are never persisted. They only
+affect live template rendering and declarative capability availability.
+
+Each capability requirement lists `requiredToggleKeys`. The v1 rule is
+deliberately **AND-only**: every listed toggle must be enabled for that
+capability to be available. There is no OR expression model until a real
+connector demonstrates the need for one.
+
+`variant.template` may contain literal `{{fieldName}}` placeholders for the
+exact camelCase property name from that type's `configSchema.properties`, or
+`{{toggleKey}}` placeholders matching the selected variant's toggles. Clients
+substitute current form and toggle values. Substitution is entirely client-side:
 Core and the backend neither interpret templates nor persist rendered output.
 
 For example, `{{label}}` refers to the debug schema's editable `label`
@@ -1114,6 +1227,76 @@ above instead.
 | --- | --- |
 | 200 | Candidate discovery completed; `resources` may be empty. |
 | 400 | Unknown type, factory validation failed (including an unreachable host), or discovery is unsupported for this candidate configuration. |
+| 403 | The caller lacks a global `connectors.manage` grant. |
+
+### `POST /connector-types/{typeId}/test-connection`
+
+Requires a global `connectors.manage` grant. The JSON request body is a
+candidate connector configuration, with the same shape accepted by that
+connector type's factory.
+
+The backend constructs a throwaway connector, calls `test_connection()` once,
+returns its reachability and capability report, then discards it. It never
+inserts a `connector_instances` row or adds the candidate to the runtime map.
+The check is distinct from the recurring full `status()` poll and must not
+probe destructive/write capabilities by performing them.
+
+A type may publish a dedicated no-I/O constructor for this endpoint when its
+ordinary instance factory validates a broader feature first. Docker uses that
+path so a proxy that answers ping/version but denies `CONTAINERS`, `INFO`, or
+`SYSTEM` still returns a useful 200 capability report instead of failing during
+construction. Ordinary instance creation continues through the validating
+factory unchanged.
+
+**Request:**
+
+```json
+{
+  "label": "candidate",
+  "enabled": false
+}
+```
+
+**Response 200:**
+
+```json
+{
+  "reachable": true,
+  "capabilities": [
+    {
+      "key": "read-status",
+      "label": "Read status",
+      "available": true,
+      "note": null
+    },
+    {
+      "key": "view-widgets",
+      "label": "View widgets",
+      "available": true,
+      "note": null
+    },
+    {
+      "key": "perform-actions",
+      "label": "Perform actions",
+      "available": false,
+      "note": "Unavailable while the debug fixture's enabled flag is off."
+    }
+  ],
+  "message": null
+}
+```
+
+Connectors that do not override `test_connection()` receive the default check:
+`status()` maps Healthy and Degraded to `reachable: true`, Down, Unknown, or an
+error to `reachable: false`, and `capabilities` remains empty. A connector
+override may publish finer-grained rows. Declarative toggle requirements and
+live capability rows use the same stable capability keys but are distinct
+mechanisms.
+
+| Status | Meaning |
+| --- | --- |
+| 200 | Candidate connection test completed, whether reachable or not. |
+| 400 | Unknown type or the connector factory rejected the candidate configuration. |
 | 403 | The caller lacks a global `connectors.manage` grant. |
 
 ### `POST /connector-instances`

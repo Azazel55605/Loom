@@ -1,50 +1,12 @@
-import { Clipboard } from "lucide-react";
-import { toast } from "sonner";
-
-import { Button } from "@loom/ui-kit/components/ui/button";
 import {
   Card,
   CardContent,
-  CardDescription,
-  CardFooter,
   CardHeader,
   CardTitle,
 } from "@loom/ui-kit/components/ui/card";
+import { SetupGuideVariantPanel } from "@loom/ui-kit/components/SetupGuideVariantPanel";
+import { Tabs, TabsContent, TabsList, TabsTrigger } from "@loom/ui-kit/components/ui/tabs";
 import type { SetupGuide } from "@loom/ui-kit/lib/api";
-
-const PLACEHOLDER = /\{\{([A-Za-z0-9_.-]+)\}\}/g;
-
-function valueAtPath(values: Record<string, unknown>, path: string): unknown {
-  let current: unknown = values;
-  for (const segment of path.split(".")) {
-    if (typeof current !== "object" || current === null) return undefined;
-    current = (current as Record<string, unknown>)[segment];
-  }
-  return current;
-}
-
-function templateValue(value: unknown, fieldName: string): string {
-  if (value === undefined || value === null || value === "") return `<${fieldName}>`;
-  if (typeof value === "string" || typeof value === "number" || typeof value === "boolean") {
-    return String(value);
-  }
-
-  try {
-    return JSON.stringify(value);
-  } catch {
-    return String(value);
-  }
-}
-
-/** Applies the setup-guide placeholder contract without mutating form values. */
-export function renderSetupGuideTemplate(
-  template: string,
-  formValues: Record<string, unknown>,
-): string {
-  return template.replace(PLACEHOLDER, (_placeholder, fieldName: string) =>
-    templateValue(valueAtPath(formValues, fieldName), fieldName),
-  );
-}
 
 /**
  * Type-provided setup instructions with live values from the generated form.
@@ -53,39 +15,46 @@ export function renderSetupGuideTemplate(
  */
 export function SetupGuidePanel({
   guide,
+  typeId,
   formValues,
 }: {
   guide: SetupGuide;
+  typeId: string;
   formValues: Record<string, unknown>;
 }) {
-  const rendered = renderSetupGuideTemplate(guide.template, formValues);
-
-  async function copy() {
-    try {
-      await navigator.clipboard.writeText(rendered);
-      toast.success("Setup guide copied.");
-    } catch {
-      toast.error("Could not copy the setup guide.");
-    }
-  }
+  const initialVariant = guide.variants[0];
+  if (initialVariant === undefined) return null;
 
   return (
     <Card className="surface-panel h-fit">
-      <CardHeader className="gap-1 p-4">
+      <CardHeader className="p-4 pb-0">
         <CardTitle className="text-base">Setup guide</CardTitle>
-        <CardDescription>{guide.description}</CardDescription>
       </CardHeader>
-      <CardContent className="px-4 pb-4">
-        <pre className="max-h-72 overflow-auto whitespace-pre-wrap break-words rounded-md border bg-muted/40 p-3 text-xs">
-          <code>{rendered}</code>
-        </pre>
+      <CardContent className="p-4">
+        <Tabs defaultValue={initialVariant.id}>
+          <TabsList className="h-auto w-full justify-start overflow-x-auto">
+            {guide.variants.map((variant) => (
+              <TabsTrigger key={variant.id} value={variant.id} className="min-h-11 flex-1">
+                {variant.label}
+              </TabsTrigger>
+            ))}
+          </TabsList>
+          {guide.variants.map((variant) => (
+            <TabsContent
+              key={variant.id}
+              value={variant.id}
+              forceMount
+              className="data-[state=inactive]:hidden"
+            >
+              <SetupGuideVariantPanel
+                variant={variant}
+                typeId={typeId}
+                formValues={formValues}
+              />
+            </TabsContent>
+          ))}
+        </Tabs>
       </CardContent>
-      <CardFooter className="justify-end px-4 pb-4">
-        <Button type="button" variant="outline" size="sm" onClick={() => void copy()}>
-          <Clipboard data-icon="inline-start" aria-hidden="true" />
-          Copy
-        </Button>
-      </CardFooter>
     </Card>
   );
 }

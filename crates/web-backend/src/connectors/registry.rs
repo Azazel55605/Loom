@@ -54,6 +54,12 @@ pub struct ConnectorTypeRegistration {
     pub icon: Option<String>,
     /// Turns stored configuration into a live connector.
     pub factory: ConnectorFactory,
+    /// Optional constructor for the ephemeral setup connection check.
+    ///
+    /// Most connectors validate and test through the same factory. A connector
+    /// whose ordinary factory requires more permission than its capability
+    /// check is trying to measure can provide a no-I/O constructor here.
+    pub connection_test_factory: Option<ConnectorFactory>,
     /// The configuration this type accepts, as JSON Schema.
     pub schema: Value,
     /// Optional descriptive setup content published with the schema.
@@ -101,6 +107,7 @@ pub fn builtin_registry() -> ConnectorTypeRegistry {
                         .map(|connector| Box::new(connector) as Box<dyn Connector>)
                 })
             },
+            connection_test_factory: None,
             schema: debug.config_schema(),
             setup_guide: debug.setup_guide(),
             discoverable_type: debug.discoverable_type(),
@@ -130,10 +137,16 @@ pub fn builtin_registry() -> ConnectorTypeRegistry {
                         .map(|connector| Box::new(connector) as Box<dyn Connector>)
                 })
             },
+            connection_test_factory: Some(|config| {
+                Box::pin(async move {
+                    DockerConnector::from_config_value_for_connection_test(config)
+                        .map(|connector| Box::new(connector) as Box<dyn Connector>)
+                })
+            }),
             schema: loom_connector_docker::config_schema(),
             // Containers are addressable sub-targets of this one connection,
             // not proposals for separate connector instances.
-            setup_guide: None,
+            setup_guide: Some(loom_connector_docker::setup_guide()),
             discoverable_type: None,
             discovery_target_field: None,
         },
@@ -203,9 +216,14 @@ mod tests {
             .get("containerName")
             .is_none());
 
-        // Setup remains absent. Discovery is configuration-dependent, so the
-        // static catalog does not claim it unconditionally.
-        assert!(registration.setup_guide.is_none());
+        let guide = registration.setup_guide.as_ref().expect("setup guide");
+        assert_eq!(guide.variants.len(), 2);
+        assert_eq!(guide.variants[0].id, "socket");
+        assert_eq!(guide.variants[1].id, "proxy");
+        assert!(registration.connection_test_factory.is_some());
+
+        // Discovery is configuration-dependent, so the static catalog does
+        // not claim it unconditionally.
         assert!(registration.discoverable_type.is_none());
         assert!(registration.discovery_target_field.is_none());
     }
@@ -245,7 +263,8 @@ mod tests {
         );
         assert_eq!(registration.discovery_target_field, None);
         let guide = registration.setup_guide.as_ref().expect("setup guide");
-        assert!(guide.template.contains("{{label}}"));
+        assert_eq!(guide.variants.len(), 2);
+        assert!(guide.variants[1].template.contains("{{label}}"));
     }
 
     #[test]

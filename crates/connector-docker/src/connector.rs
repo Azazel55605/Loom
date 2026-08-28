@@ -15,10 +15,11 @@ use bollard::Docker;
 use chrono::{DateTime, Utc};
 use futures_util::{stream, StreamExt};
 use loom_core::connector::{
-    details::set_detail, ActionResult, ActionWidgetType, ChartType, Connector, ConnectorAction,
-    ConnectorError, ConnectorMetadata, ConnectorStatus, DataPointDescriptor, DataPointValueType,
-    DisplayField, DisplayWidgetType, HealthState, NetworkTarget, SubTarget, WidgetBinding,
-    WidgetLayout,
+    details::set_detail, ActionResult, ActionWidgetType, CapabilityRequirement, CapabilityStatus,
+    ChartType, ConnectionTestResult, Connector, ConnectorAction, ConnectorError, ConnectorMetadata,
+    ConnectorStatus, DataPointDescriptor, DataPointValueType, DisplayField, DisplayWidgetType,
+    HealthState, NetworkTarget, SetupGuide, SetupGuideToggle, SetupGuideVariant, SubTarget,
+    WidgetBinding, WidgetLayout,
 };
 use serde::Serialize;
 use serde_json::{json, Map, Value};
@@ -65,6 +66,156 @@ pub const ACTION_STOP: &str = "stop";
 pub const ACTION_RESTART: &str = "restart";
 pub const ACTION_PAUSE: &str = "pause";
 pub const ACTION_UNPAUSE: &str = "unpause";
+
+const CAPABILITY_LIST_CONTAINERS: &str = "list-containers";
+const CAPABILITY_READ_LOGS: &str = "read-logs";
+const CAPABILITY_START_STOP: &str = "start-stop-containers";
+const CAPABILITY_RESTART: &str = "restart-containers";
+const CAPABILITY_HOST_SUMMARY: &str = "host-summary";
+
+fn setup_toggle(
+    key: &str,
+    env_var: &str,
+    label: &str,
+    description: &str,
+    default: bool,
+    recommended: bool,
+) -> SetupGuideToggle {
+    SetupGuideToggle {
+        key: key.to_owned(),
+        env_var: env_var.to_owned(),
+        label: label.to_owned(),
+        description: description.to_owned(),
+        default,
+        recommended,
+    }
+}
+
+fn capability_requirement(
+    key: &str,
+    label: &str,
+    required_toggle_keys: &[&str],
+) -> CapabilityRequirement {
+    CapabilityRequirement {
+        capability_key: key.to_owned(),
+        label: label.to_owned(),
+        required_toggle_keys: required_toggle_keys
+            .iter()
+            .map(|key| (*key).to_owned())
+            .collect(),
+    }
+}
+
+/// Type-level setup paths; available before a Docker endpoint can be reached.
+pub fn setup_guide() -> SetupGuide {
+    SetupGuide {
+        variants: vec![
+            SetupGuideVariant {
+                id: "socket".to_owned(),
+                label: "Direct socket".to_owned(),
+                description: "Use this only when Loom's web-backend runs on the same machine as the Docker daemon. Mounting the Docker socket grants that backend full, unrestricted, effectively root-equivalent control of the host. Adding :ro to the bind mount does not restrict Docker API calls, so this example does not imply that it does."
+                    .to_owned(),
+                template: "services:\n  web-backend:\n    volumes:\n      - /var/run/docker.sock:/var/run/docker.sock\n\n# Enter this in Loom (default):\ndockerHost: {{dockerHost}}\n# Expected default value: unix:///var/run/docker.sock"
+                    .to_owned(),
+                toggles: Vec::new(),
+                capability_requirements: Vec::new(),
+            },
+            SetupGuideVariant {
+                id: "proxy".to_owned(),
+                label: "Via socket proxy".to_owned(),
+                description: "Recommended for a remote Docker host, and useful for reducing blast radius on the same host. docker-socket-proxy gates Docker API path groups behind opt-in environment flags. Security note: upstream issue #182 reports that CONTAINERS=1 in the current released proxy also exposes container archive, export, logs, and process data; v0.5.0 predates that report and upstream fix #183 is not merged. Review the issue and release status before deploying, and keep the proxy reachable only by Loom."
+                    .to_owned(),
+                template: "services:\n  docker-socket-proxy:\n    # No patched tag for upstream issue #182 was verified when this guide shipped.\n    # Review the linked issue/releases, then replace <reviewed-tag>.\n    image: ghcr.io/tecnativa/docker-socket-proxy:<reviewed-tag>\n    environment:\n      PING: \"{{PING}}\"\n      VERSION: \"{{VERSION}}\"\n      CONTAINERS: \"{{CONTAINERS}}\"\n      POST: \"{{POST}}\"\n      ALLOW_RESTARTS: \"{{ALLOW_RESTARTS}}\"\n      INFO: \"{{INFO}}\"\n      SYSTEM: \"{{SYSTEM}}\"\n    volumes:\n      - /var/run/docker.sock:/var/run/docker.sock\n    networks:\n      - loom-docker-api\n\n  web-backend:\n    networks:\n      - loom-docker-api\n\nnetworks:\n  loom-docker-api:\n    internal: true\n\n# Enter this in Loom:\ndockerHost: tcp://docker-socket-proxy:2375\n\n# Same-host default: do not publish port 2375. For a remote-host deployment,\n# bind/publish it only behind a VPN, firewall rule, or TLS tunnel. Never expose\n# this unauthenticated plain-HTTP proxy on 0.0.0.0 without such protection."
+                    .to_owned(),
+                toggles: vec![
+                    setup_toggle(
+                        "ping",
+                        "PING",
+                        "Allow ping",
+                        "Keeps Loom's lightweight reachability check available. Upstream default: on.",
+                        true,
+                        true,
+                    ),
+                    setup_toggle(
+                        "version",
+                        "VERSION",
+                        "Allow version",
+                        "Lets Loom verify the daemon version during setup and display it in the host summary. Upstream default: on.",
+                        true,
+                        true,
+                    ),
+                    setup_toggle(
+                        "containers",
+                        "CONTAINERS",
+                        "Allow container access",
+                        "Required for listing, inspecting, stats, and logs. Upstream default: off; this guide enables it because those are Loom's core container features. Current releases also expose archive/export/process endpoints under this broad flag; review upstream issue #182 before enabling it.",
+                        true,
+                        true,
+                    ),
+                    setup_toggle(
+                        "post",
+                        "POST",
+                        "Allow container actions",
+                        "Required for Loom's start, stop, restart, pause, and resume calls. Upstream default: off. With current proxy rule ordering, POST=1 plus CONTAINERS=1 permits all of these container POST endpoints.",
+                        true,
+                        true,
+                    ),
+                    setup_toggle(
+                        "allowRestarts",
+                        "ALLOW_RESTARTS",
+                        "Allow restarts",
+                        "Upstream default: off. The current proxy exposes this flag, but it is not an effective extra boundary once POST and CONTAINERS are enabled; Loom therefore does not rely on it when predicting capabilities.",
+                        false,
+                        false,
+                    ),
+                    setup_toggle(
+                        "info",
+                        "INFO",
+                        "Allow host information",
+                        "Enables Docker host container/image totals used by Loom's host-summary view. Upstream default: off; leave it off if you only need per-container views.",
+                        false,
+                        false,
+                    ),
+                    setup_toggle(
+                        "system",
+                        "SYSTEM",
+                        "Allow disk-usage information",
+                        "Enables /system/df, which Loom uses for Docker disk usage. Upstream default: off; leave it off unless you want the host-summary view.",
+                        false,
+                        false,
+                    ),
+                ],
+                capability_requirements: vec![
+                    capability_requirement(
+                        CAPABILITY_LIST_CONTAINERS,
+                        "List containers",
+                        &["containers"],
+                    ),
+                    capability_requirement(
+                        CAPABILITY_READ_LOGS,
+                        "Read container logs",
+                        &["containers"],
+                    ),
+                    capability_requirement(
+                        CAPABILITY_START_STOP,
+                        "Start, stop, pause, and resume containers",
+                        &["containers", "post"],
+                    ),
+                    capability_requirement(
+                        CAPABILITY_RESTART,
+                        "Restart containers",
+                        &["containers", "post"],
+                    ),
+                    capability_requirement(
+                        CAPABILITY_HOST_SUMMARY,
+                        "View host summary",
+                        &["info", "system", "version"],
+                    ),
+                ],
+            },
+        ],
+    }
+}
 
 /// How many samples each history data point keeps.
 ///
@@ -174,29 +325,33 @@ impl std::fmt::Debug for DockerConnector {
 }
 
 impl DockerConnector {
-    /// Builds a connector and proves it can be used.
-    ///
-    /// The daemon is pinged and its cheap container list is read here so a bad
-    /// endpoint is refused while the setup form is still open, and the
-    /// synchronous descriptor cache starts with the current targets.
-    pub async fn connect(config: DockerConnectorConfig) -> Result<Self, ConnectorError> {
+    /// Builds both Docker clients without contacting the configured endpoint.
+    fn prepare(config: DockerConnectorConfig) -> Result<Self, ConnectorError> {
         let docker = config.connect()?;
         let control = config.connect_for_control()?;
-        docker.ping().await.map_err(|error| {
-            ConnectorError::unreachable(format!(
-                "could not reach the Docker host at {}: {error}",
-                config.docker_host
-            ))
-        })?;
-
-        let connector = Self {
+        Ok(Self {
             config,
             docker,
             control,
             history: Arc::new(Mutex::new(HashMap::new())),
             known_targets: Arc::new(Mutex::new(Vec::new())),
             host_details: Arc::new(Mutex::new(None)),
-        };
+        })
+    }
+
+    /// Builds a connector and proves it can be used.
+    ///
+    /// The daemon is pinged and its cheap container list is read here so a bad
+    /// endpoint is refused while the setup form is still open, and the
+    /// synchronous descriptor cache starts with the current targets.
+    pub async fn connect(config: DockerConnectorConfig) -> Result<Self, ConnectorError> {
+        let connector = Self::prepare(config)?;
+        connector.docker.ping().await.map_err(|error| {
+            ConnectorError::unreachable(format!(
+                "could not reach the Docker host at {}: {error}",
+                connector.config.docker_host
+            ))
+        })?;
         connector.list_sub_targets_live().await?;
         Ok(connector)
     }
@@ -204,6 +359,16 @@ impl DockerConnector {
     /// Convenience for the registry factory: parse, then connect.
     pub async fn from_config_value(config: Value) -> Result<Self, ConnectorError> {
         Self::connect(DockerConnectorConfig::from_value(config)?).await
+    }
+
+    /// Builds the throwaway connector used by the setup connection check.
+    ///
+    /// Unlike [`Self::connect`], this deliberately performs no API call before
+    /// returning. A restrictive socket proxy may allow ping while denying
+    /// containers, info, or system endpoints; constructing through the normal
+    /// factory would turn that useful capability result into an early 400.
+    pub fn from_config_value_for_connection_test(config: Value) -> Result<Self, ConnectorError> {
+        Self::prepare(DockerConnectorConfig::from_value(config)?)
     }
 
     /// One immediate sample of cumulative container stats.
@@ -424,6 +589,119 @@ fn inspect_failure(
     }
 }
 
+fn available_capability(key: &str, label: &str) -> CapabilityStatus {
+    CapabilityStatus {
+        key: key.to_owned(),
+        label: label.to_owned(),
+        available: true,
+        note: None,
+    }
+}
+
+fn unavailable_capability(key: &str, label: &str, note: impl Into<String>) -> CapabilityStatus {
+    CapabilityStatus {
+        key: key.to_owned(),
+        label: label.to_owned(),
+        available: false,
+        note: Some(note.into()),
+    }
+}
+
+fn proxy_read_capability(
+    key: &str,
+    label: &str,
+    relevant_env_vars: &str,
+    result: Result<(), bollard::errors::Error>,
+) -> CapabilityStatus {
+    match result {
+        Ok(()) => available_capability(key, label),
+        Err(bollard::errors::Error::DockerResponseServerError {
+            status_code: 403, ..
+        }) => unavailable_capability(
+            key,
+            label,
+            format!("Proxy configuration does not permit this — check {relevant_env_vars}."),
+        ),
+        Err(error) => unavailable_capability(key, label, format!("Read probe failed: {error}")),
+    }
+}
+
+fn write_capability(key: &str, label: &str, relevant_env_vars: &str) -> CapabilityStatus {
+    unavailable_capability(
+        key,
+        label,
+        format!(
+            "Cannot be safely verified without performing an action. Confirm {relevant_env_vars} if you need this."
+        ),
+    )
+}
+
+fn combine_host_summary_probes(
+    info: Result<(), bollard::errors::Error>,
+    system: Result<(), bollard::errors::Error>,
+) -> CapabilityStatus {
+    let denied = [&info, &system].iter().any(|result| {
+        matches!(
+            result,
+            Err(bollard::errors::Error::DockerResponseServerError {
+                status_code: 403,
+                ..
+            })
+        )
+    });
+    if info.is_ok() && system.is_ok() {
+        return available_capability(CAPABILITY_HOST_SUMMARY, "View host summary");
+    }
+    if denied {
+        return unavailable_capability(
+            CAPABILITY_HOST_SUMMARY,
+            "View host summary",
+            "Proxy configuration does not permit this — check INFO and SYSTEM.",
+        );
+    }
+
+    let errors = [info.err(), system.err()]
+        .into_iter()
+        .flatten()
+        .map(|error| error.to_string())
+        .collect::<Vec<_>>()
+        .join("; ");
+    unavailable_capability(
+        CAPABILITY_HOST_SUMMARY,
+        "View host summary",
+        format!("Read probe failed: {errors}"),
+    )
+}
+
+impl DockerConnector {
+    /// Probes the logs route without reading logs from a real container.
+    ///
+    /// A permitted route reaches Docker and returns 404 for the deliberately
+    /// nonexistent id; a socket proxy denial returns 403 first. This verifies
+    /// route access without exposing any container's log content.
+    async fn probe_logs_route(&self) -> Result<(), bollard::errors::Error> {
+        let options = LogsOptionsBuilder::new()
+            .stdout(true)
+            .stderr(true)
+            .follow(false)
+            .tail("1")
+            .build();
+        let mut stream = self
+            .docker
+            .logs("loom-capability-probe-does-not-exist", Some(options));
+        while let Some(result) = stream.next().await {
+            match result {
+                Ok(_) => {}
+                Err(bollard::errors::Error::DockerResponseServerError {
+                    status_code: 404, ..
+                }) => return Ok(()),
+                Err(error) => return Err(error),
+            }
+        }
+        Ok(())
+    }
+}
+
 #[async_trait]
 impl Connector for DockerConnector {
     /// One poll: host summary plus inspect, stats, and logs for every container.
@@ -487,6 +765,92 @@ impl Connector for DockerConnector {
         Ok(status)
     }
 
+    async fn test_connection(&self) -> ConnectionTestResult {
+        if let Err(error) = self.docker.ping().await {
+            return ConnectionTestResult {
+                reachable: false,
+                capabilities: Vec::new(),
+                message: Some(format!(
+                    "could not reach the Docker host at {}: {error}",
+                    self.config.docker_host
+                )),
+            };
+        }
+        if let Err(error) = self.docker.version().await {
+            return ConnectionTestResult {
+                reachable: false,
+                capabilities: Vec::new(),
+                message: Some(format!(
+                    "Docker answered ping but its version endpoint failed: {error}"
+                )),
+            };
+        }
+
+        if self.config.docker_host.starts_with("unix://") {
+            return ConnectionTestResult {
+                reachable: true,
+                capabilities: vec![
+                    available_capability(CAPABILITY_LIST_CONTAINERS, "List containers"),
+                    available_capability(CAPABILITY_READ_LOGS, "Read container logs"),
+                    available_capability(
+                        CAPABILITY_START_STOP,
+                        "Start, stop, pause, and resume containers",
+                    ),
+                    available_capability(CAPABILITY_RESTART, "Restart containers"),
+                    available_capability(CAPABILITY_HOST_SUMMARY, "View host summary"),
+                ],
+                message: Some(
+                    "The raw Docker socket is reachable and grants unrestricted Docker API access."
+                        .to_owned(),
+                ),
+            };
+        }
+
+        let list_options = ListContainersOptionsBuilder::new().all(true).build();
+        let (containers, logs, info, system) = tokio::join!(
+            self.docker.list_containers(Some(list_options)),
+            self.probe_logs_route(),
+            self.docker.info(),
+            self.docker.df(None),
+        );
+        let containers = containers.map(|_| ());
+        let info = info.map(|_| ());
+        let system = system.map(|_| ());
+
+        ConnectionTestResult {
+            reachable: true,
+            capabilities: vec![
+                proxy_read_capability(
+                    CAPABILITY_LIST_CONTAINERS,
+                    "List containers",
+                    "CONTAINERS",
+                    containers,
+                ),
+                proxy_read_capability(
+                    CAPABILITY_READ_LOGS,
+                    "Read container logs",
+                    "CONTAINERS",
+                    logs,
+                ),
+                write_capability(
+                    CAPABILITY_START_STOP,
+                    "Start, stop, pause, and resume containers",
+                    "POST and CONTAINERS",
+                ),
+                write_capability(
+                    CAPABILITY_RESTART,
+                    "Restart containers",
+                    "POST and CONTAINERS",
+                ),
+                combine_host_summary_probes(info, system),
+            ],
+            message: Some(
+                "Docker is reachable through TCP. Read capabilities were probed; write capabilities were not exercised."
+                    .to_owned(),
+            ),
+        }
+    }
+
     async fn actions(&self) -> Vec<ConnectorAction> {
         // Offered unconditionally rather than filtered by current state. The
         // list is cached by clients and the state can change between the two
@@ -526,6 +890,10 @@ impl Connector for DockerConnector {
 
     fn config_schema(&self) -> Value {
         config_schema()
+    }
+
+    fn setup_guide(&self) -> Option<SetupGuide> {
+        Some(setup_guide())
     }
 
     fn metadata(&self) -> ConnectorMetadata {
@@ -983,6 +1351,80 @@ fn unavailable_host_details(reason: &str) -> Value {
 mod tests {
     use super::*;
     use crate::config::DockerConnectorConfig;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpListener;
+
+    #[derive(Clone, Copy)]
+    struct MockProxyPermissions {
+        containers: bool,
+        logs: bool,
+        info: bool,
+        system: bool,
+    }
+
+    async fn mock_proxy(permissions: MockProxyPermissions) -> String {
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind mock proxy");
+        let address = listener.local_addr().expect("mock address");
+        tokio::spawn(async move {
+            loop {
+                let Ok((mut socket, _)) = listener.accept().await else {
+                    break;
+                };
+                tokio::spawn(async move {
+                    let mut request = vec![0; 8192];
+                    let Ok(read) = socket.read(&mut request).await else {
+                        return;
+                    };
+                    let request = String::from_utf8_lossy(&request[..read]);
+                    let path = request
+                        .lines()
+                        .next()
+                        .and_then(|line| line.split_whitespace().nth(1))
+                        .unwrap_or("/");
+
+                    let (status, body) = if path.ends_with("/_ping") {
+                        ("200 OK", "OK")
+                    } else if path.ends_with("/version") {
+                        ("200 OK", "{}")
+                    } else if path.contains("/containers/json") {
+                        if permissions.containers {
+                            ("200 OK", "[]")
+                        } else {
+                            ("403 Forbidden", r#"{"message":"forbidden"}"#)
+                        }
+                    } else if path.contains("/logs") {
+                        if permissions.logs {
+                            ("404 Not Found", r#"{"message":"no such container"}"#)
+                        } else {
+                            ("403 Forbidden", r#"{"message":"forbidden"}"#)
+                        }
+                    } else if path.ends_with("/info") {
+                        if permissions.info {
+                            ("200 OK", "{}")
+                        } else {
+                            ("403 Forbidden", r#"{"message":"forbidden"}"#)
+                        }
+                    } else if path.ends_with("/system/df") {
+                        if permissions.system {
+                            ("200 OK", "{}")
+                        } else {
+                            ("403 Forbidden", r#"{"message":"forbidden"}"#)
+                        }
+                    } else {
+                        ("404 Not Found", r#"{"message":"not found"}"#)
+                    };
+                    let response = format!(
+                        "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                        body.len()
+                    );
+                    let _ = socket.write_all(response.as_bytes()).await;
+                });
+            }
+        });
+        format!("tcp://{address}")
+    }
 
     /// Builds a descriptive connector without touching Docker.
     fn detached(docker_host: &str, targets: &[&str]) -> DockerConnector {
@@ -1044,6 +1486,88 @@ mod tests {
             assert_eq!(target.host, "docker.example");
             assert_eq!(target.port, None, "{host} names no usable port");
         }
+    }
+
+    #[test]
+    fn the_setup_guide_matches_the_verified_proxy_gates() {
+        let guide = setup_guide();
+        assert_eq!(guide.variants.len(), 2);
+        let socket = &guide.variants[0];
+        assert_eq!(socket.id, "socket");
+        assert!(socket.toggles.is_empty());
+        assert!(socket.description.contains("root-equivalent"));
+        assert!(socket.description.contains(":ro"));
+
+        let proxy = &guide.variants[1];
+        assert_eq!(proxy.id, "proxy");
+        let env_vars = proxy
+            .toggles
+            .iter()
+            .map(|toggle| toggle.env_var.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            env_vars,
+            vec![
+                "PING",
+                "VERSION",
+                "CONTAINERS",
+                "POST",
+                "ALLOW_RESTARTS",
+                "INFO",
+                "SYSTEM"
+            ]
+        );
+        assert!(!env_vars.contains(&"IMAGES"), "Loom never calls /images");
+        assert!(proxy.template.contains("internal: true"));
+        assert!(!proxy.template.contains("ports:"));
+        assert!(proxy.description.contains("#182"));
+    }
+
+    #[tokio::test]
+    async fn tcp_connection_test_live_probes_reads_but_never_claims_writes() {
+        let host = mock_proxy(MockProxyPermissions {
+            containers: true,
+            logs: true,
+            info: true,
+            system: true,
+        })
+        .await;
+        let result = detached(&host, &[]).test_connection().await;
+        assert!(result.reachable);
+        assert_eq!(result.capabilities.len(), 5);
+        assert!(result.capabilities[0].available);
+        assert!(result.capabilities[1].available);
+        assert!(!result.capabilities[2].available);
+        assert!(!result.capabilities[3].available);
+        assert!(result.capabilities[4].available);
+        assert!(result.capabilities[2]
+            .note
+            .as_deref()
+            .is_some_and(|note| note.contains("without performing an action")));
+    }
+
+    #[tokio::test]
+    async fn tcp_connection_test_reports_each_restricted_read() {
+        let host = mock_proxy(MockProxyPermissions {
+            containers: false,
+            logs: false,
+            info: true,
+            system: false,
+        })
+        .await;
+        let result = detached(&host, &[]).test_connection().await;
+        assert!(result.reachable, "PING and VERSION remain available");
+        assert!(!result.capabilities[0].available);
+        assert!(!result.capabilities[1].available);
+        assert!(!result.capabilities[4].available);
+        assert!(result.capabilities[0]
+            .note
+            .as_deref()
+            .is_some_and(|note| note.contains("CONTAINERS")));
+        assert!(result.capabilities[4]
+            .note
+            .as_deref()
+            .is_some_and(|note| note.contains("INFO and SYSTEM")));
     }
 
     #[test]

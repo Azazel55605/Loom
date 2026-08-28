@@ -108,6 +108,7 @@ export function ConnectorInstanceDialog({
 
   const selectedType = types.data?.find((candidate) => candidate.typeId === typeId) ?? null;
   const setupGuide = !isEditing ? (selectedType?.setupGuide ?? null) : null;
+  const hasSetupGuide = (setupGuide?.variants.length ?? 0) > 0;
 
   // Seed the config form once the schema is known: on create from the schema's
   // own defaults, on edit from what is actually stored. Keyed on the schema and
@@ -215,7 +216,7 @@ export function ConnectorInstanceDialog({
       <DialogContent
         className={cn(
           "max-h-[85vh] overflow-y-auto",
-          setupGuide !== null && "sm:max-w-3xl",
+          hasSetupGuide && "sm:max-w-3xl",
         )}
       >
         <DialogHeader>
@@ -362,7 +363,7 @@ export function ConnectorInstanceDialog({
               <div
                 className={cn(
                   "grid gap-4",
-                  setupGuide !== null && "lg:grid-cols-2 lg:items-start",
+                  hasSetupGuide && "lg:grid-cols-2 lg:items-start",
                 )}
               >
                 <SchemaForm
@@ -373,8 +374,12 @@ export function ConnectorInstanceDialog({
                   disabled={isSubmitting}
                   idPrefix={`config-${selectedType.typeId}`}
                 />
-                {setupGuide !== null ? (
-                  <SetupGuidePanel guide={setupGuide} formValues={config} />
+                {setupGuide !== null && hasSetupGuide ? (
+                  <SetupGuidePanel
+                    guide={setupGuide}
+                    typeId={selectedType.typeId}
+                    formValues={config}
+                  />
                 ) : null}
               </div>
             </div>

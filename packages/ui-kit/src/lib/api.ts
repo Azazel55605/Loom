@@ -291,9 +291,46 @@ export type ConnectorTypeSummary = {
 };
 
 export type SetupGuide = {
+  variants: SetupGuideVariant[];
+};
+
+export type SetupGuideVariant = {
+  id: string;
+  label: string;
   description: string;
-  /** Text with literal `{{fieldName}}` placeholders from the config schema. */
+  /** Text with literal config-field or toggle placeholders. */
   template: string;
+  toggles: SetupGuideToggle[];
+  capabilityRequirements: CapabilityRequirement[];
+};
+
+export type SetupGuideToggle = {
+  key: string;
+  envVar: string;
+  label: string;
+  description: string;
+  default: boolean;
+  recommended: boolean;
+};
+
+export type CapabilityRequirement = {
+  capabilityKey: string;
+  label: string;
+  /** Every listed toggle key must be enabled (AND-only in v1). */
+  requiredToggleKeys: string[];
+};
+
+export type CapabilityStatus = {
+  key: string;
+  label: string;
+  available: boolean;
+  note: string | null;
+};
+
+export type ConnectionTestResult = {
+  reachable: boolean;
+  capabilities: CapabilityStatus[];
+  message: string | null;
 };
 
 export type DiscoveredResource = {
@@ -1200,7 +1237,21 @@ function discoverForType(
   return authorizedRequest<DiscoveryResponse>(
     runtime,
     `/connector-types/${encodeURIComponent(typeId)}/discover`,
-    { method: "POST", body: JSON.stringify(config), signal },
+    { method: "POST", body: config, signal },
+  );
+}
+
+/** Test an ephemeral candidate configuration without persisting an instance. */
+function testConnectionForType(
+  runtime: ApiRuntime,
+  typeId: string,
+  config: unknown,
+  signal?: AbortSignal,
+): Promise<ConnectionTestResult> {
+  return authorizedRequest<ConnectionTestResult>(
+    runtime,
+    `/connector-types/${encodeURIComponent(typeId)}/test-connection`,
+    { method: "POST", body: config, signal },
   );
 }
 
@@ -1905,6 +1956,8 @@ export function createApiClient(options: {
       discoverConnectorResources(runtime, id, signal),
     discoverForType: (typeId: string, candidateConfig: unknown, signal?: AbortSignal) =>
       discoverForType(runtime, typeId, candidateConfig, signal),
+    testConnectionForType: (typeId: string, candidateConfig: unknown, signal?: AbortSignal) =>
+      testConnectionForType(runtime, typeId, candidateConfig, signal),
     createConnectorInstance: (data: CreateConnectorInstanceRequest, signal?: AbortSignal) =>
       createConnectorInstance(runtime, data, signal),
     updateConnectorInstance: (

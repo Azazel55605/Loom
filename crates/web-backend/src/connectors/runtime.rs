@@ -395,6 +395,25 @@ impl ConnectorRuntime {
             .map_err(BuildError::Rejected)
     }
 
+    /// Constructs the throwaway connector used by the setup capability check.
+    pub async fn build_for_connection_test(
+        &self,
+        type_id: &str,
+        config: Value,
+    ) -> Result<Arc<dyn Connector>, BuildError> {
+        let registration = self
+            .registration(type_id)
+            .ok_or_else(|| BuildError::UnknownType(type_id.to_owned()))?;
+        let factory = registration
+            .connection_test_factory
+            .unwrap_or(registration.factory);
+
+        factory(config)
+            .await
+            .map(Arc::from)
+            .map_err(BuildError::Rejected)
+    }
+
     /// Inserts or replaces the live connector for `id` and schedules a poll.
     ///
     /// Status collection must not be awaited by the create/update request. A

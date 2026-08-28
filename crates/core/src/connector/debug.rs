@@ -22,8 +22,11 @@
 //!    layout, which is what a placement UI needs in order to be exercised.
 //! 4. **End-to-end tests**, present and future — it is the one connector type
 //!    that behaves identically on every machine.
-//! 5. **Discovery and setup-guide reference behaviour.** Its self-referential
-//!    discovery yields more valid debug configurations, so every layer can be
+//! 5. **Discovery, setup-guide, and capability-check reference behaviour.**
+//!    Its self-referential discovery yields more valid debug configurations,
+//!    its two guide variants exercise static and toggle-driven setup paths,
+//!    and its live connection test reports both unconditional and conditional
+//!    capabilities, so every layer can be
 //!    exercised before a real integration exists.
 //!
 //! Everything interesting is set at construction through
@@ -64,9 +67,10 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
 
 use super::{
-    details::set_detail, ActionResult, ActionWidgetType, ChartType, Connector, ConnectorAction,
-    ConnectorError, ConnectorMetadata, ConnectorStatus, DataPointDescriptor, DataPointValueType,
-    DiscoveredResource, DisplayField, DisplayWidgetType, HealthState, NetworkTarget, SetupGuide,
+    details::set_detail, ActionResult, ActionWidgetType, CapabilityRequirement, CapabilityStatus,
+    ChartType, ConnectionTestResult, Connector, ConnectorAction, ConnectorError, ConnectorMetadata,
+    ConnectorStatus, DataPointDescriptor, DataPointValueType, DiscoveredResource, DisplayField,
+    DisplayWidgetType, HealthState, NetworkTarget, SetupGuide, SetupGuideToggle, SetupGuideVariant,
     SubTarget, WidgetBinding, WidgetLayout,
 };
 
@@ -543,6 +547,35 @@ fn bool_param(action_id: &str, params: &Value, field: &str) -> Result<bool, Conn
         })
 }
 
+fn debug_capabilities(reachable: bool, actions_enabled: bool) -> Vec<CapabilityStatus> {
+    vec![
+        CapabilityStatus {
+            key: "read-status".to_owned(),
+            label: "Read status".to_owned(),
+            available: reachable,
+            note: (!reachable).then(|| "Requires a reachable connector.".to_owned()),
+        },
+        CapabilityStatus {
+            key: "view-widgets".to_owned(),
+            label: "View widgets".to_owned(),
+            available: reachable,
+            note: (!reachable).then(|| "Requires a reachable connector.".to_owned()),
+        },
+        CapabilityStatus {
+            key: "perform-actions".to_owned(),
+            label: "Perform actions".to_owned(),
+            available: reachable && actions_enabled,
+            note: if !reachable {
+                Some("Requires a reachable connector.".to_owned())
+            } else if !actions_enabled {
+                Some("Unavailable while the debug fixture's enabled flag is off.".to_owned())
+            } else {
+                None
+            },
+        },
+    ]
+}
+
 #[async_trait]
 impl Connector for DebugConnector {
     /// Advances the simulation and reports the configured health alongside the
@@ -598,6 +631,31 @@ impl Connector for DebugConnector {
             self.config.simulated_status.health,
             details,
         ))
+    }
+
+    async fn test_connection(&self) -> ConnectionTestResult {
+        if let Err(error) = self.gate().await {
+            return ConnectionTestResult {
+                reachable: false,
+                capabilities: debug_capabilities(false, false),
+                message: Some(error.to_string()),
+            };
+        }
+
+        let reachable = matches!(
+            self.config.simulated_status.health,
+            HealthState::Healthy | HealthState::Degraded
+        );
+        ConnectionTestResult {
+            reachable,
+            capabilities: debug_capabilities(reachable, self.config.enabled),
+            message: (!reachable).then(|| {
+                format!(
+                    "The debug fixture reports {:?} health.",
+                    self.config.simulated_status.health
+                )
+            }),
+        }
     }
 
     /// Returns the canned actions, or an empty list in fail mode.
@@ -881,8 +939,56 @@ impl Connector for DebugConnector {
 
     fn setup_guide(&self) -> Option<SetupGuide> {
         Some(SetupGuide {
-            description: "No real setup required — this is an internal test fixture.".to_owned(),
-            template: "# Debug connector\nFixture label: {{label}}".to_owned(),
+            variants: vec![
+                SetupGuideVariant {
+                    id: "simple".to_owned(),
+                    label: "Simple".to_owned(),
+                    description: "Uses the live connection test for capability detail.".to_owned(),
+                    template: "No setup needed — this is an internal test fixture.".to_owned(),
+                    toggles: Vec::new(),
+                    capability_requirements: Vec::new(),
+                },
+                SetupGuideVariant {
+                    id: "configurable".to_owned(),
+                    label: "Configurable".to_owned(),
+                    description: "Exercises UI-only setup toggles and declarative capabilities."
+                        .to_owned(),
+                    template: "Debug setup for {{label}}\nLOOM_DEBUG_WIDGETS={{LOOM_DEBUG_WIDGETS}}\nLOOM_DEBUG_ACTIONS={{LOOM_DEBUG_ACTIONS}}"
+                        .to_owned(),
+                    toggles: vec![
+                        SetupGuideToggle {
+                            key: "enableWidgets".to_owned(),
+                            env_var: "LOOM_DEBUG_WIDGETS".to_owned(),
+                            label: "Enable widgets".to_owned(),
+                            description: "Includes read-only widget support in the example setup."
+                                .to_owned(),
+                            default: true,
+                            recommended: true,
+                        },
+                        SetupGuideToggle {
+                            key: "enableActions".to_owned(),
+                            env_var: "LOOM_DEBUG_ACTIONS".to_owned(),
+                            label: "Enable actions".to_owned(),
+                            description: "Includes mutating action support in the example setup."
+                                .to_owned(),
+                            default: false,
+                            recommended: false,
+                        },
+                    ],
+                    capability_requirements: vec![
+                        CapabilityRequirement {
+                            capability_key: "view-widgets".to_owned(),
+                            label: "View widgets".to_owned(),
+                            required_toggle_keys: vec!["enableWidgets".to_owned()],
+                        },
+                        CapabilityRequirement {
+                            capability_key: "perform-actions".to_owned(),
+                            label: "Perform actions".to_owned(),
+                            required_toggle_keys: vec!["enableActions".to_owned()],
+                        },
+                    ],
+                },
+            ],
         })
     }
 
@@ -1064,19 +1170,89 @@ mod tests {
     }
 
     #[test]
-    fn setup_guide_uses_a_real_schema_property() {
+    fn setup_guide_exposes_static_and_toggle_driven_variants() {
         let connector = DebugConnector::default();
         let guide = connector.setup_guide().expect("debug publishes setup help");
 
+        assert_eq!(guide.variants.len(), 2);
+        let simple = &guide.variants[0];
+        assert_eq!(simple.id, "simple");
+        assert!(simple.toggles.is_empty());
+        assert!(simple.capability_requirements.is_empty());
+
+        let configurable = &guide.variants[1];
+        assert_eq!(configurable.id, "configurable");
+        assert_eq!(configurable.toggles.len(), 2);
+        assert!(configurable.template.contains("{{label}}"));
+        assert!(configurable.template.contains("{{LOOM_DEBUG_WIDGETS}}"));
+        assert!(configurable.template.contains("{{LOOM_DEBUG_ACTIONS}}"));
+        assert_eq!(configurable.capability_requirements.len(), 2);
         assert_eq!(
-            guide.description,
-            "No real setup required — this is an internal test fixture."
-        );
-        assert_eq!(
-            guide.template,
-            "# Debug connector\nFixture label: {{label}}"
+            configurable.capability_requirements[1].required_toggle_keys,
+            ["enableActions"]
         );
         assert!(connector.config_schema()["properties"]["label"].is_object());
+    }
+
+    #[tokio::test]
+    async fn connection_test_reports_reachability_and_conditional_capabilities() {
+        let enabled = DebugConnector::default().test_connection().await;
+        assert!(enabled.reachable);
+        assert_eq!(enabled.message, None);
+        assert!(enabled.capabilities.iter().all(|status| status.available));
+
+        let disabled = DebugConnector::new(DebugConnectorConfig {
+            enabled: false,
+            ..DebugConnectorConfig::default()
+        })
+        .test_connection()
+        .await;
+        assert!(disabled.reachable);
+        assert!(disabled
+            .capabilities
+            .iter()
+            .find(|status| status.key == "read-status")
+            .is_some_and(|status| status.available));
+        let actions = disabled
+            .capabilities
+            .iter()
+            .find(|status| status.key == "perform-actions")
+            .expect("action capability");
+        assert!(!actions.available);
+        assert!(actions
+            .note
+            .as_deref()
+            .is_some_and(|note| note.contains("enabled")));
+    }
+
+    #[tokio::test]
+    async fn connection_test_respects_health_fail_mode_and_latency() {
+        let down = DebugConnector::new(DebugConnectorConfig {
+            simulated_status: ConnectorStatus::new(HealthState::Down, json!({})),
+            ..DebugConnectorConfig::default()
+        })
+        .test_connection()
+        .await;
+        assert!(!down.reachable);
+        assert!(down.capabilities.iter().all(|status| !status.available));
+        assert!(down
+            .message
+            .as_deref()
+            .is_some_and(|message| message.contains("Down")));
+
+        let failing = DebugConnector::failing(ConnectorError::unreachable("simulated outage"));
+        let failure = failing.test_connection().await;
+        assert!(!failure.reachable);
+        assert!(failure.capabilities.iter().all(|status| !status.available));
+        assert!(failure
+            .message
+            .as_deref()
+            .is_some_and(|message| message.contains("simulated outage")));
+
+        let delayed = DebugConnector::with_latency(20);
+        let started = Instant::now();
+        assert!(delayed.test_connection().await.reachable);
+        assert!(started.elapsed().as_millis() >= 20);
     }
 
     #[test]

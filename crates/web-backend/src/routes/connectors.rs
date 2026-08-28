@@ -133,6 +133,29 @@ pub async fn discover_type(
     discover_with(connector.as_ref(), "this configuration").await
 }
 
+/// `POST /connector-types/{type_id}/test-connection`
+///
+/// Builds a connector from a candidate configuration, asks it for a one-shot
+/// reachability and capability report, and discards it. As with type-scoped
+/// discovery, neither the database nor the live runtime map is touched.
+pub async fn test_type_connection(
+    _caller: RequirePermission<ConnectorsManage>,
+    State(state): State<AppState>,
+    Path(type_id): Path<String>,
+    Json(config): Json<Value>,
+) -> Response {
+    let connector = match state
+        .connectors
+        .build_for_connection_test(&type_id, config)
+        .await
+    {
+        Ok(connector) => connector,
+        Err(error) => return build_failure(error),
+    };
+
+    Json(connector.test_connection().await).into_response()
+}
+
 /* ------------------------------------------------------------------ */
 /* Connector instances                                                 */
 /* ------------------------------------------------------------------ */

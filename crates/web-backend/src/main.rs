@@ -1017,10 +1017,15 @@ mod tests {
         let debug = by_id("debug");
         assert_eq!(debug["discoverableType"], "debug");
         assert_eq!(debug["discoveryTargetField"], serde_json::Value::Null);
-        assert!(debug["setupGuide"]["description"]
-            .as_str()
-            .is_some_and(|description| description.contains("test fixture")));
-        assert!(debug["setupGuide"]["template"]
+        let variants = debug["setupGuide"]["variants"]
+            .as_array()
+            .expect("debug setup-guide variants");
+        assert_eq!(variants.len(), 2);
+        assert_eq!(variants[0]["id"], "simple");
+        assert_eq!(variants[0]["toggles"], serde_json::json!([]));
+        assert_eq!(variants[1]["id"], "configurable");
+        assert_eq!(variants[1]["toggles"].as_array().map(Vec::len), Some(2));
+        assert!(variants[1]["template"]
             .as_str()
             .is_some_and(|template| template.contains("{{label}}")));
 
@@ -1039,9 +1044,17 @@ mod tests {
             docker["configSchema"]["properties"]["dockerHost"]["default"],
             "unix:///var/run/docker.sock"
         );
-        // Deliberately absent in this first version; asserted so that adding
-        // either later is a visible decision rather than a drive-by.
-        assert_eq!(docker["setupGuide"], serde_json::Value::Null);
+        let variants = docker["setupGuide"]["variants"]
+            .as_array()
+            .expect("Docker setup-guide variants");
+        assert_eq!(variants.len(), 2);
+        assert_eq!(variants[0]["id"], "socket");
+        assert_eq!(variants[1]["id"], "proxy");
+        assert!(variants[1]["toggles"]
+            .as_array()
+            .is_some_and(|toggles| toggles
+                .iter()
+                .any(|toggle| toggle["envVar"] == "CONTAINERS")));
         assert_eq!(docker["discoverableType"], serde_json::Value::Null);
         assert_eq!(docker["discoveryTargetField"], serde_json::Value::Null);
     }
@@ -1197,6 +1210,107 @@ mod tests {
         .await;
         assert_eq!(status, StatusCode::BAD_REQUEST, "{body:#}");
         assert!(body["connectorError"].is_object());
+    }
+
+    #[tokio::test]
+    async fn type_scoped_connection_test_is_ephemeral_and_reports_debug_capabilities() {
+        let app = test_app().await;
+        let (access, _) = setup_and_login(&app.router).await;
+
+        let before: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM connector_instances")
+            .fetch_one(&app.pool)
+            .await
+            .expect("count before connection tests");
+        let live_before = app.connectors.len().await;
+
+        let (status, healthy) = send(
+            &app.router,
+            post_json_auth(
+                "/connector-types/debug/test-connection",
+                &access,
+                serde_json::json!({ "label": "candidate", "enabled": false }),
+            ),
+        )
+        .await;
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "connection test failed: {healthy:#}"
+        );
+        assert_eq!(healthy["reachable"], true);
+        assert_eq!(healthy["message"], serde_json::Value::Null);
+        let capabilities = healthy["capabilities"].as_array().expect("capabilities");
+        assert_eq!(capabilities.len(), 3);
+        assert!(capabilities.iter().any(|capability| {
+            capability["key"] == "read-status" && capability["available"] == true
+        }));
+        assert!(capabilities.iter().any(|capability| {
+            capability["key"] == "perform-actions" && capability["available"] == false
+        }));
+
+        let (status, failing) = send(
+            &app.router,
+            post_json_auth(
+                "/connector-types/debug/test-connection",
+                &access,
+                serde_json::json!({ "failMode": "unreachable" }),
+            ),
+        )
+        .await;
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "connection test failed: {failing:#}"
+        );
+        assert_eq!(failing["reachable"], false);
+        assert!(failing["capabilities"]
+            .as_array()
+            .is_some_and(|items| items.iter().all(|item| item["available"] == false)));
+        assert!(failing["message"]
+            .as_str()
+            .is_some_and(|message| message.contains("simulated outage")));
+
+        // Docker's ordinary factory reads CONTAINERS before returning, while
+        // this endpoint must be able to report that permission as unavailable.
+        // The dedicated setup-test constructor therefore performs no I/O and
+        // lets test_connection own the reachability result.
+        let (status, docker) = send(
+            &app.router,
+            post_json_auth(
+                "/connector-types/docker/test-connection",
+                &access,
+                serde_json::json!({ "dockerHost": "tcp://127.0.0.1:1" }),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "Docker check failed: {docker:#}");
+        assert_eq!(docker["reachable"], false);
+        assert!(docker["message"]
+            .as_str()
+            .is_some_and(|message| message.contains("127.0.0.1:1")));
+
+        let after: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM connector_instances")
+            .fetch_one(&app.pool)
+            .await
+            .expect("count after connection tests");
+        assert_eq!(after, before, "candidate checks must never insert a row");
+        assert_eq!(
+            app.connectors.len().await,
+            live_before,
+            "candidate checks must never enter the runtime map"
+        );
+
+        let (status, invalid) = send(
+            &app.router,
+            post_json_auth(
+                "/connector-types/debug/test-connection",
+                &access,
+                serde_json::json!({ "baseLoad": 101 }),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{invalid:#}");
+        assert!(invalid["connectorError"].is_object());
     }
 
     #[tokio::test]
@@ -1954,6 +2068,16 @@ mod tests {
         )
         .await;
         assert_eq!(status, StatusCode::UNAUTHORIZED);
+
+        let (status, _) = send(
+            &app.router,
+            post_json(
+                "/connector-types/debug/test-connection",
+                serde_json::Value::Null,
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
     }
 
     /// `connectors.manage` is a real split, not a synonym: viewing instances
@@ -2022,6 +2146,17 @@ mod tests {
         let (status, _) = send(
             &app.router,
             post_json_auth(
+                "/connector-types/debug/test-connection",
+                &viewer,
+                serde_json::Value::Null,
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+
+        let (status, _) = send(
+            &app.router,
+            post_json_auth(
                 &format!("/connector-instances/{id}/discover"),
                 &viewer,
                 serde_json::Value::Null,
@@ -2071,6 +2206,16 @@ mod tests {
         let (status, _) = send(
             &app.router,
             get_with_auth("/connector-types", &bearer(&manager)),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let (status, _) = send(
+            &app.router,
+            post_json_auth(
+                "/connector-types/debug/test-connection",
+                &manager,
+                serde_json::Value::Null,
+            ),
         )
         .await;
         assert_eq!(status, StatusCode::OK);

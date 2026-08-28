@@ -56,6 +56,28 @@ pub trait Connector: Send + Sync {
     /// arm is for when the check itself could not be carried out.
     async fn status(&self) -> Result<ConnectorStatus, ConnectorError>;
 
+    /// Performs a lightweight reachability and capability check during setup.
+    ///
+    /// This is distinct from the recurring [`Connector::status`] poll: setup
+    /// clients call it explicitly for a candidate configuration before an
+    /// instance exists. The default preserves useful behaviour for connectors
+    /// that do not publish capability detail by mapping the ordinary health
+    /// check to reachability and returning no capability rows.
+    async fn test_connection(&self) -> ConnectionTestResult {
+        match self.status().await {
+            Ok(status) => ConnectionTestResult {
+                reachable: matches!(status.health, HealthState::Healthy | HealthState::Degraded),
+                capabilities: Vec::new(),
+                message: None,
+            },
+            Err(error) => ConnectionTestResult {
+                reachable: false,
+                capabilities: Vec::new(),
+                message: Some(error.to_string()),
+            },
+        }
+    }
+
     /// Lists the operations this connector is willing to perform.
     ///
     /// Returned as data rather than compiled in so clients can build their
@@ -147,10 +169,16 @@ pub trait Connector: Send + Sync {
         Ok(Vec::new())
     }
 
-    /// Descriptive, client-rendered help for configuring this connector type.
+    /// Descriptive, client-rendered ways to configure this connector type.
     ///
-    /// The template may contain `{{fieldName}}` placeholders whose names match
-    /// properties in [`Connector::config_schema`]. Core does no substitution.
+    /// Each variant is an independent setup path. Its template may contain
+    /// placeholders for schema fields and for its UI-only toggles. Toggles are
+    /// never part of the connector configuration and are never persisted;
+    /// clients use them only to render live setup text and derive declarative
+    /// capability availability. A capability requirement uses AND-only logic:
+    /// every listed toggle key must be enabled. This deliberate v1 constraint
+    /// should be expanded only when a real connector requires OR logic.
+    /// Core performs no substitution or requirement evaluation.
     fn setup_guide(&self) -> Option<SetupGuide> {
         None
     }
@@ -268,14 +296,87 @@ pub struct DiscoveredResource {
     pub target_field_value: Option<Value>,
 }
 
-/// Type-level setup help published alongside a connector's config schema.
+/// One capability reported by a candidate connection check.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CapabilityStatus {
+    /// Stable machine key used to match declarative and live capability rows.
+    pub key: String,
+    /// Human-facing capability name.
+    pub label: String,
+    /// Whether this candidate can currently provide the capability.
+    pub available: bool,
+    /// Optional explanation, especially useful when unavailable.
+    pub note: Option<String>,
+}
+
+/// Result of explicitly testing a candidate connector configuration.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ConnectionTestResult {
+    /// Whether the candidate service can be contacted usefully.
+    pub reachable: bool,
+    /// Fine-grained live capability results, empty when a connector only
+    /// supports the trait's default reachability check.
+    pub capabilities: Vec<CapabilityStatus>,
+    /// Optional connector-authored summary or failure explanation.
+    pub message: Option<String>,
+}
+
+/// One UI-only switch offered by a setup-guide variant.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SetupGuideToggle {
+    /// Stable key used by templates and capability requirements.
+    pub key: String,
+    /// Environment variable represented in the rendered setup instructions.
+    pub env_var: String,
+    /// Human-facing toggle name.
+    pub label: String,
+    /// Explanation of what enabling the toggle changes in the setup.
+    pub description: String,
+    /// Initial UI state.
+    pub default: bool,
+    /// Whether the connector author recommends enabling it.
+    pub recommended: bool,
+}
+
+/// Declarative capability unlocked by a setup-guide variant's toggles.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CapabilityRequirement {
+    /// Capability key shared with live [`CapabilityStatus`] results.
+    pub capability_key: String,
+    /// Human-facing capability name.
+    pub label: String,
+    /// Toggle keys that must all be enabled. The v1 model is AND-only.
+    pub required_toggle_keys: Vec<String>,
+}
+
+/// One independent way to prepare a connector's upstream service.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SetupGuideVariant {
+    /// Stable identifier local to this setup guide.
+    pub id: String,
+    /// Short human-facing variant name.
+    pub label: String,
+    /// Explanation of when this setup path is appropriate.
+    pub description: String,
+    /// Client-rendered plain text with schema-field and toggle placeholders.
+    pub template: String,
+    /// UI-only switches that affect the rendered instructions.
+    pub toggles: Vec<SetupGuideToggle>,
+    /// Capabilities derived declaratively from the selected toggle state.
+    pub capability_requirements: Vec<CapabilityRequirement>,
+}
+
+/// Type-level setup paths published alongside a connector's config schema.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SetupGuide {
-    /// Short explanation shown before the generated setup form.
-    pub description: String,
-    /// Client-rendered text containing literal `{{fieldName}}` placeholders.
-    pub template: String,
+    /// Independent supported setup approaches, in connector-authored order.
+    pub variants: Vec<SetupGuideVariant>,
 }
 
 /// How a service is doing, as of a particular moment.
@@ -979,12 +1080,68 @@ mod tests {
         assert_eq!(resource.target_field_value, None);
     }
 
+    #[test]
+    fn setup_guide_and_capability_types_use_the_documented_wire_shape() {
+        let guide = SetupGuide {
+            variants: vec![SetupGuideVariant {
+                id: "proxy".to_owned(),
+                label: "Proxy".to_owned(),
+                description: "Configure a proxy.".to_owned(),
+                template: "FEATURE={{enableFeature}}".to_owned(),
+                toggles: vec![SetupGuideToggle {
+                    key: "enableFeature".to_owned(),
+                    env_var: "FEATURE".to_owned(),
+                    label: "Enable feature".to_owned(),
+                    description: "Exposes the feature.".to_owned(),
+                    default: true,
+                    recommended: true,
+                }],
+                capability_requirements: vec![CapabilityRequirement {
+                    capability_key: "read-feature".to_owned(),
+                    label: "Read feature".to_owned(),
+                    required_toggle_keys: vec!["enableFeature".to_owned()],
+                }],
+            }],
+        };
+
+        let value = serde_json::to_value(&guide).expect("serialize setup guide");
+        assert_eq!(value["variants"][0]["toggles"][0]["envVar"], "FEATURE");
+        assert_eq!(
+            value["variants"][0]["capabilityRequirements"][0]["requiredToggleKeys"],
+            json!(["enableFeature"])
+        );
+        assert_eq!(
+            serde_json::from_value::<SetupGuide>(value).expect("deserialize setup guide"),
+            guide
+        );
+    }
+
     /// A minimal in-test implementation, separate from [`debug::DebugConnector`]
     /// on purpose: it proves the trait alone is enough to write a connector,
     /// with no help from the fixture's machinery.
     struct StubConnector {
         id: &'static str,
         health: HealthState,
+    }
+
+    #[tokio::test]
+    async fn default_connection_test_maps_health_without_inventing_capabilities() {
+        for (health, reachable) in [
+            (HealthState::Healthy, true),
+            (HealthState::Degraded, true),
+            (HealthState::Down, false),
+            (HealthState::Unknown, false),
+        ] {
+            let result = StubConnector {
+                id: "connection-test-stub",
+                health,
+            }
+            .test_connection()
+            .await;
+            assert_eq!(result.reachable, reachable);
+            assert!(result.capabilities.is_empty());
+            assert_eq!(result.message, None);
+        }
     }
 
     #[async_trait]

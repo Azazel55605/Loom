@@ -1,6 +1,6 @@
 # 0016 — Connector discovery is instance-scoped; setup guides are type-scoped
 
-- Status: accepted
+- Status: accepted; setup-guide shape superseded by ADR 0020
 - Date: 2026-08-23
 
 ## Context
@@ -54,3 +54,7 @@ guide references the real, editable `label` schema property.
 The instance-scoped-only portion of this decision was later extended by
 [ADR 0019](./0019-docker-connector-merge.md), which adds ephemeral discovery
 from candidate type configuration for pre-creation field selection.
+
+The flat setup-guide description/template shape was later superseded by
+[ADR 0020](./0020-connector-capability-model.md). The discovery decisions in
+this ADR remain accepted.

@@ -165,6 +165,34 @@ async fn ensure_test_image(docker: &Docker) {
     }
 }
 
+#[tokio::test]
+async fn a_reachable_unix_socket_reports_full_setup_capabilities() {
+    let test_name = "a_reachable_unix_socket_reports_full_setup_capabilities";
+    let host = test_docker_host();
+    if !host.starts_with("unix://") {
+        eprintln!("SKIPPING {test_name}: configured test host {host} is not a Unix socket");
+        return;
+    }
+    let Some(_docker) = docker_or_skip(test_name).await else {
+        return;
+    };
+
+    let connector = DockerConnector::connect(DockerConnectorConfig { docker_host: host })
+        .await
+        .expect("the already-reachable daemon must build");
+    let result = connector.test_connection().await;
+    assert!(result.reachable);
+    assert_eq!(result.capabilities.len(), 5);
+    assert!(result
+        .capabilities
+        .iter()
+        .all(|capability| capability.available));
+    assert!(result
+        .capabilities
+        .iter()
+        .all(|capability| capability.note.is_none()));
+}
+
 /// Creates and starts a container that prints a marker line and then idles.
 async fn start_test_container(docker: &Docker, suffix: &str) -> TestContainer {
     // Unique per run and per test, so two tests — or two checkouts on one
