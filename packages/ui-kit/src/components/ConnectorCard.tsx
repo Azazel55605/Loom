@@ -4,7 +4,6 @@ import { Loader2, Pencil, ScanSearch, Trash2 } from "lucide-react";
 import { toast } from "sonner";
 
 import { Alert, AlertDescription, AlertTitle } from "@loom/ui-kit/components/ui/alert";
-import { Badge } from "@loom/ui-kit/components/ui/badge";
 import { Button } from "@loom/ui-kit/components/ui/button";
 import {
   Card,
@@ -19,6 +18,7 @@ import {
   takesParameters,
 } from "@loom/ui-kit/components/ActionParamsDialog";
 import { ConnectorIcon } from "@loom/ui-kit/components/ConnectorIcon";
+import { ConnectorStatusBadge } from "@loom/ui-kit/components/ConnectorStatusBadge";
 import { connectorAvailability } from "@loom/ui-kit/lib/connector-availability";
 import { ActionButtonSkeleton } from "@loom/ui-kit/widgets/ActionButton";
 import {
@@ -202,7 +202,7 @@ export function ConnectorCard({
           </div>
 
           <div className="flex items-center gap-1">
-            <Badge variant={availability.tone}>{availability.label}</Badge>
+            <ConnectorStatusBadge availability={availability} />
 
             {hasManageControls && (
               <>
@@ -260,19 +260,12 @@ export function ConnectorCard({
         )}
 
         {status !== null ? (
-          <div className="flex flex-col gap-1">
-            {availability.statusReason !== null ? (
-              <p className="text-sm leading-relaxed text-muted-foreground">
-                {availability.statusReason}
-              </p>
-            ) : null}
-            <p className="text-sm text-muted-foreground">
-              Checked{" "}
-              <time dateTime={status.lastChecked} title={status.lastChecked}>
-                {formatChecked(status.lastChecked)}
-              </time>
-            </p>
-          </div>
+          <p className="text-sm text-muted-foreground">
+            Checked{" "}
+            <time dateTime={status.lastChecked} title={status.lastChecked}>
+              {formatChecked(status.lastChecked)}
+            </time>
+          </p>
         ) : (
           // A connector Loom could not get a reading from at all — distinct
           // from one that reported itself down, which is a successful check.

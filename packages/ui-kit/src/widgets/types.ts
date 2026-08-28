@@ -138,3 +138,24 @@ export function formatReading(value: unknown): string {
   if (typeof value === "string") return value;
   return JSON.stringify(value);
 }
+
+const BYTE_UNITS = ["B", "KiB", "MiB", "GiB", "TiB", "PiB"] as const;
+
+/** Scales an exact byte count for display while leaving the API value intact. */
+export function formatByteReading(value: number): { text: string; unit: string } {
+  if (!Number.isFinite(value)) return { text: "—", unit: "B" };
+  if (value === 0) return { text: "0", unit: "B" };
+
+  const magnitude = Math.abs(value);
+  const exponent = Math.min(
+    Math.floor(Math.log(magnitude) / Math.log(1024)),
+    BYTE_UNITS.length - 1,
+  );
+  const scaled = value / 1024 ** exponent;
+  const maximumFractionDigits = Math.abs(scaled) >= 100 ? 0 : Math.abs(scaled) >= 10 ? 1 : 2;
+
+  return {
+    text: new Intl.NumberFormat(undefined, { maximumFractionDigits }).format(scaled),
+    unit: BYTE_UNITS[exponent],
+  };
+}

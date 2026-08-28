@@ -37,6 +37,7 @@ import { Card, CardContent } from "@loom/ui-kit/components/ui/card";
 import { Checkbox } from "@loom/ui-kit/components/ui/checkbox";
 import { ConnectorIcon } from "@loom/ui-kit/components/ConnectorIcon";
 import { ConnectorInstanceDialog } from "@loom/ui-kit/components/ConnectorInstanceDialog";
+import { ConnectorStatusBadge } from "@loom/ui-kit/components/ConnectorStatusBadge";
 import { DiscoverResourcesDialog } from "@loom/ui-kit/components/DiscoverResourcesDialog";
 import { Input } from "@loom/ui-kit/components/ui/input";
 import {
@@ -664,14 +665,7 @@ function ConnectorTableRow({
         <TagBadges tags={instance.tags} />
       </TableCell>
       <TableCell>
-        <div className="flex max-w-72 flex-col items-start gap-1">
-          <Badge variant={availability.tone}>{availability.label}</Badge>
-          {availability.statusReason !== null ? (
-            <p className="text-xs leading-relaxed text-muted-foreground">
-              {availability.statusReason}
-            </p>
-          ) : null}
-        </div>
+        <ConnectorStatusBadge availability={availability} />
       </TableCell>
       <TableCell className="whitespace-nowrap text-muted-foreground">
         {instance.status === null ? (

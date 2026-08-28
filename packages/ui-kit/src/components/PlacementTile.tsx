@@ -15,7 +15,6 @@ import { toast } from "sonner";
 
 import { Alert, AlertDescription } from "@loom/ui-kit/components/ui/alert";
 import { ConnectorDetailModal } from "@loom/ui-kit/components/ConnectorDetailModal";
-import { Badge } from "@loom/ui-kit/components/ui/badge";
 import { Button } from "@loom/ui-kit/components/ui/button";
 import { Card, CardContent, CardHeader } from "@loom/ui-kit/components/ui/card";
 import { Checkbox } from "@loom/ui-kit/components/ui/checkbox";
@@ -32,6 +31,7 @@ import { connectorAvailability } from "@loom/ui-kit/lib/connector-availability";
 import { useApiClient } from "@loom/ui-kit/lib/api-context";
 import { useAuth } from "@loom/ui-kit/lib/auth-context";
 import { ConnectorIcon } from "@loom/ui-kit/components/ConnectorIcon";
+import { ConnectorStatusBadge } from "@loom/ui-kit/components/ConnectorStatusBadge";
 import { cn } from "@loom/ui-kit/lib/utils";
 import { describeConnectorError } from "@loom/ui-kit/lib/connector-error";
 import {
@@ -260,9 +260,7 @@ export function PlacementTile({
               onCheckedChange={(checked) => onSelectedChange?.(checked === true)}
             />
           ) : null}
-          <Badge variant={availability.tone} title={availability.label}>
-            {availability.label}
-          </Badge>
+          <ConnectorStatusBadge availability={availability} />
           {grouping ? null : editing ? (
             <>
               {groupMember !== undefined ? (
@@ -364,12 +362,6 @@ export function PlacementTile({
             <AlertCircle aria-hidden="true" />
             <AlertDescription>{describeConnectorError(statusError)}</AlertDescription>
           </Alert>
-        ) : null}
-
-        {availability.statusReason !== null ? (
-          <p className="mb-3 text-xs leading-relaxed text-muted-foreground">
-            {availability.statusReason}
-          </p>
         ) : null}
 
         {/* The network-level explanation, when there is one. A plain line

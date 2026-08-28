@@ -2,7 +2,11 @@ import { cva, type VariantProps } from "class-variance-authority";
 
 import { Skeleton } from "@loom/ui-kit/components/ui/skeleton";
 import { cn } from "@loom/ui-kit/lib/utils";
-import { formatReading, type DisplayWidgetProps } from "@loom/ui-kit/widgets/types";
+import {
+  formatByteReading,
+  formatReading,
+  type DisplayWidgetProps,
+} from "@loom/ui-kit/widgets/types";
 
 const statTileValue = cva("font-semibold leading-none tracking-tight tabular-nums", {
   variants: {
@@ -40,7 +44,9 @@ export function StatTileWidget({
   className,
   size,
 }: DisplayWidgetProps & VariantProps<typeof statTileValue>) {
-  const text = formatReading(value);
+  const bytes = unit === "bytes" && typeof value === "number" ? formatByteReading(value) : null;
+  const text = bytes?.text ?? formatReading(value);
+  const displayedUnit = bytes?.unit ?? unit;
   const resolvedSize = size ?? (value === undefined || text.length > 12 ? "sm" : "md");
 
   return (
@@ -49,8 +55,8 @@ export function StatTileWidget({
         <span className={cn(statTileValue({ size: resolvedSize }), "truncate")} title={text}>
           {text}
         </span>
-        {unit && value !== undefined ? (
-          <span className="shrink-0 text-sm text-muted-foreground">{unit}</span>
+        {displayedUnit && value !== undefined ? (
+          <span className="shrink-0 text-sm text-muted-foreground">{displayedUnit}</span>
         ) : null}
       </div>
       <span className="truncate text-xs text-muted-foreground" title={label}>

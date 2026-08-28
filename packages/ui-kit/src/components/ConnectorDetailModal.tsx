@@ -4,7 +4,6 @@ import { AlertCircle } from "lucide-react";
 import { toast } from "sonner";
 
 import { Alert, AlertDescription } from "@loom/ui-kit/components/ui/alert";
-import { Badge } from "@loom/ui-kit/components/ui/badge";
 import {
   Dialog,
   DialogContent,
@@ -13,6 +12,7 @@ import {
   DialogTitle,
 } from "@loom/ui-kit/components/ui/dialog";
 import { ConnectorIcon } from "@loom/ui-kit/components/ConnectorIcon";
+import { ConnectorStatusBadge } from "@loom/ui-kit/components/ConnectorStatusBadge";
 import { Skeleton } from "@loom/ui-kit/components/ui/skeleton";
 import { ActionButtonWidget } from "@loom/ui-kit/widgets/ActionButton";
 import { renderWidget } from "@loom/ui-kit/widgets/renderWidget";
@@ -131,16 +131,11 @@ export function ConnectorDetailModal({
               {instance.name}
               {placement.targetId === null ? null : ` · ${placement.targetId}`}
             </DialogTitle>
-            <Badge variant={availability.tone}>{availability.label}</Badge>
+            <ConnectorStatusBadge availability={availability} />
           </div>
           <DialogDescription>
             {instance.metadata.name} · {instance.connectorType} · v{instance.metadata.version}
           </DialogDescription>
-          {availability.statusReason !== null ? (
-            <p className="text-xs leading-relaxed text-muted-foreground">
-              {availability.statusReason}
-            </p>
-          ) : null}
           {/* Beneath the Badge that already said something is wrong. A plain
               line rather than a second Alert: one message per problem. */}
           {availability.diagnosis !== null ? (
