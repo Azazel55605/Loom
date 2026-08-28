@@ -1165,6 +1165,247 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn resource_kinds_and_rows_are_served_from_the_live_connector() {
+        let app = test_app().await;
+        let (access, _) = setup_and_login(&app.router).await;
+        let id = create_debug_instance(&app.router, &access, "Browsable").await;
+
+        let (status, kinds) = send(
+            &app.router,
+            get_with_auth(
+                &format!("/connector-instances/{id}/resource-kinds"),
+                &bearer(&access),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{kinds:#}");
+        let kinds = kinds.as_array().expect("a list of kinds").clone();
+        assert_eq!(
+            kinds
+                .iter()
+                .map(|kind| kind["kind"].as_str().expect("kind id"))
+                .collect::<Vec<_>>(),
+            vec!["widgets", "gadgets"]
+        );
+        assert_eq!(kinds[0]["columns"][1]["valueType"], "bytes");
+        assert_eq!(kinds[0]["rowActions"][0]["id"], "recycle");
+        assert_eq!(kinds[0]["kindActions"][0]["id"], "cleanupAll");
+        assert_eq!(
+            kinds[1]["kindActions"],
+            serde_json::json!([]),
+            "the second fixture kind deliberately has no kind actions"
+        );
+
+        let (status, rows) = send(
+            &app.router,
+            get_with_auth(
+                &format!("/connector-instances/{id}/resources/widgets"),
+                &bearer(&access),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{rows:#}");
+        let rows = rows.as_array().expect("a list of rows");
+        assert_eq!(rows.len(), 3);
+        assert_eq!(rows[0]["id"], "widget-1");
+        assert_eq!(rows[0]["fields"]["name"], "alpha-widget");
+        assert_eq!(rows[0]["fields"]["size"], 1_048_576);
+
+        // `targetId` is passed through rather than rejected: a browsable kind
+        // may legitimately be scoped to one sub-target.
+        let (status, scoped) = send(
+            &app.router,
+            get_with_auth(
+                &format!("/connector-instances/{id}/resources/gadgets?targetId=fixture-a"),
+                &bearer(&access),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{scoped:#}");
+        assert_eq!(scoped.as_array().expect("a list of rows").len(), 2);
+
+        // A kind this connector never declared is a bad request, not an empty
+        // table — the whole reason the route validates against the live
+        // descriptors instead of calling through.
+        let (status, body) = send(
+            &app.router,
+            get_with_auth(
+                &format!("/connector-instances/{id}/resources/nonexistent-kind"),
+                &bearer(&access),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{body:#}");
+        assert!(body["error"]
+            .as_str()
+            .is_some_and(|message| message.contains("nonexistent-kind")));
+
+        // A connector using the trait's defaults browses nothing, and asking
+        // for one of the fixture's kinds through it is refused for exactly the
+        // same reason.
+        let uuid = uuid::Uuid::parse_str(&id).expect("instance uuid");
+        app.connectors
+            .insert(
+                uuid,
+                Arc::new(NonDiscoverableConnector(DebugConnector::default())),
+            )
+            .await;
+        let (status, kinds) = send(
+            &app.router,
+            get_with_auth(
+                &format!("/connector-instances/{id}/resource-kinds"),
+                &bearer(&access),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{kinds:#}");
+        assert_eq!(kinds, serde_json::json!([]));
+
+        let (status, body) = send(
+            &app.router,
+            get_with_auth(
+                &format!("/connector-instances/{id}/resources/widgets"),
+                &bearer(&access),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{body:#}");
+    }
+
+    #[tokio::test]
+    async fn resource_actions_run_through_the_ordinary_action_endpoint() {
+        let app = test_app().await;
+        let (access, _) = setup_and_login(&app.router).await;
+        let id = create_debug_instance(&app.router, &access, "Browsable").await;
+
+        // A row action, carrying the row it acts on in `params` — the whole
+        // targeting convention, exercised end to end.
+        let (status, body) = send(
+            &app.router,
+            post_json_auth(
+                &format!("/connector-instances/{id}/actions/recycle"),
+                &access,
+                serde_json::json!({ "resourceId": "widget-2" }),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body:#}");
+        assert_eq!(body["success"], true);
+        assert_eq!(body["payload"]["recycled"], "widget-2");
+
+        // The same action without a row is the connector's own refusal, not a
+        // route-level one, and arrives as a 400 with the reason intact.
+        let (status, body) = send(
+            &app.router,
+            post_json_auth(
+                &format!("/connector-instances/{id}/actions/recycle"),
+                &access,
+                serde_json::json!({}),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{body:#}");
+        assert!(body["error"]
+            .as_str()
+            .is_some_and(|message| message.contains("resourceId")));
+
+        // A kind action addresses no row and needs no params.
+        let (status, body) = send(
+            &app.router,
+            post_json_auth(
+                &format!("/connector-instances/{id}/actions/cleanupAll"),
+                &access,
+                serde_json::json!({}),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body:#}");
+        assert_eq!(body["success"], true);
+
+        // Validation spans both universes but is not a free pass: an id
+        // advertised in neither is still refused.
+        let (status, body) = send(
+            &app.router,
+            post_json_auth(
+                &format!("/connector-instances/{id}/actions/not-an-action"),
+                &access,
+                serde_json::json!({}),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::NOT_FOUND, "{body:#}");
+    }
+
+    /// Browsing is a connector *action*, so it sits behind the same permission
+    /// as any other action — no new tier, no exemption for the ones that
+    /// happen to be advertised inside a table.
+    #[tokio::test]
+    async fn resource_browsing_uses_the_established_permission_tiers() {
+        let app = test_app().await;
+        let (admin, _) = setup_and_login(&app.router).await;
+        let id = create_debug_instance(&app.router, &admin, "Browsable").await;
+
+        // Can look at connectors, cannot control them.
+        let viewer = user_with_grants(
+            &app.router,
+            &admin,
+            "viewer",
+            serde_json::json!([{
+                "key": "connectors.view",
+                "resourceType": null,
+                "resourceId": null,
+            }]),
+        )
+        .await;
+
+        for path in [
+            format!("/connector-instances/{id}/resource-kinds"),
+            format!("/connector-instances/{id}/resources/widgets"),
+        ] {
+            let (status, body) = send(&app.router, get_with_auth(&path, &bearer(&viewer))).await;
+            assert_eq!(status, StatusCode::OK, "{path}: {body:#}");
+        }
+
+        for action in ["recycle", "cleanupAll"] {
+            let (status, _) = send(
+                &app.router,
+                post_json_auth(
+                    &format!("/connector-instances/{id}/actions/{action}"),
+                    &viewer,
+                    serde_json::json!({ "resourceId": "widget-1" }),
+                ),
+            )
+            .await;
+            assert_eq!(
+                status,
+                StatusCode::FORBIDDEN,
+                "{action} must need connectors.control"
+            );
+        }
+
+        // And no grant at all cannot even read the tables.
+        let nobody = user_with_grants(&app.router, &admin, "nobody", serde_json::json!([])).await;
+        let (status, _) = send(
+            &app.router,
+            get_with_auth(
+                &format!("/connector-instances/{id}/resource-kinds"),
+                &bearer(&nobody),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+
+        // Anonymously, both browsing routes are 401 like every other one.
+        for path in [
+            format!("/connector-instances/{id}/resource-kinds"),
+            format!("/connector-instances/{id}/resources/widgets"),
+        ] {
+            let (status, _) = send(&app.router, get(&path)).await;
+            assert_eq!(status, StatusCode::UNAUTHORIZED, "{path}");
+        }
+    }
+
+    #[tokio::test]
     async fn type_scoped_discovery_uses_a_candidate_without_persisting_it() {
         let app = test_app().await;
         let (access, _) = setup_and_login(&app.router).await;

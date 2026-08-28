@@ -16,7 +16,7 @@
 //! list response and live updates cannot disagree about the latest snapshot.
 
 use axum::body::Bytes;
-use axum::extract::{Path, State};
+use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::Json;
@@ -431,19 +431,9 @@ pub async fn list_sub_targets(
     State(state): State<AppState>,
     Path(id): Path<String>,
 ) -> Response {
-    let row = match load_row(&state, &id).await {
-        Ok(Some(row)) => row,
-        Ok(None) => return not_found(&id),
+    let connector = match live_connector(&state, &id, "sub-targets").await {
+        Ok(connector) => connector,
         Err(response) => return *response,
-    };
-    let Ok(uuid) = Uuid::parse_str(&row.id) else {
-        return not_found(&id);
-    };
-    let Some(connector) = state.connectors.get(&uuid).await else {
-        return ErrorBody::message(
-            StatusCode::BAD_REQUEST,
-            "sub-targets are unavailable because this connector instance is not loaded",
-        );
     };
     if !connector.supports_sub_targets() {
         return ErrorBody::message(
@@ -454,6 +444,78 @@ pub async fn list_sub_targets(
 
     match connector.list_sub_targets().await {
         Ok(targets) => Json(targets).into_response(),
+        Err(error) => ErrorBody::connector(status_for(&error), error),
+    }
+}
+
+/// `GET /connector-instances/{id}/resource-kinds`
+///
+/// The browsable tables this instance publishes, live from the loaded
+/// connector. Read-only metadata, so `connectors.view` — the same tier as
+/// sub-targets, and deliberately not the management tier: browsing what a
+/// service holds is looking at it, not administering Loom.
+pub async fn list_resource_kinds(
+    _caller: RequirePermission<ConnectorsView>,
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Response {
+    let connector = match live_connector(&state, &id, "resource kinds").await {
+        Ok(connector) => connector,
+        Err(response) => return *response,
+    };
+    Json(connector.resource_kinds()).into_response()
+}
+
+/// Query parameters for a resource listing.
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ResourceListQuery {
+    /// Optional sub-target to scope the listing to, passed straight through to
+    /// the connector. Absent means the instance as a whole.
+    #[serde(default)]
+    target_id: Option<String>,
+}
+
+/// `GET /connector-instances/{id}/resources/{kind}`
+///
+/// The rows of one browsable table, optionally scoped with `?targetId=`.
+///
+/// The kind is checked against the connector's *live* descriptors before the
+/// listing runs. That matters because an unknown kind and an empty kind are the
+/// same answer at the trait level — `Ok(vec![])` — and a user staring at an
+/// empty table deserves to know whether they are looking at a service with
+/// nothing in it or at a typo. Only the descriptor list can tell them apart, so
+/// the check happens here rather than being pushed onto every connector author.
+pub async fn list_resources(
+    _caller: RequirePermission<ConnectorsView>,
+    State(state): State<AppState>,
+    Path((id, kind)): Path<(String, String)>,
+    Query(query): Query<ResourceListQuery>,
+) -> Response {
+    let connector = match live_connector(&state, &id, "resources").await {
+        Ok(connector) => connector,
+        Err(response) => return *response,
+    };
+
+    if !connector
+        .resource_kinds()
+        .iter()
+        .any(|descriptor| descriptor.kind == kind)
+    {
+        return ErrorBody::message(
+            StatusCode::BAD_REQUEST,
+            format!("this connector instance has no resource kind named `{kind}`"),
+        );
+    }
+
+    let target_id = query
+        .target_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+
+    match connector.list_resource_items(&kind, target_id).await {
+        Ok(items) => Json(items).into_response(),
         Err(error) => ErrorBody::connector(status_for(&error), error),
     }
 }
@@ -820,23 +882,40 @@ pub async fn execute_action(
         params => (None, params),
     };
 
+    // What the connector says this action is, looked up across both places it
+    // can be advertised: its top-level `actions()` and the row/kind actions of
+    // its resource kinds. A resource-browser action is still a connector
+    // action — same dispatch, same `connectors.control` requirement, same
+    // resource scoping — so recognising it here is all that browsing needed
+    // from this endpoint.
+    let descriptor = resolve_action(connector.as_ref(), &action_id, target_id.as_deref()).await;
+
+    // An id the connector advertises nowhere is rejected before it is
+    // dispatched — *unless* the connector currently advertises nothing at all.
+    // An empty universe is what a connector reports while its service is
+    // unreachable, and answering "unknown action id" to that would be a lie
+    // told with a 404. In that case the call goes through and the connector
+    // gets to state its real problem.
+    let advertises_nothing =
+        connector.actions().await.is_empty() && connector.resource_kinds().is_empty();
+    if descriptor.is_none() && !advertises_nothing {
+        return ErrorBody::connector(
+            StatusCode::NOT_FOUND,
+            ConnectorError::invalid_action(action_id),
+        );
+    }
+
     // A disruptive action makes the service stop answering for a while, and a
     // poll landing in that window would report a perfectly accurate outage. The
     // marker goes up *before* the request is dispatched, because the gap
     // between sending it and recording it is exactly where that spurious Down
     // would be observed.
     //
-    // Looked up from the connector's own action list rather than from a name
-    // this route recognises: which actions are disruptive is the connector
-    // author's judgement, and hardcoding "restart" here would be right for
-    // Docker and wrong for the next connector that calls it "recreate".
-    let disruptive = connector
-        .actions()
-        .await
-        .into_iter()
-        .find(|action| {
-            action.id == action_id && action.target_id.as_deref() == target_id.as_deref()
-        })
+    // Taken from the connector's own descriptor rather than from a name this
+    // route recognises: which actions are disruptive is the connector author's
+    // judgement, and hardcoding "restart" here would be right for Docker and
+    // wrong for the next connector that calls it "recreate".
+    let disruptive = descriptor
         .filter(|action| action.is_disruptive)
         .map(|action| action.label);
 
@@ -873,6 +952,71 @@ pub async fn execute_action(
 /* ------------------------------------------------------------------ */
 /* Helpers                                                             */
 /* ------------------------------------------------------------------ */
+
+/// Finds the descriptor for one requested action across everything the
+/// connector currently offers.
+///
+/// Two universes, one namespace. An action is either a connector-level
+/// operation from [`Connector::actions`], optionally scoped to a sub-target, or
+/// a resource-browser operation declared inside one of the connector's resource
+/// kinds — a row action or a kind action. Both run through the same
+/// `execute_action` call and are therefore the same *kind* of thing; only the
+/// place they are advertised differs. Resource actions carry no `target_id` of
+/// their own (which row they act on travels as `resourceId` in `params`), so
+/// they match on id alone.
+///
+/// Returns `None` for an id the connector does not currently advertise
+/// anywhere. Note *currently*: `actions()` legitimately returns an empty list
+/// from a connector whose service is unreachable, which is why the caller must
+/// not read `None` as "no such action" on its own.
+async fn resolve_action(
+    connector: &dyn Connector,
+    action_id: &str,
+    target_id: Option<&str>,
+) -> Option<ConnectorAction> {
+    if let Some(action) = connector
+        .actions()
+        .await
+        .into_iter()
+        .find(|action| action.id == action_id && action.target_id.as_deref() == target_id)
+    {
+        return Some(action);
+    }
+
+    connector
+        .resource_kinds()
+        .into_iter()
+        .flat_map(|kind| kind.row_actions.into_iter().chain(kind.kind_actions))
+        .find(|action| action.id == action_id)
+}
+
+/// Resolves a durable instance id to its loaded connector.
+///
+/// The two-step lookup is not redundant: a row can exist while its connector
+/// failed to build, and those are different answers — 404 for "no such
+/// instance", 400 for "it is there but nothing is behind it". `subject` names
+/// what the caller wanted, so the 400 says which capability is unavailable.
+async fn live_connector(
+    state: &AppState,
+    id: &str,
+    subject: &str,
+) -> RouteResult<std::sync::Arc<dyn Connector>> {
+    let row = match load_row(state, id).await {
+        Ok(Some(row)) => row,
+        Ok(None) => return Err(Box::new(not_found(id))),
+        Err(response) => return Err(response),
+    };
+    let Ok(uuid) = Uuid::parse_str(&row.id) else {
+        return Err(Box::new(not_found(id)));
+    };
+    match state.connectors.get(&uuid).await {
+        Some(connector) => Ok(connector),
+        None => Err(Box::new(ErrorBody::message(
+            StatusCode::BAD_REQUEST,
+            format!("{subject} are unavailable because this connector instance is not loaded"),
+        ))),
+    }
+}
 
 /// Reads one row, mapping "no such row" to `Ok(None)` and a database failure to
 /// a ready-made 500.

@@ -1147,6 +1147,162 @@ its separate purpose of suggesting whole new connector instances.
 | 403 | The caller lacks a global `connectors.view` grant. |
 | 404 | No instance with that id. |
 
+## Resource browser
+
+Some connectors manage *collections* — a Docker daemon's images, volumes, and
+networks; a backup tool's snapshots. Those are not data points (a data point is
+one reading that drives one widget) and not sub-targets (a sub-target is an
+addressable view of the same service). They are tables: many rows, a few
+columns, and some operations offered beside them.
+
+A connector publishes zero or more **resource kinds**. Each kind names its
+columns, its per-row actions, and its whole-kind actions. Nothing here is
+Docker-specific: a client renders a table from the descriptors without knowing
+what the connector is. See
+[`adr/0021-connector-resource-browser.md`](adr/0021-connector-resource-browser.md).
+
+### Column value types
+
+`valueType` tells a client how to *format* a cell. The value on the wire is
+always the raw one; scaling and localizing are the client's business, so two
+clients never disagree about what the number meant.
+
+| `valueType` | Wire shape | Expected rendering |
+| --- | --- | --- |
+| `text` | string | As-is. |
+| `number` | number | The client's ordinary numeric formatting. |
+| `bool` | boolean | A yes/no affordance, not the literal `true`. |
+| `timestamp` | string, ISO 8601 | Localized to the viewer's locale and timezone — a date, a time, or "3 days ago". |
+| `bytes` | number, **raw byte count** | Human-readable size (`1.4 GB`), never the raw integer. |
+
+These are deliberately not the [`DataPointValueType`](#datapointdescriptor)
+values. A data point needs `timeSeries` and has no use for a byte count; a table
+cell is the reverse.
+
+### Invoking a resource action
+
+Row and kind actions are ordinary [`ConnectorAction`](#connectoraction) values
+and run through the ordinary
+[`POST /connector-instances/{id}/actions/{actionId}`](#post-connector-instancesidactionsactionid)
+endpoint, with the same `connectors.control` requirement, scoped to the same
+`connector` / `{id}` resource. Browsing introduced **no new permission tier**: a
+resource action is a connector action, not connector management.
+
+Which row a row action acts on travels in `params` under the key
+**`resourceId`**, carrying that row's `id`:
+
+```json
+{ "params": { "resourceId": "sha256:2f1c…" } }
+```
+
+A kind action addresses no row and sends no `resourceId`. A connector must
+refuse a row action without one (`ConnectorError::InvalidParams` → 400) rather
+than guessing, and should declare the field in the action's `paramsSchema` so a
+client can see the requirement instead of reading it here.
+
+`targetId` keeps its existing meaning — which *sub-target* is addressed — and is
+orthogonal to `resourceId`.
+
+### `GET /connector-instances/{id}/resource-kinds`
+
+Requires a global `connectors.view` grant. Returns the live connector's
+descriptors. Browsing what a service holds is looking at it, not administering
+Loom, so this is the same read-only tier as sub-targets.
+
+```json
+[
+  {
+    "kind": "widgets",
+    "label": "Widgets",
+    "columns": [
+      { "key": "name", "label": "Name", "valueType": "text" },
+      { "key": "size", "label": "Size", "valueType": "bytes" },
+      { "key": "createdAt", "label": "Created", "valueType": "timestamp" }
+    ],
+    "rowActions": [
+      {
+        "id": "recycle",
+        "targetId": null,
+        "label": "Recycle",
+        "description": "Pretends to recycle one simulated resource.",
+        "paramsSchema": {
+          "type": "object",
+          "properties": { "resourceId": { "type": "string", "minLength": 1 } },
+          "required": ["resourceId"],
+          "additionalProperties": false
+        },
+        "isDisruptive": false
+      }
+    ],
+    "kindActions": [
+      {
+        "id": "cleanupAll",
+        "targetId": null,
+        "label": "Clean up all",
+        "description": "Pretends to clean up every simulated widget at once.",
+        "paramsSchema": {},
+        "isDisruptive": false
+      }
+    ]
+  }
+]
+```
+
+| Field | JSON type | Meaning | Nullability |
+| --- | --- | --- | --- |
+| `kind` | string | Stable machine id, unique within the connector, and the URL segment rows are fetched under. | Always present. |
+| `label` | string | Human-facing table or tab name. | Always present. |
+| `columns` | array | Column descriptors, in display order. | Always present; may be empty. |
+| `rowActions` | array | `ConnectorAction`s taking a `resourceId`. | Always present; **may be empty**. |
+| `kindActions` | array | `ConnectorAction`s addressing the kind as a whole. | Always present; **may be empty**. |
+
+| Status | Meaning |
+| --- | --- |
+| 200 | Descriptors returned; an empty array means this connector browses nothing. |
+| 400 | The instance is not loaded. |
+| 403 | The caller lacks a global `connectors.view` grant. |
+| 404 | No instance with that id. |
+
+### `GET /connector-instances/{id}/resources/{kind}`
+
+Requires a global `connectors.view` grant. Returns the current rows of one
+kind. `?targetId=` optionally scopes the listing to a sub-target and is passed
+through to the connector unchanged; omitting it means the instance as a whole.
+
+```json
+[
+  {
+    "id": "widget-1",
+    "fields": {
+      "name": "alpha-widget",
+      "size": 1048576,
+      "createdAt": "2026-01-04T09:15:00Z"
+    }
+  }
+]
+```
+
+| Field | JSON type | Meaning | Nullability |
+| --- | --- | --- | --- |
+| `id` | string | Stable row id, passed back as `resourceId` when a row action is invoked. | Always present. |
+| `fields` | object | Cell values keyed by `ColumnDescriptor.key`. | Always present; a missing key renders as an empty cell, and an unknown key is ignored. |
+
+**An unknown `kind` is 400, not an empty list.** At the connector level the two
+are the same answer, because a connector returns an empty list for a kind it
+does not have. The backend validates `kind` against that instance's live
+descriptors first, so a user staring at an empty table knows whether they are
+looking at a service holding nothing or at a typo.
+
+| Status | Meaning |
+| --- | --- |
+| 200 | Rows returned; an empty array means the kind exists and currently holds nothing. |
+| 400 | This connector instance has no resource kind by that name, or is not loaded. |
+| 400 | `ConnectorError::InvalidParams` / `InvalidConfig` from the listing. |
+| 403 | The caller lacks a global `connectors.view` grant. |
+| 404 | No instance with that id. |
+| 502 | `ConnectorError::Unreachable` or `AuthFailed` — the listing could not be carried out. |
+| 500 | `ConnectorError::Internal`. |
+
 ## Discovery & Setup Guides
 
 Discovery has two complementary entry points. Instance-scoped discovery runs
@@ -1480,6 +1636,15 @@ After any action returns, Loom schedules an immediate background status poll.
 The action response does not wait for that inventory: the action itself is the
 request's result, while status updates continue through the normal polling and
 WebSocket path.
+
+**A valid `actionId` is one the connector currently advertises anywhere.** That
+means its top-level `actions` list *or* the `rowActions`/`kindActions` of any of
+its [resource kinds](#resource-browser) — both are dispatched identically and
+carry the same permission requirement. An id advertised in neither is refused
+with 404 before anything is dispatched. The one exception is a connector that
+currently advertises *nothing at all*, which is what an unreachable service
+looks like: the call is passed through so the connector can state its real
+problem instead of being told its actions do not exist.
 
 A 403 is returned **before** the instance id is looked up, so an unauthorized
 caller gets the same response whether or not the id exists. Otherwise the

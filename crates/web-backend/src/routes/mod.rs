@@ -108,6 +108,14 @@ pub fn routes() -> Router<AppState> {
             "/connector-instances/{id}/sub-targets",
             get(connectors::list_sub_targets),
         )
+        .route(
+            "/connector-instances/{id}/resource-kinds",
+            get(connectors::list_resource_kinds),
+        )
+        .route(
+            "/connector-instances/{id}/resources/{kind}",
+            get(connectors::list_resources),
+        )
         .route("/ws", get(connector_socket::connector_status_socket))
         .route(
             "/dashboards",

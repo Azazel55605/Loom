@@ -9,7 +9,7 @@
 //! with a laptop and no homelab can still work on Loom's UI, and Loom's tests
 //! can assert on connector behaviour without depending on a service being up.
 //!
-//! It now carries five jobs rather than one:
+//! It now carries six jobs rather than one:
 //!
 //! 1. **Auth and shell development**, its original purpose — a connector that
 //!    is reliably there to be listed, permission-checked, and acted on.
@@ -28,6 +28,12 @@
 //!    and its live connection test reports both unconditional and conditional
 //!    capabilities, so every layer can be
 //!    exercised before a real integration exists.
+//! 6. **Resource-browser reference behaviour.** It publishes two fake
+//!    browsable kinds — `widgets` and `gadgets` — whose columns cover every
+//!    [`ColumnValueType`] and whose actions cover both scopes (one row action
+//!    needing a `resourceId`, one kind action needing nothing), so a table
+//!    renderer and the endpoints behind it can be built and tested before any
+//!    real connector browses anything.
 //!
 //! Everything interesting is set at construction through
 //! [`DebugConnectorConfig`]:
@@ -68,10 +74,11 @@ use serde_json::{json, Map, Value};
 
 use super::{
     details::set_detail, ActionResult, ActionWidgetType, CapabilityRequirement, CapabilityStatus,
-    ChartType, ConnectionTestResult, Connector, ConnectorAction, ConnectorError, ConnectorMetadata,
-    ConnectorStatus, DataPointDescriptor, DataPointValueType, DiscoveredResource, DisplayField,
-    DisplayWidgetType, HealthState, NetworkTarget, SetupGuide, SetupGuideToggle, SetupGuideVariant,
-    SubTarget, WidgetBinding, WidgetLayout,
+    ChartType, ColumnDescriptor, ColumnValueType, ConnectionTestResult, Connector, ConnectorAction,
+    ConnectorError, ConnectorMetadata, ConnectorStatus, DataPointDescriptor, DataPointValueType,
+    DiscoveredResource, DisplayField, DisplayWidgetType, HealthState, NetworkTarget, ResourceItem,
+    ResourceKindDescriptor, SetupGuide, SetupGuideToggle, SetupGuideVariant, SubTarget,
+    WidgetBinding, WidgetLayout,
 };
 
 /// The connector type id this fixture registers under.
@@ -91,6 +98,18 @@ pub const ACTION_SET_LOAD: &str = "set-load";
 
 /// The action id that rewrites the simulated label. Takes `{"label": string}`.
 pub const ACTION_SET_LABEL: &str = "set-label";
+
+/// The resource kind id for the fake browsable "widgets" table.
+pub const RESOURCE_KIND_WIDGETS: &str = "widgets";
+
+/// The resource kind id for the fake browsable "gadgets" table.
+pub const RESOURCE_KIND_GADGETS: &str = "gadgets";
+
+/// The row-scoped resource action. Takes `{"resourceId": string}`.
+pub const ACTION_RECYCLE: &str = "recycle";
+
+/// The kind-scoped resource action. Parameterless.
+pub const ACTION_CLEANUP_ALL: &str = "cleanupAll";
 
 /// The data point id for the oscillating numeric reading.
 pub const DATA_POINT_LOAD: &str = "load";
@@ -812,6 +831,30 @@ impl Connector for DebugConnector {
                     .with_payload(json!({ DATA_POINT_LABEL: label })))
             }
 
+            ACTION_RECYCLE => {
+                // A row action without a row is a client bug, not a resource
+                // that happens to be missing: refusing it here is what keeps
+                // the `resourceId` convention enforceable rather than
+                // advisory.
+                let resource_id = params
+                    .get("resourceId")
+                    .and_then(Value::as_str)
+                    .filter(|id| !id.trim().is_empty())
+                    .ok_or_else(|| ConnectorError::InvalidParams {
+                        action_id: action_id.to_string(),
+                        reason: "expected a non-empty string `resourceId`".to_string(),
+                    })?
+                    .to_string();
+
+                Ok(
+                    ActionResult::ok(format!("Simulated resource {resource_id} recycled."))
+                        .with_payload(json!({ "recycled": resource_id })),
+                )
+            }
+
+            ACTION_CLEANUP_ALL => Ok(ActionResult::ok("Simulated resources cleaned up.")
+                .with_payload(json!({ "cleaned": 3 }))),
+
             unknown => Err(ConnectorError::invalid_action(unknown)),
         }
     }
@@ -894,6 +937,113 @@ impl Connector for DebugConnector {
                 label: id.to_owned(),
             })
             .collect())
+    }
+
+    /// Two fake browsable kinds, covering every [`ColumnValueType`] and both
+    /// action scopes.
+    ///
+    /// `widgets` carries a row action and a kind action; `gadgets` carries only
+    /// a row action, so a client cannot get away with assuming every kind has
+    /// both. Between them the columns exercise all five cell formats, which is
+    /// what a table renderer has to be built against.
+    ///
+    /// Unconditional, including in fail mode: this is a descriptor method like
+    /// [`Connector::data_points`], and what a connector *can* browse does not
+    /// stop being true because the service is unreachable. The listing is where
+    /// the failure shows up.
+    fn resource_kinds(&self) -> Vec<ResourceKindDescriptor> {
+        let recycle = ConnectorAction {
+            id: ACTION_RECYCLE.to_owned(),
+            target_id: None,
+            label: "Recycle".to_owned(),
+            description: Some("Pretends to recycle one simulated resource.".to_owned()),
+            params_schema: json!({
+                "type": "object",
+                "properties": {
+                    "resourceId": { "type": "string", "minLength": 1 }
+                },
+                "required": ["resourceId"],
+                "additionalProperties": false
+            }),
+            is_disruptive: false,
+        };
+
+        vec![
+            ResourceKindDescriptor::new(
+                RESOURCE_KIND_WIDGETS,
+                "Widgets",
+                vec![
+                    ColumnDescriptor::new("name", "Name", ColumnValueType::Text),
+                    ColumnDescriptor::new("size", "Size", ColumnValueType::Bytes),
+                    ColumnDescriptor::new("createdAt", "Created", ColumnValueType::Timestamp),
+                ],
+            )
+            .with_row_actions(vec![recycle.clone()])
+            .with_kind_actions(vec![ConnectorAction::simple(
+                ACTION_CLEANUP_ALL,
+                "Clean up all",
+            )
+            .with_description("Pretends to clean up every simulated widget at once.")]),
+            ResourceKindDescriptor::new(
+                RESOURCE_KIND_GADGETS,
+                "Gadgets",
+                vec![
+                    ColumnDescriptor::new("serial", "Serial", ColumnValueType::Text),
+                    ColumnDescriptor::new("torque", "Torque", ColumnValueType::Number),
+                    ColumnDescriptor::new("active", "Active", ColumnValueType::Bool),
+                ],
+            )
+            .with_row_actions(vec![recycle]),
+        ]
+    }
+
+    /// Canned rows for the two fixture kinds, and an empty list for anything
+    /// else.
+    ///
+    /// The empty answer for an unknown kind is deliberate and matches the
+    /// trait's default: "no such kind here" is not a failure of the listing,
+    /// and a caller that needs to tell the two apart checks
+    /// [`Connector::resource_kinds`], which is the authoritative list. Latency
+    /// and fail mode apply exactly as they do everywhere else in this fixture,
+    /// so a table's loading and error states are reachable without a service.
+    ///
+    /// The rows are fixed values rather than derived from the simulation: a
+    /// table is something a test asserts on cell by cell, and readings that
+    /// moved between two calls would make that impossible.
+    async fn list_resource_items(
+        &self,
+        kind: &str,
+        _target_id: Option<&str>,
+    ) -> Result<Vec<ResourceItem>, ConnectorError> {
+        self.gate().await?;
+
+        Ok(match kind {
+            RESOURCE_KIND_WIDGETS => vec![
+                ResourceItem::new("widget-1")
+                    .with_field("name", "alpha-widget")
+                    .with_field("size", 1_048_576)
+                    .with_field("createdAt", "2026-01-04T09:15:00Z"),
+                ResourceItem::new("widget-2")
+                    .with_field("name", "beta-widget")
+                    .with_field("size", 734_003_200)
+                    .with_field("createdAt", "2026-02-17T22:40:00Z"),
+                ResourceItem::new("widget-3")
+                    .with_field("name", "gamma-widget")
+                    .with_field("size", 512)
+                    .with_field("createdAt", "2026-03-01T06:00:00Z"),
+            ],
+            RESOURCE_KIND_GADGETS => vec![
+                ResourceItem::new("gadget-1")
+                    .with_field("serial", "SN-0001")
+                    .with_field("torque", 42.5)
+                    .with_field("active", true),
+                ResourceItem::new("gadget-2")
+                    .with_field("serial", "SN-0002")
+                    .with_field("torque", 7.0)
+                    .with_field("active", false),
+            ],
+            _ => Vec::new(),
+        })
     }
 
     async fn discover(&self) -> Result<Vec<DiscoveredResource>, ConnectorError> {
@@ -1583,6 +1733,199 @@ mod tests {
             seen.len() > 1,
             "a chart needs the value to actually change between polls"
         );
+    }
+
+    #[tokio::test]
+    async fn resource_kinds_describe_two_browsable_tables() {
+        let connector = DebugConnector::default();
+        let kinds = connector.resource_kinds();
+
+        let ids: Vec<&str> = kinds.iter().map(|kind| kind.kind.as_str()).collect();
+        assert_eq!(ids, vec![RESOURCE_KIND_WIDGETS, RESOURCE_KIND_GADGETS]);
+
+        let widgets = &kinds[0];
+        assert_eq!(widgets.label, "Widgets");
+        assert_eq!(
+            widgets
+                .columns
+                .iter()
+                .map(|column| (column.key.as_str(), column.value_type))
+                .collect::<Vec<_>>(),
+            vec![
+                ("name", ColumnValueType::Text),
+                ("size", ColumnValueType::Bytes),
+                ("createdAt", ColumnValueType::Timestamp),
+            ]
+        );
+        assert_eq!(
+            widgets
+                .row_actions
+                .iter()
+                .map(|action| action.id.as_str())
+                .collect::<Vec<_>>(),
+            vec![ACTION_RECYCLE]
+        );
+        assert_eq!(
+            widgets
+                .kind_actions
+                .iter()
+                .map(|action| action.id.as_str())
+                .collect::<Vec<_>>(),
+            vec![ACTION_CLEANUP_ALL]
+        );
+
+        // The second kind deliberately has no kind actions: a client that
+        // assumed every kind offers both scopes would render a phantom button.
+        let gadgets = &kinds[1];
+        assert!(gadgets.kind_actions.is_empty());
+        assert_eq!(
+            gadgets
+                .columns
+                .iter()
+                .map(|column| column.value_type)
+                .collect::<Vec<_>>(),
+            vec![
+                ColumnValueType::Text,
+                ColumnValueType::Number,
+                ColumnValueType::Bool,
+            ]
+        );
+
+        // Between the two, every cell format a renderer has to handle is
+        // reachable from the fixture alone.
+        let covered: std::collections::HashSet<ColumnValueType> = kinds
+            .iter()
+            .flat_map(|kind| kind.columns.iter().map(|column| column.value_type))
+            .collect();
+        for value_type in [
+            ColumnValueType::Text,
+            ColumnValueType::Number,
+            ColumnValueType::Bool,
+            ColumnValueType::Timestamp,
+            ColumnValueType::Bytes,
+        ] {
+            assert!(
+                covered.contains(&value_type),
+                "{value_type:?} is unexercised"
+            );
+        }
+
+        // Resource-kind descriptors are not gated on health: what a connector
+        // can browse stays true while its service is unreachable.
+        assert_eq!(
+            DebugConnector::failing(ConnectorError::unreachable("simulated"))
+                .resource_kinds()
+                .len(),
+            2
+        );
+    }
+
+    #[tokio::test]
+    async fn resource_items_are_canned_rows_keyed_by_their_columns() {
+        let connector = DebugConnector::default();
+
+        let widgets = connector
+            .list_resource_items(RESOURCE_KIND_WIDGETS, None)
+            .await
+            .expect("listing widgets");
+        assert_eq!(widgets.len(), 3);
+        assert_eq!(widgets[0].id, "widget-1");
+        assert_eq!(widgets[0].fields["name"], json!("alpha-widget"));
+        assert_eq!(widgets[0].fields["size"], json!(1_048_576));
+        assert_eq!(
+            widgets[0].fields["createdAt"],
+            json!("2026-01-04T09:15:00Z")
+        );
+
+        // Every row fills every declared column, or a table renderer would be
+        // built against holes the fixture invented rather than against data.
+        let kinds = connector.resource_kinds();
+        for kind in &kinds {
+            let rows = connector
+                .list_resource_items(&kind.kind, None)
+                .await
+                .expect("listing a declared kind");
+            assert!(!rows.is_empty(), "{} has no rows", kind.kind);
+            for row in &rows {
+                assert!(!row.id.is_empty());
+                for column in &kind.columns {
+                    assert!(
+                        row.fields.contains_key(&column.key),
+                        "row {} is missing column {}",
+                        row.id,
+                        column.key
+                    );
+                }
+            }
+        }
+
+        // A kind nobody declared is an empty table, not a failure — the same
+        // answer the trait's default gives.
+        assert_eq!(
+            connector
+                .list_resource_items("nonexistent", None)
+                .await
+                .expect("an unknown kind is not an error"),
+            Vec::new()
+        );
+    }
+
+    #[tokio::test]
+    async fn listing_resources_respects_latency_and_fail_mode() {
+        let start = std::time::Instant::now();
+        assert!(!DebugConnector::with_latency(60)
+            .list_resource_items(RESOURCE_KIND_WIDGETS, None)
+            .await
+            .expect("listing should still succeed")
+            .is_empty());
+        assert!(start.elapsed() >= std::time::Duration::from_millis(60));
+
+        let failing = DebugConnector::failing(ConnectorError::unreachable("simulated outage"));
+        assert_eq!(
+            failing
+                .list_resource_items(RESOURCE_KIND_WIDGETS, None)
+                .await
+                .expect_err("fail mode must reach the listing too"),
+            ConnectorError::unreachable("simulated outage")
+        );
+    }
+
+    #[tokio::test]
+    async fn resource_actions_cover_both_scopes_and_enforce_the_row_id() {
+        let connector = DebugConnector::default();
+
+        let recycled = connector
+            .execute_action(ACTION_RECYCLE, None, json!({ "resourceId": "widget-2" }))
+            .await
+            .expect("recycle should succeed");
+        assert!(recycled.success);
+        assert_eq!(
+            recycled.payload,
+            Some(json!({ "recycled": "widget-2" })),
+            "the row action must echo the row it acted on"
+        );
+
+        // A kind action addresses no row, so it must not demand one.
+        let cleaned = connector
+            .execute_action(ACTION_CLEANUP_ALL, None, Value::Null)
+            .await
+            .expect("cleanup should succeed");
+        assert!(cleaned.success);
+
+        // A row action without a row is refused rather than guessed at.
+        for params in [Value::Null, json!({}), json!({ "resourceId": "  " })] {
+            assert_eq!(
+                connector
+                    .execute_action(ACTION_RECYCLE, None, params.clone())
+                    .await
+                    .expect_err("a row action needs its row"),
+                ConnectorError::InvalidParams {
+                    action_id: ACTION_RECYCLE.to_string(),
+                    reason: "expected a non-empty string `resourceId`".to_string(),
+                },
+                "params {params} should have been refused"
+            );
+        }
     }
 
     #[tokio::test]

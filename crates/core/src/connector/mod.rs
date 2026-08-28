@@ -26,6 +26,7 @@ use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use std::collections::HashMap;
 
 pub mod debug;
 pub mod details;
@@ -122,6 +123,48 @@ pub trait Connector: Send + Sync {
     /// sub-target remains inside this
     /// instance and shares its connection and permission boundary.
     async fn list_sub_targets(&self) -> Result<Vec<SubTarget>, ConnectorError> {
+        Ok(Vec::new())
+    }
+
+    /// The kinds of resource this connector can list as a browsable table.
+    ///
+    /// Descriptors only — the rows themselves come from
+    /// [`Connector::list_resource_items`], the same split as
+    /// [`Connector::data_points`] and [`ConnectorStatus::details`]. A client
+    /// renders a table from the columns without knowing what the connector is,
+    /// and offers the declared actions beside it.
+    ///
+    /// Empty by default, and legitimately empty for most connectors: a resource
+    /// kind is for things a service has *many* of and a user browses through —
+    /// images, volumes, backups — not for the service's own readings, which are
+    /// data points. See `docs/adr/0021-connector-resource-browser.md`.
+    ///
+    /// Cheap and synchronous, like the other descriptor methods: a client asks
+    /// what can be browsed before it asks for any rows.
+    fn resource_kinds(&self) -> Vec<ResourceKindDescriptor> {
+        Vec::new()
+    }
+
+    /// Lists the current rows of one resource kind.
+    ///
+    /// `kind` matches a [`ResourceKindDescriptor::kind`] this connector
+    /// published; `target_id` scopes the listing to a sub-target
+    /// ([`Connector::list_sub_targets`]) when the connector has them, and
+    /// `None` means the instance as a whole.
+    ///
+    /// An unrecognised `kind` yields an **empty list, not an error** — that is
+    /// what the default implementation returns for every kind, and a connector
+    /// that overrides this should behave the same way, so "this connector does
+    /// not have that kind" reads identically whether or not it browses anything
+    /// at all. Callers that need to distinguish the two compare against
+    /// [`Connector::resource_kinds`], which is the authoritative list. The
+    /// `Err` arm stays reserved for what it means everywhere else in this
+    /// trait: the listing could not be carried out.
+    async fn list_resource_items(
+        &self,
+        _kind: &str,
+        _target_id: Option<&str>,
+    ) -> Result<Vec<ResourceItem>, ConnectorError> {
         Ok(Vec::new())
     }
 
@@ -789,6 +832,184 @@ impl DataPointDescriptor {
     }
 }
 
+/* ------------------------------------------------------------------ */
+/* Resource browser                                                    */
+/* ------------------------------------------------------------------ */
+
+/// The shape of one table cell, so a client knows how to format it.
+///
+/// Deliberately *not* [`DataPointValueType`], even though the two overlap. A
+/// data point drives a widget: its type decides which widgets may bind to it,
+/// so it needs [`TimeSeries`](DataPointValueType::TimeSeries) and has no use
+/// for a byte count. A column drives a cell in a table: it never needs a
+/// series, and it does need the two cases a raw number renders badly as — a
+/// size, which should read `1.4 GB` rather than `1503238553`, and an instant,
+/// which should read in the viewer's own locale and timezone rather than as an
+/// ISO string. Merging them would give every widget binding two variants it
+/// cannot draw and every table cell one it cannot fit.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum ColumnValueType {
+    /// A plain string, shown as-is.
+    Text,
+    /// A number, shown with the client's ordinary numeric formatting.
+    Number,
+    /// A flag, shown as the client's yes/no affordance rather than the literal
+    /// `true`.
+    Bool,
+    /// An instant as an ISO 8601 string, shown localized — a date, a time, or
+    /// "3 days ago", whichever the client's table style calls for.
+    Timestamp,
+    /// A size in **bytes**, shown human-readable. The value on the wire is
+    /// always the raw byte count; scaling it to KB/MB/GB is the client's
+    /// business, exactly as with [`DataPointDescriptor::unit`], so two clients
+    /// never disagree about what the number meant.
+    Bytes,
+}
+
+/// One column of a browsable resource table.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ColumnDescriptor {
+    /// Machine key this column's value appears under in
+    /// [`ResourceItem::fields`]. Stable, like a data point id.
+    pub key: String,
+    /// Human-facing column heading.
+    pub label: String,
+    /// How to format the cell.
+    pub value_type: ColumnValueType,
+}
+
+impl ColumnDescriptor {
+    /// A column with a key, a heading, and a value type.
+    pub fn new(
+        key: impl Into<String>,
+        label: impl Into<String>,
+        value_type: ColumnValueType,
+    ) -> Self {
+        Self {
+            key: key.into(),
+            label: label.into(),
+            value_type,
+        }
+    }
+}
+
+/// One row of a browsable resource table.
+///
+/// `fields` is keyed by [`ColumnDescriptor::key`]. A missing key renders as an
+/// empty cell rather than as a failure — a resource that genuinely has no value
+/// for a column is ordinary — and a key that matches no column is ignored by
+/// clients, the same tolerance [`ConnectorStatus::details`] has.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ResourceItem {
+    /// Stable identifier for this row within its kind, passed back as
+    /// `resourceId` when a row action is invoked — see
+    /// [`ResourceKindDescriptor::row_actions`].
+    pub id: String,
+    /// The cell values, keyed by column.
+    pub fields: HashMap<String, Value>,
+}
+
+impl ResourceItem {
+    /// A row with an id and no fields yet.
+    pub fn new(id: impl Into<String>) -> Self {
+        Self {
+            id: id.into(),
+            fields: HashMap::new(),
+        }
+    }
+
+    /// Sets one cell, for chaining onto [`ResourceItem::new`].
+    #[must_use]
+    pub fn with_field(mut self, key: impl Into<String>, value: impl Into<Value>) -> Self {
+        self.fields.insert(key.into(), value.into());
+        self
+    }
+}
+
+/// One browsable collection of things a connector's service holds.
+///
+/// The unit a resource browser is built from: a table of [`ResourceItem`] rows
+/// described by [`ColumnDescriptor`] columns, plus the operations offered
+/// beside it. Generic on purpose — Docker's images, volumes, and networks are
+/// three instances of this shape, not three features.
+///
+/// # Invoking a row action
+///
+/// Row actions are ordinary [`ConnectorAction`]s and run through the ordinary
+/// [`Connector::execute_action`]. Which row they act on travels in `params`
+/// under the key **`resourceId`**, carrying the [`ResourceItem::id`]:
+///
+/// ```
+/// # use serde_json::json;
+/// # let params =
+/// json!({ "resourceId": "sha256:2f1c…", "force": true })
+/// # ;
+/// ```
+///
+/// That convention is why this type adds no argument to `execute_action`. The
+/// alternative — a third parameter alongside `target_id` — would be a breaking
+/// change to a trait every connector implements, in order to express something
+/// `params` already carries perfectly well. `target_id` stays what it has
+/// always been: which *sub-target* is addressed, orthogonal to which row is.
+///
+/// An implementation must treat a missing `resourceId` as
+/// [`ConnectorError::InvalidParams`] rather than guessing at a row, and should
+/// declare it in the action's [`params_schema`](ConnectorAction::params_schema)
+/// so a client can see the requirement rather than learn it from this document.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ResourceKindDescriptor {
+    /// Stable machine identifier, unique within this connector, and the URL
+    /// segment the rows are fetched under.
+    pub kind: String,
+    /// Human-facing name for the table or tab ("Images", "Volumes").
+    pub label: String,
+    /// The columns, in the order they should be shown.
+    pub columns: Vec<ColumnDescriptor>,
+    /// Operations on a single row. The caller passes the row's
+    /// [`ResourceItem::id`] as `resourceId` in the action's `params` — see the
+    /// type-level documentation above.
+    pub row_actions: Vec<ConnectorAction>,
+    /// Operations on the kind as a whole, addressing no particular row —
+    /// "prune unused", "pull updates". Invoked exactly like any other action,
+    /// with no `resourceId`.
+    pub kind_actions: Vec<ConnectorAction>,
+}
+
+impl ResourceKindDescriptor {
+    /// A kind with columns and no actions, for chaining.
+    pub fn new(
+        kind: impl Into<String>,
+        label: impl Into<String>,
+        columns: Vec<ColumnDescriptor>,
+    ) -> Self {
+        Self {
+            kind: kind.into(),
+            label: label.into(),
+            columns,
+            row_actions: Vec::new(),
+            kind_actions: Vec::new(),
+        }
+    }
+
+    /// Attaches the per-row operations.
+    #[must_use]
+    pub fn with_row_actions(mut self, actions: Vec<ConnectorAction>) -> Self {
+        self.row_actions = actions;
+        self
+    }
+
+    /// Attaches the whole-kind operations.
+    #[must_use]
+    pub fn with_kind_actions(mut self, actions: Vec<ConnectorAction>) -> Self {
+        self.kind_actions = actions;
+        self
+    }
+}
+
 /// Which plot a [`DisplayWidgetType::MetricChart`] draws.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -1290,6 +1511,65 @@ mod tests {
                 .await
                 .expect_err("unknown action should fail"),
             ConnectorError::invalid_action("nope")
+        );
+    }
+
+    #[test]
+    fn resource_browser_types_use_the_documented_wire_shape() {
+        let kind = ResourceKindDescriptor::new(
+            "images",
+            "Images",
+            vec![
+                ColumnDescriptor::new("tag", "Tag", ColumnValueType::Text),
+                ColumnDescriptor::new("size", "Size", ColumnValueType::Bytes),
+                ColumnDescriptor::new("createdAt", "Created", ColumnValueType::Timestamp),
+            ],
+        )
+        .with_row_actions(vec![ConnectorAction::simple("remove", "Remove")])
+        .with_kind_actions(vec![ConnectorAction::simple("prune", "Prune")]);
+
+        let value = serde_json::to_value(&kind).unwrap();
+        assert_eq!(value["kind"], "images");
+        assert_eq!(value["columns"][1]["valueType"], "bytes");
+        assert_eq!(value["columns"][2]["valueType"], "timestamp");
+        assert_eq!(value["rowActions"][0]["id"], "remove");
+        assert_eq!(value["kindActions"][0]["id"], "prune");
+        assert_eq!(
+            serde_json::from_value::<ResourceKindDescriptor>(value).unwrap(),
+            kind
+        );
+
+        // A row is an id plus a flat, column-keyed object — the shape a table
+        // renderer indexes straight into.
+        let item = ResourceItem::new("sha256:abc")
+            .with_field("tag", "example:1.0")
+            .with_field("size", 1024);
+        assert_eq!(
+            serde_json::to_value(&item).unwrap(),
+            json!({
+                "id": "sha256:abc",
+                "fields": { "tag": "example:1.0", "size": 1024 }
+            })
+        );
+        assert_eq!(
+            serde_json::from_value::<ResourceItem>(serde_json::to_value(&item).unwrap()).unwrap(),
+            item
+        );
+    }
+
+    /// The trait's resource-browser methods are opt-in: a connector that knows
+    /// nothing about them must still compile and must report nothing to browse,
+    /// which is what keeps this an additive capability rather than a migration.
+    #[tokio::test]
+    async fn a_connector_that_ignores_the_resource_browser_browses_nothing() {
+        let stub = StubConnector {
+            id: "stub-resources",
+            health: HealthState::Healthy,
+        };
+        assert!(stub.resource_kinds().is_empty());
+        assert_eq!(
+            stub.list_resource_items("anything", None).await.unwrap(),
+            Vec::new()
         );
     }
 

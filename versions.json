@@ -1,7 +1,7 @@
 {
-  "core": "0.2.1",
+  "core": "0.2.2",
   "connector-docker": "0.4.1",
-  "web-backend": "0.3.1",
+  "web-backend": "0.3.2",
   "web-frontend": "0.3.1",
   "desktop": "0.3.0",
   "mobile": "0.3.0",
