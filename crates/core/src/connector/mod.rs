@@ -168,6 +168,43 @@ pub trait Connector: Send + Sync {
         Ok(Vec::new())
     }
 
+    /// Whether this connector can say if the thing it manages is out of date.
+    ///
+    /// Declared separately from [`Connector::check_for_updates`] so a client
+    /// can decide whether to offer the control at all, rather than offering it
+    /// everywhere and discovering per instance that the answer is always "no
+    /// update". The two must agree: a connector returning `true` here is
+    /// expected to override the check.
+    fn supports_update_checking(&self) -> bool {
+        false
+    }
+
+    /// Asks whether a newer version of the managed thing exists.
+    ///
+    /// `target_id` scopes the question to one sub-target — for a connector with
+    /// many, "is this one out of date?" is the question people actually ask —
+    /// and `None` asks about the instance as a whole.
+    ///
+    /// Read-only and non-committal: this reports what is available and never
+    /// applies anything. Whatever *acts* on the answer is an ordinary
+    /// [`ConnectorAction`], which is what puts it behind `connectors.control`
+    /// and into the audit log, where an upgrade belongs.
+    ///
+    /// The default answers "nothing available" rather than erroring, so a
+    /// caller that asks a connector which does not support checking gets a
+    /// usable answer instead of an exception to handle. The `Err` arm keeps its
+    /// usual meaning: the check itself could not be carried out — the registry
+    /// was unreachable, the credentials were refused.
+    async fn check_for_updates(
+        &self,
+        _target_id: Option<&str>,
+    ) -> Result<UpdateCheckResult, ConnectorError> {
+        Ok(UpdateCheckResult {
+            available: false,
+            latest_ref: None,
+        })
+    }
+
     /// The JSON Schema for the configuration this connector needs.
     ///
     /// Two consumers rely on it: manifest loading, which validates a stored
@@ -288,6 +325,42 @@ pub trait Connector: Send + Sync {
     /// different afternoons.
     fn network_target(&self) -> Option<NetworkTarget> {
         None
+    }
+}
+
+/// The answer to "is what this connector manages out of date?".
+///
+/// Deliberately two fields and no more. `available` is what a client renders a
+/// badge from, and `latest_ref` is the connector's own name for what it found —
+/// an image digest, a release tag, a version string — carried as opaque text
+/// because Loom has no business parsing another ecosystem's version scheme. A
+/// structured "current vs. latest" comparison would require every connector to
+/// agree on what a version *is*, which they do not.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UpdateCheckResult {
+    /// Whether something newer than what is running exists.
+    pub available: bool,
+    /// What the newer thing is called, in the managed system's own terms, or
+    /// `None` when nothing newer was found or the connector cannot name it.
+    pub latest_ref: Option<String>,
+}
+
+impl UpdateCheckResult {
+    /// "Nothing newer" — the answer most checks give most of the time.
+    pub fn up_to_date() -> Self {
+        Self {
+            available: false,
+            latest_ref: None,
+        }
+    }
+
+    /// "Something newer exists", named in the managed system's own terms.
+    pub fn available(latest_ref: impl Into<String>) -> Self {
+        Self {
+            available: true,
+            latest_ref: Some(latest_ref.into()),
+        }
     }
 }
 
@@ -584,6 +657,27 @@ pub struct ConnectorAction {
     /// action wrongly marked disruptive suppresses a genuine outage.
     #[serde(default)]
     pub is_disruptive: bool,
+    /// Data points whose current values are worth recording *before* this
+    /// action runs.
+    ///
+    /// The platform reads each listed [`DataPointDescriptor::id`] from the
+    /// latest cached reading — scoped to this descriptor's own
+    /// [`target_id`](ConnectorAction::target_id) — and stores the result on the
+    /// action's audit-log entry. What that buys is the answer to "what was it
+    /// before?", which is the first question anyone asks after an action turns
+    /// out to have been a mistake, and the raw material for an eventual undo.
+    ///
+    /// Ids the connector does not declare, or that the last poll did not
+    /// report, are simply absent from the snapshot. A snapshot is a best-effort
+    /// record of what was known, not a guarantee that everything listed was
+    /// available: refusing to run an action because a reading was missing would
+    /// be a far worse failure than recording an incomplete one.
+    ///
+    /// Empty by default. Marking an action costs one poll's worth of already-
+    /// cached values and nothing else — no extra call to the service — so the
+    /// bar is simply whether the reading would mean something afterwards.
+    #[serde(default)]
+    pub snapshot_data_point_ids: Vec<String>,
 }
 
 impl ConnectorAction {
@@ -599,6 +693,7 @@ impl ConnectorAction {
             description: None,
             params_schema: Value::Object(Default::default()),
             is_disruptive: false,
+            snapshot_data_point_ids: Vec::new(),
         }
     }
 
@@ -621,6 +716,18 @@ impl ConnectorAction {
     #[must_use]
     pub fn disruptive(mut self) -> Self {
         self.is_disruptive = true;
+        self
+    }
+
+    /// Records these data points' current values before this action runs — see
+    /// [`ConnectorAction::snapshot_data_point_ids`].
+    #[must_use]
+    pub fn snapshotting<I, S>(mut self, data_point_ids: I) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        self.snapshot_data_point_ids = data_point_ids.into_iter().map(Into::into).collect();
         self
     }
 }
@@ -1515,6 +1622,56 @@ mod tests {
     }
 
     #[test]
+    fn an_action_snapshots_only_what_it_names() {
+        // The default is the load-bearing half: a connector written before the
+        // field existed, or one with nothing worth recording, must produce no
+        // snapshot rather than an empty one nobody can distinguish from a
+        // failed capture.
+        assert!(ConnectorAction::simple("ping", "Ping")
+            .snapshot_data_point_ids
+            .is_empty());
+        assert_eq!(
+            ConnectorAction::simple("recalibrate", "Recalibrate")
+                .snapshotting(["load", "mode"])
+                .snapshot_data_point_ids,
+            vec!["load".to_string(), "mode".to_string()]
+        );
+
+        let older = json!({
+            "id": "restart",
+            "label": "Restart",
+            "description": null,
+            "paramsSchema": {},
+            "isDisruptive": true
+        });
+        let parsed: ConnectorAction = serde_json::from_value(older).expect("older shape");
+        assert!(parsed.snapshot_data_point_ids.is_empty());
+        assert_eq!(
+            serde_json::to_value(&parsed).unwrap()["snapshotDataPointIds"],
+            json!([])
+        );
+    }
+
+    #[test]
+    fn an_update_check_result_carries_a_flag_and_an_opaque_reference() {
+        assert_eq!(
+            serde_json::to_value(UpdateCheckResult::up_to_date()).unwrap(),
+            json!({ "available": false, "latestRef": null })
+        );
+
+        let found = UpdateCheckResult::available("example/image@sha256:0123abcd");
+        let value = serde_json::to_value(&found).unwrap();
+        assert_eq!(
+            value,
+            json!({ "available": true, "latestRef": "example/image@sha256:0123abcd" })
+        );
+        assert_eq!(
+            serde_json::from_value::<UpdateCheckResult>(value).unwrap(),
+            found
+        );
+    }
+
+    #[test]
     fn resource_browser_types_use_the_documented_wire_shape() {
         let kind = ResourceKindDescriptor::new(
             "images",
@@ -1571,6 +1728,14 @@ mod tests {
             stub.list_resource_items("anything", None).await.unwrap(),
             Vec::new()
         );
+
+        // Same contract for the update check: a connector that knows nothing
+        // about it says so, and answers usefully rather than erroring.
+        assert!(!stub.supports_update_checking());
+        assert_eq!(
+            stub.check_for_updates(None).await.unwrap(),
+            UpdateCheckResult::up_to_date()
+        );
     }
 
     #[test]
@@ -1621,7 +1786,8 @@ mod tests {
                 "label": "Restart",
                 "description": "Restarts it.",
                 "paramsSchema": {},
-                "isDisruptive": false
+                "isDisruptive": false,
+                "snapshotDataPointIds": []
             })
         );
         assert_eq!(

@@ -21,6 +21,7 @@ tokio.workspace = true
 # socket or a trusted network path, and pulling in a TLS stack for a transport
 # we do not expose would be dependency weight nobody asked for.
 bollard = "0.21"
+reqwest.workspace = true
 
 [dev-dependencies]
 # The live-Docker integration tests create their own container to point the

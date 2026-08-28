@@ -41,6 +41,7 @@ import {
 import { hasPermission, PERMISSION_KEYS } from "@loom/ui-kit/lib/permissions";
 import { useRetainedStatusDetails } from "@loom/ui-kit/lib/use-retained-status-details";
 import { renderWidget } from "@loom/ui-kit/widgets/renderWidget";
+import { UpdatesSummary, UPDATES_KIND } from "@loom/ui-kit/components/UpdatesSummary";
 
 /** The live reading for one instance, as pushed over the status socket. */
 export type LiveStatus = {
@@ -204,6 +205,23 @@ export function PlacementTile({
     detail.data?.dataPoints.filter((point) => matchesTarget(point, placement.targetId)) ?? [];
   const targetActions =
     detail.data?.actions.filter((action) => matchesTarget(action, placement.targetId)) ?? [];
+
+  // Only for a host-level tile, and only when the connector says it has an
+  // `updates` kind at all. A per-container tile browses nothing of its own, and
+  // a connector without the kind must look exactly as it did before any of this
+  // existed — no badge, no button, no request.
+  const updateKinds = useQuery({
+    queryKey: ["connector-resource-kinds", instance.id],
+    queryFn: ({ signal }) => api.getResourceKinds(instance.id, signal),
+    enabled: placement.targetId === null,
+    // Which kinds exist is a property of the connector, not of its state: it
+    // changes when someone edits a configuration, not between polls.
+    staleTime: 5 * 60_000,
+  });
+  const updatesKind =
+    placement.targetId === null
+      ? updateKinds.data?.find((kind) => kind.kind === UPDATES_KIND)
+      : undefined;
 
   if (detail.isPending) {
     return <PlacementTileSkeleton placement={placement} />;
@@ -381,6 +399,22 @@ export function PlacementTile({
             {availability.diagnosis}
           </p>
         ) : null}
+
+        {updatesKind === undefined ? null : (
+          <UpdatesSummary
+            instanceId={instance.id}
+            descriptor={updatesKind}
+            // Same rule as every other control on the tile: dead while the
+            // layout is being rearranged, and dead with an explanation when the
+            // connector cannot be reached.
+            disabled={!canControl || editing || availability.actionsDisabled}
+            disabledReason={
+              canControl
+                ? availability.unavailableReason
+                : "You do not have permission to control this connector."
+            }
+          />
+        )}
 
         {detail.isError ? (
           <Alert variant="destructive">

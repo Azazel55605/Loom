@@ -5,7 +5,7 @@ use std::sync::Arc;
 
 use sqlx::SqlitePool;
 
-use crate::connectors::ConnectorRuntime;
+use crate::connectors::{ConnectorRuntime, UpdateCache};
 
 /// Everything a handler needs, cloned per request.
 ///
@@ -30,6 +30,14 @@ pub struct AppState {
     /// the registry to validate it and the runtime to install it, in one
     /// request. See `crates/web-backend/src/connectors/mod.rs`.
     pub connectors: ConnectorRuntime,
+    /// What the update scheduler last found, per instance and target.
+    ///
+    /// Beside the connector runtime rather than inside it: the runtime's cache
+    /// is a *status* cache refreshed every few seconds from a local daemon,
+    /// and this is refreshed every few hours from a third party. Folding them
+    /// together would make one lock serve two cadences and invite an update
+    /// check onto the status path. See `connectors::updates`.
+    pub updates: UpdateCache,
 }
 
 impl AppState {
@@ -49,6 +57,7 @@ impl AppState {
             jwt_secret: Arc::new(jwt_secret),
             avatars_dir: Arc::new(avatars_dir),
             connectors,
+            updates: UpdateCache::new(),
         }
     }
 }

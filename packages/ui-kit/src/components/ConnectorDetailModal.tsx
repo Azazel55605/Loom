@@ -12,6 +12,13 @@ import {
   DialogTitle,
 } from "@loom/ui-kit/components/ui/dialog";
 import { ConnectorIcon } from "@loom/ui-kit/components/ConnectorIcon";
+import { ResourceKindBrowser } from "@loom/ui-kit/components/ResourceKindBrowser";
+import {
+  Tabs,
+  TabsContent,
+  TabsList,
+  TabsTrigger,
+} from "@loom/ui-kit/components/ui/tabs";
 import { ConnectorStatusBadge } from "@loom/ui-kit/components/ConnectorStatusBadge";
 import { Skeleton } from "@loom/ui-kit/components/ui/skeleton";
 import { ActionButtonWidget } from "@loom/ui-kit/widgets/ActionButton";
@@ -76,6 +83,15 @@ export function ConnectorDetailModal({
   const detail = useQuery({
     queryKey: ["connector-instance", instance.id],
     queryFn: ({ signal }) => api.getConnectorInstance(instance.id, signal),
+    enabled: open,
+  });
+
+  // Fetched only while the modal is open: a browsable kind list is of no use
+  // to a closed dialog, and a dashboard of twenty tiles would otherwise ask
+  // twenty connectors what they can browse before anyone had looked at one.
+  const resourceKinds = useQuery({
+    queryKey: ["connector-resource-kinds", instance.id],
+    queryFn: ({ signal }) => api.getResourceKinds(instance.id, signal),
     enabled: open,
   });
 
@@ -220,6 +236,43 @@ export function ConnectorDetailModal({
                   <div key={index} ref={index === focusIndex ? focusRef : undefined} className="min-w-0">{renderWidget({ binding, statusDetails, dataPoints: targetDataPoints, actions: targetActions, onExecute: runAction, disabled: !canControl, unavailableReason: availability.unavailableReason, size: "expanded", className: "min-h-[5rem]" })}</div>
                 ))}
               </div>
+              {/* Whatever this connector says it can browse, as tabs. Nothing
+                  here knows what any of them are: the kinds, their columns and
+                  their buttons all come from the descriptors. A connector that
+                  browses nothing renders no tab strip at all rather than an
+                  empty one. */}
+              {(resourceKinds.data ?? []).length > 0 ? (
+                <section className="space-y-3 border-t pt-5">
+                  <Tabs defaultValue={resourceKinds.data![0].kind}>
+                    <TabsList>
+                      {resourceKinds.data!.map((kind) => (
+                        <TabsTrigger key={kind.kind} value={kind.kind}>
+                          {kind.label}
+                        </TabsTrigger>
+                      ))}
+                    </TabsList>
+                    {resourceKinds.data!.map((kind) => (
+                      <TabsContent key={kind.kind} value={kind.kind} className="pt-3">
+                        <ResourceKindBrowser
+                          instanceId={instance.id}
+                          targetId={placement.targetId}
+                          descriptor={kind}
+                          // The same rule the widgets follow: a viewer without
+                          // `connectors.control`, or a connector that cannot be
+                          // reached, gets buttons that say why before the click.
+                          disabled={!canControl || availability.actionsDisabled}
+                          disabledReason={
+                            canControl
+                              ? availability.unavailableReason
+                              : "You do not have permission to control this connector."
+                          }
+                        />
+                      </TabsContent>
+                    ))}
+                  </Tabs>
+                </section>
+              ) : null}
+
               {targetActions.some((action) => !boundActions.has(action.id)) ? (
                 <section className="space-y-3 border-t pt-5">
                   <h3 className="text-sm font-semibold">Other actions</h3>

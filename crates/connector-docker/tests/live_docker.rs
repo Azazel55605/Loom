@@ -40,8 +40,8 @@ use bollard::query_parameters::{
 use bollard::Docker;
 use futures_util::StreamExt;
 use loom_connector_docker::{
-    DockerConnector, DockerConnectorConfig, ACTION_RESTART, ACTION_START, ACTION_STOP,
-    DATA_POINT_CPU_HISTORY, DATA_POINT_CPU_PERCENT, DATA_POINT_DISK_USAGE_BYTES,
+    DockerConnector, DockerConnectorConfig, ACTION_APPLY_UPDATE, ACTION_RESTART, ACTION_START,
+    ACTION_STOP, DATA_POINT_CPU_HISTORY, DATA_POINT_CPU_PERCENT, DATA_POINT_DISK_USAGE_BYTES,
     DATA_POINT_DOCKER_VERSION, DATA_POINT_LOGS, DATA_POINT_MEMORY_USAGE_BYTES,
     DATA_POINT_RUNNING_CONTAINERS, DATA_POINT_STATUS, DATA_POINT_STOPPED_CONTAINERS,
     DATA_POINT_TOTAL_CONTAINERS, DATA_POINT_TOTAL_IMAGES, DATA_POINT_UPTIME, DEFAULT_DOCKER_HOST,
@@ -177,9 +177,12 @@ async fn a_reachable_unix_socket_reports_full_setup_capabilities() {
         return;
     };
 
-    let connector = DockerConnector::connect(DockerConnectorConfig { docker_host: host })
-        .await
-        .expect("the already-reachable daemon must build");
+    let connector = DockerConnector::connect(DockerConnectorConfig {
+        docker_host: host,
+        ..DockerConnectorConfig::default()
+    })
+    .await
+    .expect("the already-reachable daemon must build");
     let result = connector.test_connection().await;
     assert!(result.reachable);
     assert_eq!(result.capabilities.len(), 8);
@@ -248,6 +251,7 @@ async fn start_test_container(docker: &Docker, suffix: &str) -> TestContainer {
 fn config_for(_name: &str) -> DockerConnectorConfig {
     DockerConnectorConfig {
         docker_host: test_docker_host(),
+        ..DockerConnectorConfig::default()
     }
 }
 
@@ -420,6 +424,7 @@ async fn one_host_instance_reports_the_daemon_and_lists_real_sub_targets() {
 
     let connector = DockerConnector::connect(DockerConnectorConfig {
         docker_host: test_docker_host(),
+        ..DockerConnectorConfig::default()
     })
     .await
     .expect("host mode validates only daemon reachability");
@@ -449,7 +454,7 @@ async fn one_host_instance_reports_the_daemon_and_lists_real_sub_targets() {
             .iter()
             .filter(|point| point.target_id.as_deref() == Some(&container.name))
             .count(),
-        7
+        8
     );
 
     let status = connector.status().await.expect("host status");
@@ -602,6 +607,7 @@ async fn an_unreachable_host_is_rejected_at_construction() {
     // timeout — and it is a loopback address, so the test needs no network.
     let error = DockerConnector::connect(DockerConnectorConfig {
         docker_host: "tcp://127.0.0.1:1".to_owned(),
+        ..DockerConnectorConfig::default()
     })
     .await
     .expect_err("an unreachable host must be refused");
@@ -609,4 +615,213 @@ async fn an_unreachable_host_is_rejected_at_construction() {
         matches!(error, ConnectorError::Unreachable { .. }),
         "an unreachable host is not a bad container name: {error}"
     );
+}
+
+/// The recreate is the one part of update management that cannot be trusted to
+/// a unit test: what survives `create_container` is Docker's behaviour, not
+/// ours, and a mock built from the same understanding would agree with the bug.
+///
+/// The "update" here deliberately moves the container to the *same* image
+/// reference. What is being tested is the recreate — that a container comes back
+/// with its environment, labels, volumes, restart policy and command intact —
+/// and pulling a genuinely newer image would make the test depend on a public
+/// registry serving a moving tag.
+#[tokio::test]
+async fn applying_an_update_recreates_the_container_with_its_configuration() {
+    let test_name = "applying_an_update_recreates_the_container_with_its_configuration";
+    let Some(docker) = docker_or_skip(test_name).await else {
+        return;
+    };
+
+    let name = format!("loom-connector-docker-test-{}-update", std::process::id());
+    let _ = docker
+        .remove_container(
+            &name,
+            Some(RemoveContainerOptionsBuilder::new().force(true).build()),
+        )
+        .await;
+    ensure_test_image(&docker).await;
+
+    let image = format!("{TEST_IMAGE}:{TEST_TAG}");
+    let volume_name = format!("{name}-data");
+    docker
+        .create_container(
+            Some(CreateContainerOptionsBuilder::new().name(&name).build()),
+            ContainerCreateBody {
+                image: Some(image.clone()),
+                cmd: Some(vec![
+                    "/bin/sh".to_owned(),
+                    "-c".to_owned(),
+                    format!("echo {LOG_MARKER}; while true; do :; done"),
+                ]),
+                env: Some(vec![
+                    "LOOM_TEST_SETTING=preserved".to_owned(),
+                    "TZ=UTC".to_owned(),
+                ]),
+                labels: Some(std::collections::HashMap::from([(
+                    "com.example.loom-test".to_owned(),
+                    "preserved".to_owned(),
+                )])),
+                working_dir: Some("/tmp".to_owned()),
+                host_config: Some(bollard::models::HostConfig {
+                    binds: Some(vec![format!("{volume_name}:/data")]),
+                    restart_policy: Some(bollard::models::RestartPolicy {
+                        name: Some(bollard::models::RestartPolicyNameEnum::UNLESS_STOPPED),
+                        maximum_retry_count: None,
+                    }),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("creating the test container must succeed");
+    let guard = TestContainer {
+        docker: docker.clone(),
+        name: name.clone(),
+    };
+    docker
+        .start_container(&name, None)
+        .await
+        .expect("starting the test container must succeed");
+
+    let before = docker
+        .inspect_container(
+            &name,
+            None::<bollard::query_parameters::InspectContainerOptions>,
+        )
+        .await
+        .expect("inspecting before the update");
+    let container_id_before = before.id.clone();
+
+    let connector = DockerConnector::connect(config_for(&guard.name))
+        .await
+        .expect("connecting must succeed");
+
+    let result = connector
+        .execute_action(
+            ACTION_APPLY_UPDATE,
+            Some(&name),
+            serde_json::json!({ "targetImageRef": image }),
+        )
+        .await
+        .expect("the recreate must reach Docker");
+    assert!(result.success, "applyUpdate failed: {}", result.message);
+
+    let after = docker
+        .inspect_container(
+            &name,
+            None::<bollard::query_parameters::InspectContainerOptions>,
+        )
+        .await
+        .expect("inspecting after the update");
+
+    // A genuinely new container, not the old one restarted — otherwise the
+    // preservation assertions below would be testing nothing.
+    assert_ne!(
+        after.id, container_id_before,
+        "applyUpdate must replace the container, not restart it"
+    );
+
+    let config = after
+        .config
+        .clone()
+        .expect("the new container has a config");
+    let env = config.env.clone().unwrap_or_default();
+    assert!(
+        env.contains(&"LOOM_TEST_SETTING=preserved".to_owned()),
+        "environment was lost: {env:?}"
+    );
+    assert_eq!(
+        config.cmd,
+        before.config.as_ref().and_then(|config| config.cmd.clone()),
+        "the command was lost"
+    );
+    assert_eq!(config.working_dir.as_deref(), Some("/tmp"));
+    assert_eq!(
+        config
+            .labels
+            .as_ref()
+            .and_then(|labels| labels.get("com.example.loom-test"))
+            .map(String::as_str),
+        Some("preserved"),
+        "labels were lost"
+    );
+
+    let host_config = after
+        .host_config
+        .clone()
+        .expect("the new container has a host config");
+    assert_eq!(
+        host_config.binds,
+        Some(vec![format!("{volume_name}:/data")]),
+        "the volume mount was lost — this is the failure that loses someone's data directory"
+    );
+    assert_eq!(
+        host_config.restart_policy.and_then(|policy| policy.name),
+        Some(bollard::models::RestartPolicyNameEnum::UNLESS_STOPPED),
+        "the restart policy was lost"
+    );
+
+    // And it is running again, not left stopped.
+    wait_for_state(
+        &connector,
+        &name,
+        |state| state == "running",
+        "the recreated container should come back up",
+    )
+    .await;
+
+    let _ = docker
+        .remove_volume(
+            &volume_name,
+            None::<bollard::query_parameters::RemoveVolumeOptions>,
+        )
+        .await;
+}
+
+/// A pull that cannot succeed must leave the container alone. This is the
+/// failure mode that matters most: a user with a typo in a tag should end up
+/// with a running service and an explanation, not with a removed container.
+#[tokio::test]
+async fn a_failed_pull_leaves_the_container_running() {
+    let test_name = "a_failed_pull_leaves_the_container_running";
+    let Some(docker) = docker_or_skip(test_name).await else {
+        return;
+    };
+    let container = start_test_container(&docker, "failed-pull").await;
+    let connector = DockerConnector::connect(config_for(&container.name))
+        .await
+        .expect("connecting must succeed");
+
+    let result = connector
+        .execute_action(
+            ACTION_APPLY_UPDATE,
+            Some(&container.name),
+            // A tag that cannot exist, on a repository that does.
+            serde_json::json!({
+                "targetImageRef": format!("{TEST_IMAGE}:loom-no-such-tag-ever")
+            }),
+        )
+        .await
+        .expect("a failed pull is an answered action, not a transport failure");
+
+    assert!(
+        !result.success,
+        "a pull that cannot work must not report success"
+    );
+    assert!(
+        result.message.contains("left running"),
+        "the message must say the service is untouched: {}",
+        result.message
+    );
+
+    // The proof: still there, still running.
+    wait_for_state(
+        &connector,
+        &container.name,
+        |state| state == "running",
+        "the container should never have been touched",
+    )
+    .await;
 }

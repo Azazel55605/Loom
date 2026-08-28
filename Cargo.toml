@@ -75,5 +75,12 @@ tempfile = "3"
 # Test-only: axum response bodies are streams; `BodyExt::collect` is the
 # supported way to read one into bytes for assertions.
 http-body-util = "0.1"
+# HTTPS client for container-registry queries. The Docker Engine client
+# (bollard) speaks only to the daemon, and a registry digest check is an
+# ordinary authenticated HTTPS request to a different host — so the connector
+# needs a general client, and `rustls-tls` rather than `native-tls` keeps it off
+# the host's OpenSSL. No `json` feature: the one response body it parses is a
+# token object, which `serde_json` already handles.
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "http2", "charset"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }

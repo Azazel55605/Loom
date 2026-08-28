@@ -344,6 +344,28 @@ pub async fn delete_user(
         Err(error) => return internal_error("checking dashboard ownership", error),
     }
 
+    // The action log's foreign key has no `ON DELETE` action on purpose: an
+    // audit trail whose attribution a later account deletion can erase is not
+    // an audit trail. Without this check the database would refuse the delete
+    // anyway, as a 500 that explains nothing; checked here, it is the same
+    // refusal with a reason, in the same shape as the dashboards one above.
+    let has_action_history = sqlx::query_scalar::<_, bool>(
+        "SELECT EXISTS(SELECT 1 FROM connector_action_log WHERE invoked_by_user_id = ?)",
+    )
+    .bind(&id)
+    .fetch_one(&state.pool)
+    .await;
+    match has_action_history {
+        Ok(true) => {
+            return ErrorBody::message(
+                StatusCode::CONFLICT,
+                "this user has invoked connector actions and is named in the action log;                  deactivate the account instead of deleting it",
+            )
+        }
+        Ok(false) => {}
+        Err(error) => return internal_error("checking connector action history", error),
+    }
+
     let mut tx = match state.pool.begin().await {
         Ok(tx) => tx,
         Err(error) => return internal_error("beginning the delete-user transaction", error),

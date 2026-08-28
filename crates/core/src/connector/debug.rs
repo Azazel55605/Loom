@@ -9,7 +9,7 @@
 //! with a laptop and no homelab can still work on Loom's UI, and Loom's tests
 //! can assert on connector behaviour without depending on a service being up.
 //!
-//! It now carries six jobs rather than one:
+//! It now carries seven jobs rather than one:
 //!
 //! 1. **Auth and shell development**, its original purpose — a connector that
 //!    is reliably there to be listed, permission-checked, and acted on.
@@ -34,6 +34,12 @@
 //!    needing a `resourceId`, one kind action needing nothing), so a table
 //!    renderer and the endpoints behind it can be built and tested before any
 //!    real connector browses anything.
+//! 7. **Audit-log and update-check reference behaviour.** Its `recalibrate`
+//!    action is both disruptive *and* snapshot-bearing, so the platform's
+//!    pre-action snapshot can be proven end to end against a reading the
+//!    action then destroys, and its update check answers whatever
+//!    [`DebugConnectorConfig::simulated_update_available`] says, so both a
+//!    clean instance and an out-of-date one are renderable.
 //!
 //! Everything interesting is set at construction through
 //! [`DebugConnectorConfig`]:
@@ -78,7 +84,7 @@ use super::{
     ConnectorError, ConnectorMetadata, ConnectorStatus, DataPointDescriptor, DataPointValueType,
     DiscoveredResource, DisplayField, DisplayWidgetType, HealthState, NetworkTarget, ResourceItem,
     ResourceKindDescriptor, SetupGuide, SetupGuideToggle, SetupGuideVariant, SubTarget,
-    WidgetBinding, WidgetLayout,
+    UpdateCheckResult, WidgetBinding, WidgetLayout,
 };
 
 /// The connector type id this fixture registers under.
@@ -110,6 +116,12 @@ pub const ACTION_RECYCLE: &str = "recycle";
 
 /// The kind-scoped resource action. Parameterless.
 pub const ACTION_CLEANUP_ALL: &str = "cleanupAll";
+
+/// The action id for the simulated recalibration. Parameterless, disruptive,
+/// and the fixture's demonstration of the pre-action snapshot: it overwrites
+/// [`DATA_POINT_LOAD`], having first declared that data point as worth
+/// recording.
+pub const ACTION_RECALIBRATE: &str = "recalibrate";
 
 /// The data point id for the oscillating numeric reading.
 pub const DATA_POINT_LOAD: &str = "load";
@@ -148,6 +160,15 @@ pub const FIXTURE_TARGETS: [&str; 2] = ["fixture-a", "fixture-b"];
 /// `.invalid` is reserved by RFC 2606 and never resolves, so this cannot be
 /// mistaken for — or accidentally become — a real address.
 const FAKE_HOST: &str = "debug.invalid";
+
+/// The load [`ACTION_RECALIBRATE`] resets to. A fixed value, so a test can
+/// assert that the reading really was overwritten and that the snapshot on the
+/// log entry is therefore the only copy of the old one.
+const RECALIBRATED_LOAD: f64 = 50.0;
+
+/// The fake "latest version" the simulated update check reports. Obviously not
+/// a real registry reference.
+const SIMULATED_LATEST_REF: &str = "debug-fixture:2.0.0";
 
 /// How a [`DebugConnector`] should behave.
 ///
@@ -206,6 +227,15 @@ pub struct DebugConnectorConfig {
     /// `fail_mode` makes the connector fail, this makes the *network under* it
     /// fail.
     pub network_target: Option<NetworkTarget>,
+
+    /// What [`Connector::check_for_updates`] should pretend to find. Defaults
+    /// to `false`.
+    ///
+    /// The fixture manages nothing and therefore has no registry to compare
+    /// against, so both answers have to be configurable for either to be
+    /// testable. A client's "update available" badge and its absence are
+    /// equally worth being able to render on a machine with no homelab.
+    pub simulated_update_available: bool,
 }
 
 impl Default for DebugConnectorConfig {
@@ -218,6 +248,7 @@ impl Default for DebugConnectorConfig {
             label: "debug-fixture".to_string(),
             enabled: true,
             network_target: None,
+            simulated_update_available: false,
         }
     }
 }
@@ -408,6 +439,7 @@ impl DebugConnector {
             label,
             enabled: raw.enabled.unwrap_or(true),
             network_target: raw.network_target,
+            simulated_update_available: raw.simulated_update_available,
         }))
     }
 
@@ -501,6 +533,8 @@ struct RawConfig {
     enabled: Option<bool>,
     #[serde(default)]
     network_target: Option<NetworkTarget>,
+    #[serde(default)]
+    simulated_update_available: bool,
 }
 
 /// Which failure the fixture should simulate, as it appears in stored config.
@@ -703,6 +737,16 @@ impl Connector for DebugConnector {
                 .disruptive(),
             ConnectorAction::simple(ACTION_PING, "Ping")
                 .with_description("Pretends to check that the simulated service answers."),
+            // The fixture's proof of the audit log's snapshot mechanism, and
+            // the reason it overwrites a reading rather than nudging it: a
+            // snapshot is only worth anything when the value it recorded can
+            // no longer be recovered from the connector afterwards.
+            ConnectorAction::simple(ACTION_RECALIBRATE, "Recalibrate")
+                .with_description(
+                    "Pretends to recalibrate the simulated service, resetting its load.",
+                )
+                .disruptive()
+                .snapshotting([DATA_POINT_LOAD]),
             ConnectorAction {
                 id: ACTION_SET_ENABLED.to_string(),
                 target_id: None,
@@ -717,6 +761,7 @@ impl Connector for DebugConnector {
                     "additionalProperties": false
                 }),
                 is_disruptive: false,
+                snapshot_data_point_ids: Vec::new(),
             },
             ConnectorAction {
                 id: ACTION_SET_LOAD.to_string(),
@@ -734,6 +779,7 @@ impl Connector for DebugConnector {
                     "additionalProperties": false
                 }),
                 is_disruptive: false,
+                snapshot_data_point_ids: Vec::new(),
             },
             ConnectorAction {
                 id: ACTION_SET_LABEL.to_string(),
@@ -749,6 +795,7 @@ impl Connector for DebugConnector {
                     "additionalProperties": false
                 }),
                 is_disruptive: false,
+                snapshot_data_point_ids: Vec::new(),
             },
         ]
         .into_iter()
@@ -778,6 +825,27 @@ impl Connector for DebugConnector {
 
             ACTION_PING => Ok(ActionResult::ok("Simulated service answered the ping.")
                 .with_payload(json!({ "pong": true }))),
+
+            ACTION_RECALIBRATE => {
+                // Deliberately destructive of the previous reading: the
+                // snapshot on the log entry is then the only remaining record
+                // of what the load was, which is exactly the property a
+                // rollback would depend on.
+                let previous = {
+                    let mut state = self.lock();
+                    let previous = state.load;
+                    state.load = RECALIBRATED_LOAD;
+                    state.record(RECALIBRATED_LOAD);
+                    previous
+                };
+
+                Ok(
+                    ActionResult::ok("Simulated service recalibrated.").with_payload(json!({
+                        "previousLoad": round2(previous),
+                        DATA_POINT_LOAD: RECALIBRATED_LOAD,
+                    })),
+                )
+            }
 
             ACTION_SET_ENABLED => {
                 let enabled = bool_param(action_id, &params, "enabled")?;
@@ -914,9 +982,40 @@ impl Connector for DebugConnector {
                                     this fixture reports Down. The fixture contacts nothing, so \
                                     this exists to make each diagnosis reachable: a name that does \
                                     not resolve, or an address with nothing listening."
+                },
+                "simulatedUpdateAvailable": {
+                    "type": "boolean",
+                    "default": false,
+                    "description": "What the fixture's update check should report. The fixture \
+                                    has no registry to compare against, so both answers are \
+                                    configurable and both are therefore renderable."
                 }
             },
             "additionalProperties": false
+        })
+    }
+
+    fn supports_update_checking(&self) -> bool {
+        true
+    }
+
+    /// Reports whatever the configuration asked it to report.
+    ///
+    /// Gated on latency and fail mode like every other entry point, so an
+    /// update check has the same loading and failure states to render as
+    /// anything else — a check against a real registry is a network call, and
+    /// a fixture that always answered instantly and successfully would let a
+    /// client ship without handling either.
+    async fn check_for_updates(
+        &self,
+        _target_id: Option<&str>,
+    ) -> Result<UpdateCheckResult, ConnectorError> {
+        self.gate().await?;
+
+        Ok(if self.config.simulated_update_available {
+            UpdateCheckResult::available(SIMULATED_LATEST_REF)
+        } else {
+            UpdateCheckResult::up_to_date()
         })
     }
 
@@ -966,6 +1065,7 @@ impl Connector for DebugConnector {
                 "additionalProperties": false
             }),
             is_disruptive: false,
+            snapshot_data_point_ids: Vec::new(),
         };
 
         vec![
@@ -1290,6 +1390,7 @@ mod tests {
             vec![
                 ACTION_RESTART,
                 ACTION_PING,
+                ACTION_RECALIBRATE,
                 ACTION_SET_ENABLED,
                 ACTION_SET_LOAD,
                 ACTION_SET_LABEL
@@ -1926,6 +2027,123 @@ mod tests {
                 "params {params} should have been refused"
             );
         }
+    }
+
+    #[tokio::test]
+    async fn the_recalibrate_action_declares_a_snapshot_and_then_destroys_the_reading() {
+        let connector = DebugConnector::default();
+
+        let recalibrate = connector
+            .actions()
+            .await
+            .into_iter()
+            .find(|action| action.id == ACTION_RECALIBRATE && action.target_id.is_none())
+            .expect("the fixture must advertise recalibrate");
+        assert_eq!(
+            recalibrate.snapshot_data_point_ids,
+            vec![DATA_POINT_LOAD.to_string()],
+            "the snapshot list is what tells the platform which reading to record"
+        );
+        // Disruptive as well as snapshot-bearing: this one action exercises
+        // both of the platform behaviours a descriptor can ask for.
+        assert!(recalibrate.is_disruptive);
+
+        // What the connector currently reports is what a pre-action snapshot
+        // would capture. Read through `status()` rather than set through
+        // `set-load`, because the fixture re-derives its load on every poll —
+        // which is also why the old value is genuinely unrecoverable
+        // afterwards, and why recording it is worth doing.
+        let before = connector
+            .status()
+            .await
+            .expect("status")
+            .data_point_value(DATA_POINT_LOAD)
+            .cloned()
+            .expect("the load reading");
+
+        let result = connector
+            .execute_action(ACTION_RECALIBRATE, None, Value::Null)
+            .await
+            .expect("recalibrate should succeed");
+        assert!(result.success);
+        let payload = result
+            .payload
+            .expect("recalibrate reports what it replaced");
+        assert_eq!(
+            payload["previousLoad"], before,
+            "the action overwrote exactly the value the snapshot would have recorded"
+        );
+        assert_eq!(payload[DATA_POINT_LOAD], json!(RECALIBRATED_LOAD));
+    }
+
+    #[tokio::test]
+    async fn the_update_check_reports_whatever_the_configuration_asked_for() {
+        // Supported unconditionally: the capability is a property of the
+        // connector, not of what it currently finds.
+        assert!(DebugConnector::default().supports_update_checking());
+
+        assert_eq!(
+            DebugConnector::default()
+                .check_for_updates(None)
+                .await
+                .expect("the default fixture is up to date"),
+            UpdateCheckResult::up_to_date()
+        );
+
+        let outdated = DebugConnector::new(DebugConnectorConfig {
+            simulated_update_available: true,
+            ..DebugConnectorConfig::default()
+        });
+        let found = outdated
+            .check_for_updates(None)
+            .await
+            .expect("an update should be reported");
+        assert!(found.available);
+        assert_eq!(found.latest_ref.as_deref(), Some(SIMULATED_LATEST_REF));
+
+        // Sub-target scoping is accepted; the fixture answers the same way for
+        // every target, which is enough to prove the argument reaches it.
+        assert_eq!(
+            outdated
+                .check_for_updates(Some(FIXTURE_TARGETS[0]))
+                .await
+                .expect("a targeted check should succeed"),
+            found
+        );
+
+        // An update check is a network call in every real connector, so the
+        // fixture's failure and latency knobs have to reach it too.
+        assert_eq!(
+            DebugConnector::failing(ConnectorError::unreachable("registry is down"))
+                .check_for_updates(None)
+                .await
+                .expect_err("fail mode must reach the update check"),
+            ConnectorError::unreachable("registry is down")
+        );
+        let start = std::time::Instant::now();
+        DebugConnector::with_latency(60)
+            .check_for_updates(None)
+            .await
+            .expect("a slow check still succeeds");
+        assert!(start.elapsed() >= std::time::Duration::from_millis(60));
+    }
+
+    #[test]
+    fn the_update_check_config_knob_is_read_from_stored_configuration() {
+        let connector = DebugConnector::from_config_value(json!({
+            "simulatedUpdateAvailable": true,
+        }))
+        .expect("a valid configuration");
+        assert!(connector.config().simulated_update_available);
+
+        // Absent means "up to date", which is the answer a fixture nobody has
+        // configured should give.
+        assert!(
+            !DebugConnector::from_config_value(json!({}))
+                .expect("an empty configuration")
+                .config()
+                .simulated_update_available
+        );
     }
 
     #[tokio::test]

@@ -22,8 +22,9 @@ use axum::response::{IntoResponse, Response};
 use axum::Json;
 use chrono::Utc;
 use loom_core::connector::{
-    Connector, ConnectorAction, ConnectorError, ConnectorMetadata, ConnectorStatus,
-    DataPointDescriptor, DisplayField, SetupGuide, WidgetLayout,
+    ActionResult, ColumnDescriptor, ColumnValueType, Connector, ConnectorAction, ConnectorError,
+    ConnectorMetadata, ConnectorStatus, DataPointDescriptor, DisplayField, ResourceItem,
+    ResourceKindDescriptor, SetupGuide, WidgetLayout,
 };
 use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::Value;
@@ -232,6 +233,18 @@ pub struct ConnectorInstanceDetail {
     supports_sub_targets: bool,
     /// Type id this live instance can discover, or null when unsupported.
     discoverable_type: Option<String>,
+    /// Whether this connector can be asked if what it manages is out of date.
+    supports_update_checking: bool,
+    /// What the update scheduler last found, keyed by target with `""` for the
+    /// instance itself — the same convention `status.details` uses.
+    ///
+    /// Empty until a check has run, and each entry carries its own
+    /// `lastChecked` so a client shows the age of the answer rather than
+    /// implying it is current. Beside `status` rather than inside it: a
+    /// registry reading is hours old by design and a status reading is
+    /// seconds old, and one object carrying both would invite a client to
+    /// treat them as equally fresh.
+    update_status: HashMap<String, crate::connectors::updates::UpdateStatus>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -390,7 +403,19 @@ pub async fn get_instance(
         Err(response) => return *response,
     };
 
-    detail_for(&row, tags, live.as_deref(), snapshot.as_ref()).await
+    let update_status = match Uuid::parse_str(&row.id) {
+        Ok(uuid) => state.updates.statuses_for(&uuid).await.unwrap_or_default(),
+        Err(_) => HashMap::new(),
+    };
+
+    detail_for(
+        &row,
+        tags,
+        live.as_deref(),
+        snapshot.as_ref(),
+        update_status,
+    )
+    .await
 }
 
 /// `POST /connector-instances/{id}/discover`
@@ -448,6 +473,142 @@ pub async fn list_sub_targets(
     }
 }
 
+/// The kind id of the platform-provided "recently updated" table.
+///
+/// **Provided by the backend, not by the connector**, and that is a deliberate
+/// exception to the resource-browser's usual rule that kinds are connector-
+/// declared. The rows are the *action log's* — who applied which update, when,
+/// and what it replaced — and the action log is platform state that no
+/// connector can see or should be given. A connector reaching into Loom's
+/// database to fill a table would invert the dependency the whole architecture
+/// rests on.
+///
+/// It is offered for any instance whose connector reports
+/// [`Connector::supports_update_checking`], because that is exactly the set of
+/// connectors for which "what did we update, and what was it before?" is a
+/// question with answers.
+pub const RESOURCE_KIND_RECENTLY_UPDATED: &str = "recentlyUpdated";
+
+/// The action whose log entries the table is built from.
+const APPLY_UPDATE_ACTION: &str = crate::connectors::updates::APPLY_UPDATE_ACTION;
+
+/// How many past updates the table shows.
+const RECENTLY_UPDATED_LIMIT: i64 = 25;
+
+/// The platform's own resource kinds for one instance.
+///
+/// Appended to whatever the connector declares. A connector that browses
+/// nothing still gets this one if it supports update checking, and a connector
+/// that declares a kind by the same name would shadow nothing — the ids are
+/// distinct by construction because this one is not a Docker word.
+fn platform_resource_kinds(connector: &dyn Connector) -> Vec<ResourceKindDescriptor> {
+    if !connector.supports_update_checking() {
+        return Vec::new();
+    }
+
+    vec![ResourceKindDescriptor::new(
+        RESOURCE_KIND_RECENTLY_UPDATED,
+        "Recently updated",
+        vec![
+            // `targetId`, the platform's name for "which sub-target this row
+            // is about", so a row action knows where to go. These rows are keyed
+            // by log entry, so the row id cannot stand in for it.
+            ColumnDescriptor::new("targetId", "Target", ColumnValueType::Text),
+            // Named after `applyUpdate`'s own parameter: a client that can
+            // answer a parameter from a same-named column turns this row into a
+            // one-click rollback, with no rollback-specific mechanism anywhere.
+            ColumnDescriptor::new("targetImageRef", "Was running", ColumnValueType::Text),
+            ColumnDescriptor::new("newRef", "Updated to", ColumnValueType::Text),
+            ColumnDescriptor::new("appliedAt", "When", ColumnValueType::Timestamp),
+            ColumnDescriptor::new("appliedBy", "By", ColumnValueType::Text),
+        ],
+    )
+    .with_row_actions(
+        // The rollback, and there is no other rollback. Each row already holds
+        // the reference the target was running before that update — recorded by
+        // the action log's snapshot mechanism — so going back is this same
+        // action invoked with that value. A dedicated `rollback` action would
+        // need its own store of previous versions, which is the store this
+        // table is reading from.
+        // Borrowed from the connector's own descriptors rather than
+        // constructed here, so the schema, label and snapshot declaration are
+        // the connector author's and cannot drift from the action that will
+        // actually run. A connector that offers no such action gets a
+        // history table with no buttons, which is still worth reading.
+        connector
+            .resource_kinds()
+            .into_iter()
+            .flat_map(|kind| kind.row_actions)
+            .find(|action| action.id == APPLY_UPDATE_ACTION)
+            .into_iter()
+            .collect(),
+    )]
+}
+
+/// One `applyUpdate` entry, shaped as a browsable row.
+///
+/// `previousRef` comes from the log entry's **snapshot** — the value the target
+/// reported immediately before the action ran — and `newRef` from its params.
+/// Neither is stored by this feature: both are there because the action
+/// declared `snapshotDataPointIds` and because the log records params. That is
+/// the whole rollback mechanism.
+async fn recently_updated_rows(
+    state: &AppState,
+    instance_id: &str,
+) -> Result<Vec<ResourceItem>, sqlx::Error> {
+    let rows = sqlx::query_as::<_, ActionLogRow>(
+        "SELECT log.id, log.action_id, log.target_id, log.params, log.invoked_by_user_id, \
+                users.username AS invoked_by_username, log.invoked_by_system, \
+                log.invoked_at, log.completed_at, log.success, log.result_message, log.snapshot \
+         FROM connector_action_log AS log \
+         LEFT JOIN users ON users.id = log.invoked_by_user_id \
+         WHERE log.instance_id = ? AND log.action_id = ? AND log.success = 1 \
+         ORDER BY log.invoked_at DESC, log.rowid DESC \
+         LIMIT ?",
+    )
+    .bind(instance_id)
+    .bind(APPLY_UPDATE_ACTION)
+    .bind(RECENTLY_UPDATED_LIMIT)
+    .fetch_all(&state.pool)
+    .await?;
+
+    Ok(rows
+        .into_iter()
+        .map(|row| {
+            let params = parse_stored_json(&row.params);
+            let snapshot = row.snapshot.as_deref().map(parse_stored_json);
+            let previous = snapshot
+                .as_ref()
+                .and_then(|snapshot| snapshot.as_object())
+                .and_then(|snapshot| snapshot.values().next())
+                .and_then(Value::as_str)
+                .unwrap_or("unknown")
+                .to_owned();
+
+            ResourceItem::new(row.id)
+                .with_field("targetId", row.target_id.unwrap_or_default())
+                .with_field("targetImageRef", previous)
+                .with_field(
+                    "newRef",
+                    params
+                        .get(crate::connectors::updates::TARGET_IMAGE_REF_PARAM)
+                        .and_then(Value::as_str)
+                        .unwrap_or("unknown"),
+                )
+                .with_field("appliedAt", row.completed_at.unwrap_or(row.invoked_at))
+                .with_field(
+                    "appliedBy",
+                    if row.invoked_by_system {
+                        "Loom (scheduled)".to_owned()
+                    } else {
+                        row.invoked_by_username
+                            .unwrap_or_else(|| "unknown".to_owned())
+                    },
+                )
+        })
+        .collect())
+}
+
 /// `GET /connector-instances/{id}/resource-kinds`
 ///
 /// The browsable tables this instance publishes, live from the loaded
@@ -463,7 +624,9 @@ pub async fn list_resource_kinds(
         Ok(connector) => connector,
         Err(response) => return *response,
     };
-    Json(connector.resource_kinds()).into_response()
+    let mut kinds = connector.resource_kinds();
+    kinds.extend(platform_resource_kinds(connector.as_ref()));
+    Json(kinds).into_response()
 }
 
 /// Query parameters for a resource listing.
@@ -496,6 +659,15 @@ pub async fn list_resources(
         Ok(connector) => connector,
         Err(response) => return *response,
     };
+
+    // The platform's own kinds are served from Loom's tables, not from the
+    // connector: their rows are the action log's, which no connector can see.
+    if kind == RESOURCE_KIND_RECENTLY_UPDATED && connector.supports_update_checking() {
+        return match recently_updated_rows(&state, &id).await {
+            Ok(rows) => Json(rows).into_response(),
+            Err(error) => internal_error("reading recent updates", error),
+        };
+    }
 
     if !connector
         .resource_kinds()
@@ -619,11 +791,14 @@ pub async fn create_instance(
         icon_override: None,
     };
 
+    // A brand-new instance has never been checked, so its update status is
+    // empty rather than absent — the same distinction the cache draws.
     let body = detail_for(
         &row,
         Vec::new(),
         Some(connector.as_ref()),
         snapshot.as_ref(),
+        HashMap::new(),
     )
     .await;
     (StatusCode::CREATED, body).into_response()
@@ -756,11 +931,17 @@ pub async fn update_instance(
         Err(_) => None,
     };
 
+    let update_status = match Uuid::parse_str(&row.id) {
+        Ok(uuid) => state.updates.statuses_for(&uuid).await.unwrap_or_default(),
+        Err(_) => HashMap::new(),
+    };
+
     detail_for(
         &row,
         response_tags,
         Some(connector.as_ref()),
         snapshot.as_ref(),
+        update_status,
     )
     .await
 }
@@ -792,6 +973,11 @@ pub async fn delete_instance(
 
     if let Ok(uuid) = Uuid::parse_str(&id) {
         state.connectors.remove(&uuid).await;
+        // The update cache is keyed by instance id, and ids are not reused —
+        // but a cache that keeps growing with every deleted connector is a
+        // leak, and one that outlived a *recreated* instance would report a
+        // stale update for a connector that has never been checked.
+        state.updates.forget(&uuid).await;
     }
 
     // Placements cascade away with the instance, and a cascade cannot know that
@@ -882,13 +1068,73 @@ pub async fn execute_action(
         params => (None, params),
     };
 
+    match invoke_action(
+        &state,
+        connector,
+        &id,
+        &action_id,
+        target_id.as_deref(),
+        params,
+        ActionActor::User(caller.id()),
+    )
+    .await
+    {
+        Ok(result) => Json(result).into_response(),
+        Err(ActionFailure::UnknownAction(action_id)) => ErrorBody::connector(
+            StatusCode::NOT_FOUND,
+            ConnectorError::invalid_action(action_id),
+        ),
+        Err(ActionFailure::Log(error)) => internal_error("recording a connector action", error),
+        Err(ActionFailure::Connector(error)) => ErrorBody::connector(status_for(&error), error),
+    }
+}
+
+/// Why an invocation did not produce an `ActionResult`.
+///
+/// Three cases rather than one because they are three different faults: the
+/// caller named something that does not exist, Loom could not record what it
+/// was about to do, or the service could not be reached. The route turns them
+/// into three different statuses and the scheduler logs them differently.
+#[derive(Debug)]
+pub(crate) enum ActionFailure {
+    /// The connector advertises this id nowhere.
+    UnknownAction(String),
+    /// The audit row could not be written, so nothing was dispatched.
+    Log(sqlx::Error),
+    /// The connector could not carry the action out.
+    Connector(ConnectorError),
+}
+
+/// Runs one connector action: snapshot, record, dispatch, complete.
+///
+/// **The single path every action takes**, whoever asked for it. The HTTP route
+/// is one caller and the update scheduler is another, and they share this
+/// function rather than each doing their own version — which is what makes an
+/// automatic update indistinguishable from a manual one in the audit log, in
+/// the pending-operation overlay, and in the poll that follows. An automation
+/// with its own quieter path is an automation whose actions are invisible
+/// exactly when someone is trying to work out what happened overnight.
+///
+/// Authorization is **not** here. It belongs to the caller: the route checks
+/// `connectors.control` against the instance before it gets this far, and the
+/// scheduler acts on the instance's own stored configuration, which is an
+/// administrator's decision already made.
+pub(crate) async fn invoke_action(
+    state: &AppState,
+    connector: std::sync::Arc<dyn Connector>,
+    instance_id: &str,
+    action_id: &str,
+    target_id: Option<&str>,
+    params: Value,
+    actor: ActionActor<'_>,
+) -> Result<ActionResult, ActionFailure> {
     // What the connector says this action is, looked up across both places it
     // can be advertised: its top-level `actions()` and the row/kind actions of
     // its resource kinds. A resource-browser action is still a connector
     // action — same dispatch, same `connectors.control` requirement, same
     // resource scoping — so recognising it here is all that browsing needed
     // from this endpoint.
-    let descriptor = resolve_action(connector.as_ref(), &action_id, target_id.as_deref()).await;
+    let descriptor = resolve_action(connector.as_ref(), action_id, target_id).await;
 
     // An id the connector advertises nowhere is rejected before it is
     // dispatched — *unless* the connector currently advertises nothing at all.
@@ -899,10 +1145,7 @@ pub async fn execute_action(
     let advertises_nothing =
         connector.actions().await.is_empty() && connector.resource_kinds().is_empty();
     if descriptor.is_none() && !advertises_nothing {
-        return ErrorBody::connector(
-            StatusCode::NOT_FOUND,
-            ConnectorError::invalid_action(action_id),
-        );
+        return Err(ActionFailure::UnknownAction(action_id.to_owned()));
     }
 
     // A disruptive action makes the service stop answering for a while, and a
@@ -915,20 +1158,46 @@ pub async fn execute_action(
     // route recognises: which actions are disruptive is the connector author's
     // judgement, and hardcoding "restart" here would be right for Docker and
     // wrong for the next connector that calls it "recreate".
+    let snapshot_ids = descriptor
+        .as_ref()
+        .map(|action| action.snapshot_data_point_ids.clone())
+        .unwrap_or_default();
     let disruptive = descriptor
         .filter(|action| action.is_disruptive)
         .map(|action| action.label);
 
-    let instance_id = Uuid::parse_str(&id).ok();
-    if let (Some(uuid), Some(label)) = (instance_id, disruptive.as_ref()) {
+    let uuid = Uuid::parse_str(instance_id).ok();
+
+    // Everything the audit trail needs is gathered *before* the action runs,
+    // and the row is written before it is dispatched. Writing afterwards would
+    // lose exactly the invocations most worth having: the one that never
+    // returned, and the one that took the process down with it.
+    let snapshot = match uuid {
+        Some(uuid) => snapshot_for(state, uuid, target_id, &snapshot_ids).await,
+        None => None,
+    };
+    // Fail closed. An action Loom cannot record is an action Loom does not
+    // perform: a control plane whose audit trail is best-effort is one where
+    // the interesting invocation is the one that went missing.
+    let log_id = record_invocation(
+        state,
+        instance_id,
+        action_id,
+        target_id,
+        &params,
+        actor,
+        snapshot.as_ref(),
+    )
+    .await
+    .map_err(ActionFailure::Log)?;
+
+    if let (Some(uuid), Some(label)) = (uuid, disruptive.as_ref()) {
         state.connectors.begin_operation(uuid, label).await;
     }
 
-    let outcome = connector
-        .execute_action(&action_id, target_id.as_deref(), params)
-        .await;
+    let outcome = connector.execute_action(action_id, target_id, params).await;
 
-    if let Some(uuid) = instance_id {
+    if let Some(uuid) = uuid {
         if disruptive.is_some() {
             // Cleared whatever happened: a restart that failed is not still
             // being performed. The safety net in the runtime covers the case
@@ -943,10 +1212,335 @@ pub async fn execute_action(
         state.connectors.refresh_now(uuid).await;
     }
 
+    // Both arms are recorded, and they are recorded as different things. A
+    // service that was reached and declined is `success: false` with its own
+    // words; a request that never got there is `success: false` with the
+    // transport's. Neither is an absence.
     match outcome {
-        Ok(result) => Json(result).into_response(),
-        Err(error) => ErrorBody::connector(status_for(&error), error),
+        Ok(result) => {
+            complete_invocation(state, &log_id, result.success, &result.message).await;
+            Ok(result)
+        }
+        Err(error) => {
+            complete_invocation(state, &log_id, false, &error.to_string()).await;
+            Err(ActionFailure::Connector(error))
+        }
     }
+}
+
+/* ------------------------------------------------------------------ */
+/* Action log                                                          */
+/* ------------------------------------------------------------------ */
+
+/// Default number of log rows returned when the caller does not say.
+const ACTION_LOG_DEFAULT_LIMIT: i64 = 50;
+
+/// Hard ceiling on that, whatever the caller asks for.
+///
+/// A cap rather than an error for an over-large `limit`: the caller wanted "as
+/// much as possible", and refusing the request teaches them a number they then
+/// have to hardcode.
+const ACTION_LOG_MAX_LIMIT: i64 = 200;
+
+/// One stored invocation, as it comes back out of the database.
+#[derive(Debug, sqlx::FromRow)]
+struct ActionLogRow {
+    id: String,
+    action_id: String,
+    target_id: Option<String>,
+    params: String,
+    invoked_by_user_id: Option<String>,
+    invoked_by_username: Option<String>,
+    invoked_by_system: bool,
+    invoked_at: String,
+    completed_at: Option<String>,
+    success: Option<bool>,
+    result_message: Option<String>,
+    snapshot: Option<String>,
+}
+
+/// Who invoked an action, named rather than merely identified.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ActionLogActor {
+    /// `null` for an action Loom invoked itself.
+    id: Option<String>,
+    /// `null` for a system invocation, or if the user row has gone despite the
+    /// foreign key — a log read can never fail on account of an account.
+    username: Option<String>,
+    /// Whether Loom itself invoked this — today, the update scheduler. Never
+    /// true at the same time as `id` is set; the database enforces it.
+    system: bool,
+}
+
+/// One entry in `GET /connector-instances/{id}/action-log`.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ActionLogResponse {
+    id: String,
+    action_id: String,
+    target_id: Option<String>,
+    /// The parameters as submitted, parsed back into JSON. A row whose stored
+    /// text will not parse comes back as a JSON string rather than being
+    /// dropped: an audit entry nobody can read is still evidence that
+    /// something ran.
+    params: Value,
+    invoked_by: ActionLogActor,
+    invoked_at: String,
+    /// `null` while the invocation is still outstanding — or forever, if Loom
+    /// never learned the outcome.
+    completed_at: Option<String>,
+    success: Option<bool>,
+    result_message: Option<String>,
+    /// The declared data points' values from just before the action ran, or
+    /// `null` when the action declared none.
+    snapshot: Option<Value>,
+}
+
+impl From<ActionLogRow> for ActionLogResponse {
+    fn from(row: ActionLogRow) -> Self {
+        Self {
+            id: row.id,
+            action_id: row.action_id,
+            target_id: row.target_id,
+            params: parse_stored_json(&row.params),
+            invoked_by: ActionLogActor {
+                id: row.invoked_by_user_id,
+                username: row.invoked_by_username,
+                system: row.invoked_by_system,
+            },
+            invoked_at: row.invoked_at,
+            completed_at: row.completed_at,
+            success: row.success,
+            result_message: row.result_message,
+            snapshot: row.snapshot.as_deref().map(parse_stored_json),
+        }
+    }
+}
+
+/// Query parameters for the action log.
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ActionLogQuery {
+    #[serde(default)]
+    action_id: Option<String>,
+    #[serde(default)]
+    target_id: Option<String>,
+    #[serde(default)]
+    limit: Option<i64>,
+}
+
+/// `GET /connector-instances/{id}/action-log`
+///
+/// Requires a global `connectors.view` grant. Newest first, optionally narrowed
+/// by `actionId` and `targetId`, at most `limit` rows.
+///
+/// **`connectors.view`, not `connectors.control`.** Reading the history is
+/// looking, not doing, and the people most in need of "what happened to this
+/// service?" are exactly the ones without authority to have done it. It sits
+/// behind the same global grant as the instance list, so it is not a way for a
+/// caller scoped to one connector to learn about another.
+///
+/// Served straight from the table rather than from the runtime: the log
+/// outlives every process that wrote it, which is most of the point.
+pub async fn list_action_log(
+    _caller: RequirePermission<ConnectorsView>,
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Query(query): Query<ActionLogQuery>,
+) -> Response {
+    // Existence is checked first so an unknown instance is a 404 rather than an
+    // empty list — "nothing has happened here" and "there is no here" are
+    // different answers.
+    match load_row(&state, &id).await {
+        Ok(Some(_)) => {}
+        Ok(None) => return not_found(&id),
+        Err(response) => return *response,
+    }
+
+    let limit = query
+        .limit
+        .unwrap_or(ACTION_LOG_DEFAULT_LIMIT)
+        .clamp(1, ACTION_LOG_MAX_LIMIT);
+    let action_id = trimmed(query.action_id.as_deref());
+    let target_id = trimmed(query.target_id.as_deref());
+
+    // Both filters are expressed as `(? IS NULL OR column = ?)` rather than by
+    // building SQL per request: one prepared statement, no string assembly
+    // anywhere near a user-supplied value.
+    let rows = sqlx::query_as::<_, ActionLogRow>(
+        "SELECT log.id, log.action_id, log.target_id, log.params, log.invoked_by_user_id, \
+                users.username AS invoked_by_username, log.invoked_by_system, \
+                log.invoked_at, log.completed_at, \
+                log.success, log.result_message, log.snapshot \
+         FROM connector_action_log AS log \
+         LEFT JOIN users ON users.id = log.invoked_by_user_id \
+         WHERE log.instance_id = ? \
+           AND (?2 IS NULL OR log.action_id = ?2) \
+           AND (?3 IS NULL OR log.target_id = ?3) \
+         ORDER BY log.invoked_at DESC, log.rowid DESC \
+         LIMIT ?4",
+    )
+    .bind(&id)
+    .bind(action_id)
+    .bind(target_id)
+    .bind(limit)
+    .fetch_all(&state.pool)
+    .await;
+
+    match rows {
+        Ok(rows) => Json(
+            rows.into_iter()
+                .map(ActionLogResponse::from)
+                .collect::<Vec<_>>(),
+        )
+        .into_response(),
+        Err(error) => internal_error("reading the connector action log", error),
+    }
+}
+
+/// Who is invoking an action.
+///
+/// The audit log names one or the other and never both — see the
+/// `invoked_by_system` migration for why a reserved "system user" row was not
+/// the answer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ActionActor<'a> {
+    /// A signed-in caller, by user id.
+    User(&'a str),
+    /// Loom itself. Today that means the update scheduler.
+    System,
+}
+
+impl ActionActor<'_> {
+    /// `(invoked_by_user_id, invoked_by_system)` as the row stores them.
+    fn columns(&self) -> (Option<&str>, bool) {
+        match self {
+            Self::User(id) => (Some(id), false),
+            Self::System => (None, true),
+        }
+    }
+}
+
+/// The values an action declared worth recording, read from the poll cache.
+///
+/// Deliberately the *cached* reading and not a fresh one. A snapshot must
+/// describe the world as it was immediately before the action, and a live call
+/// to fetch it would sit between the decision and the dispatch, slowing every
+/// action down to take a reading that is no more true than the one already
+/// held. Ids the connector never reported are simply absent.
+///
+/// Returns `None` when the action declared nothing, so "no snapshot was asked
+/// for" stays distinct from "a snapshot was asked for and came back empty".
+async fn snapshot_for(
+    state: &AppState,
+    instance_id: Uuid,
+    target_id: Option<&str>,
+    data_point_ids: &[String],
+) -> Option<Value> {
+    if data_point_ids.is_empty() {
+        return None;
+    }
+
+    let status = state
+        .connectors
+        .cached_status(&instance_id)
+        .await
+        .and_then(|snapshot| snapshot.status);
+
+    let mut captured = serde_json::Map::new();
+    if let Some(status) = status {
+        for data_point_id in data_point_ids {
+            if let Some(value) = status.data_point_value_for(target_id, data_point_id) {
+                captured.insert(data_point_id.clone(), value.clone());
+            }
+        }
+    }
+    Some(Value::Object(captured))
+}
+
+/// Writes the pending log row for an invocation about to be dispatched.
+///
+/// Returns the new row's id, which the completion update needs.
+async fn record_invocation(
+    state: &AppState,
+    instance_id: &str,
+    action_id: &str,
+    target_id: Option<&str>,
+    params: &Value,
+    actor: ActionActor<'_>,
+    snapshot: Option<&Value>,
+) -> Result<String, sqlx::Error> {
+    let log_id = Uuid::new_v4().to_string();
+    let (user_id, system) = actor.columns();
+    sqlx::query(
+        "INSERT INTO connector_action_log \
+             (id, instance_id, action_id, target_id, params, invoked_by_user_id, \
+              invoked_by_system, invoked_at) \
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+    )
+    .bind(&log_id)
+    .bind(instance_id)
+    .bind(action_id)
+    .bind(target_id)
+    .bind(params.to_string())
+    .bind(user_id)
+    .bind(system)
+    .bind(Utc::now().to_rfc3339())
+    .execute(&state.pool)
+    .await?;
+
+    if let Some(snapshot) = snapshot {
+        sqlx::query("UPDATE connector_action_log SET snapshot = ? WHERE id = ?")
+            .bind(snapshot.to_string())
+            .bind(&log_id)
+            .execute(&state.pool)
+            .await?;
+    }
+
+    Ok(log_id)
+}
+
+/// Closes out a log row once the action has returned.
+///
+/// Failures here are logged and swallowed, unlike the insert. The action has
+/// already run by this point, and turning a successful restart into a 500
+/// because the audit row could not be updated would be a worse outcome than a
+/// row that stays pending — which is itself readable as "the outcome was never
+/// recorded".
+async fn complete_invocation(state: &AppState, log_id: &str, success: bool, result_message: &str) {
+    let updated = sqlx::query(
+        "UPDATE connector_action_log \
+         SET completed_at = ?, success = ?, result_message = ? \
+         WHERE id = ?",
+    )
+    .bind(Utc::now().to_rfc3339())
+    .bind(success)
+    .bind(result_message)
+    .bind(log_id)
+    .execute(&state.pool)
+    .await;
+
+    if let Err(error) = updated {
+        tracing::error!(
+            %log_id,
+            %error,
+            "could not record the outcome of a connector action; the log row stays pending"
+        );
+    }
+}
+
+/// Parses stored JSON text, falling back to the raw text as a JSON string.
+fn parse_stored_json(stored: &str) -> Value {
+    serde_json::from_str(stored).unwrap_or_else(|_| Value::String(stored.to_owned()))
+}
+
+/// A non-empty, trimmed filter value, or `None` for an absent or blank one.
+fn trimmed(value: Option<&str>) -> Option<String> {
+    value
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_owned)
 }
 
 /* ------------------------------------------------------------------ */
@@ -1175,19 +1769,34 @@ async fn detail_for(
     tags: Vec<String>,
     live: Option<&dyn Connector>,
     snapshot: Option<&ConnectorStatusSnapshot>,
+    update_status: HashMap<String, crate::connectors::updates::UpdateStatus>,
 ) -> Response {
     let instance = entry_for(row, tags, live, snapshot);
 
-    let (actions, data_points, default_layout, supports_sub_targets, discoverable_type) = match live
-    {
+    let (
+        actions,
+        data_points,
+        default_layout,
+        supports_sub_targets,
+        discoverable_type,
+        supports_update_checking,
+    ) = match live {
         Some(connector) => (
             connector.actions().await,
             connector.data_points(),
             connector.default_layout(),
             connector.supports_sub_targets(),
             connector.discoverable_type(),
+            connector.supports_update_checking(),
         ),
-        None => (Vec::new(), Vec::new(), WidgetLayout::default(), false, None),
+        None => (
+            Vec::new(),
+            Vec::new(),
+            WidgetLayout::default(),
+            false,
+            None,
+            false,
+        ),
     };
 
     Json(ConnectorInstanceDetail {
@@ -1198,6 +1807,8 @@ async fn detail_for(
         default_layout,
         supports_sub_targets,
         discoverable_type,
+        supports_update_checking,
+        update_status,
     })
     .into_response()
 }

@@ -1147,6 +1147,232 @@ its separate purpose of suggesting whole new connector instances.
 | 403 | The caller lacks a global `connectors.view` grant. |
 | 404 | No instance with that id. |
 
+## Update management
+
+Loom can ask whether what a connector manages is out of date, and can apply the
+answer. Both halves are generic: the *capability* is a connector trait method,
+the *schedule* is a platform background task, and the *record* is the ordinary
+[action log](#action-log). Docker is the first connector to implement it, not
+the shape it was built around. See
+[`adr/0023-docker-update-management.md`](adr/0023-docker-update-management.md).
+
+### Update settings are a configuration convention
+
+A connector that wants scheduled checking publishes these keys in **its own**
+`configSchema`, with its own descriptions and defaults. The scheduler reads them
+from the stored configuration by name; a connector that publishes none of them
+is never checked.
+
+| Key | Type | Default | Meaning |
+| --- | --- | --- | --- |
+| `checkForUpdates` | boolean | `false` | Check this instance at all. Off by default: checking contacts a third party. |
+| `checkIntervalMinutes` | integer | `360` | Minutes between checks. |
+| `autoApplyUpdates` | boolean | `false` | Apply a found update unattended. |
+| `autoApplyAtTime` | string | *(empty)* | `HH:MM` **local** maintenance window. Empty means apply as soon as one is found. |
+| `excludeFromAutoUpdate` | boolean | `false` | Keep checking and reporting, never apply. Overrides `autoApplyUpdates`. |
+
+A key that is missing or of the wrong type falls back to its default rather than
+failing: the scheduler runs across every instance, and one malformed
+configuration must not stop the others being checked.
+
+### The scheduler
+
+A background task **separate from the status poller**, and deliberately so: the
+poller asks a local daemon how something is doing every few seconds and backs
+off when it fails; this asks a third-party registry what exists every few hours
+and is rate-limited by somebody else. It wakes once a minute, checks whose
+interval has elapsed, and for each due instance checks every target in turn with
+a short pause between them — a host with thirty containers must not open thirty
+registry connections in the same instant from one address.
+
+An automatically applied update runs through the **same** action-execution path
+as a manual one: same audit-log entry, same pre-action snapshot, same
+pending-operation overlay, same immediate re-poll. Its log entry is attributed
+to the system rather than to a person — `invokedBy.system` is `true` and
+`invokedBy.id` is `null`.
+
+### `updateStatus` on the instance detail
+
+`GET /connector-instances/{id}` carries two new fields:
+
+```json
+{
+  "supportsUpdateChecking": true,
+  "updateStatus": {
+    "web": {
+      "available": true,
+      "latestRef": "example/app@sha256:0123abcd",
+      "lastChecked": "2026-08-28T03:00:12Z"
+    }
+  }
+}
+```
+
+| Field | JSON type | Meaning | Nullability |
+| --- | --- | --- | --- |
+| `supportsUpdateChecking` | boolean | Whether this connector can answer the question at all. | Always present; `false` for an unloaded instance. |
+| `updateStatus` | object | Readings keyed by target, `""` for the instance itself — the same convention `status.details` uses. | Always present; **empty until a check has run**. |
+| `available` | boolean | Something newer exists. | Always present. |
+| `latestRef` | string | What the newer thing is called, in the managed system's own terms — a digest, a tag, a version. Opaque to Loom. | `null` when nothing newer was found. |
+| `lastChecked` | string | When this was established. | Always present. |
+
+`updateStatus` sits **beside** `status`, not inside it. A registry reading is
+hours old by design and a status reading is seconds old; one object carrying
+both would invite a client to treat them as equally fresh.
+
+### The `applyUpdate` action, and rollback
+
+Docker's containers offer `applyUpdate`, taking `{ "targetImageRef": string }`.
+It pulls that reference and recreates the container on it, preserving
+environment, volumes, ports, restart policy, labels and networks. It is marked
+`isDisruptive` and declares `snapshotDataPointIds: ["currentImageRef"]`, so the
+action log records what the container was running immediately before.
+
+**Rollback is that same action with the recorded reference.** There is no
+`rollback` action and no stored "previous version" anywhere: the value a
+rollback needs is on the log entry, put there by the generic snapshot mechanism.
+
+The pull happens **before** anything is stopped, so a registry failure costs
+nothing — the container is still running and the `ActionResult` says so. Each
+later failure point reports which one it was and what state the host is in.
+
+### Resource kinds
+
+Two browsable tables, through the ordinary
+[resource browser](#resource-browser):
+
+| Kind | Provided by | Rows | Row action | Kind action |
+| --- | --- | --- | --- | --- |
+| `updates` | The connector | Every target with a waiting update, from its last check | `applyUpdate` with the row's `latestRef` | `updateAll` — applies each in turn, sequentially |
+| `recentlyUpdated` | **The platform** | Successful `applyUpdate` entries from the action log | `applyUpdate` with the row's `previousRef` — this is the rollback | — |
+
+`recentlyUpdated` is the one kind Loom itself provides rather than the
+connector, and it is offered for **any** instance whose connector reports
+`supportsUpdateChecking`. Its rows are the action log's, and no connector can
+see the action log — a connector reaching into Loom's database to fill a table
+would invert the dependency the architecture rests on. Its columns are `target`,
+`targetImageRef` (the previous reference, from the log entry's snapshot),
+`newRef` (from its params), `appliedAt`, and `appliedBy` (a username, or
+`Loom (scheduled)`).
+
+**Two column-key conventions make a row self-describing**, and neither is
+update-specific:
+
+- **A column key that matches an action parameter name answers it.** Both tables
+  name their reference column `targetImageRef` — `applyUpdate`'s own parameter —
+  so a client fills that parameter from the row the button sits in. A row action
+  whose every parameter is answered this way runs on click instead of opening a
+  form.
+- **A column keyed `targetId` names the sub-target the row's actions address.**
+  A host-scoped table can list rows belonging to different sub-targets — one row
+  per container — and the row's own `id` cannot stand in for that: in
+  `recentlyUpdated` the id is a log entry. A client that has no browsing target
+  reads `targetId` from the row.
+
+### Private registries are not supported yet
+
+Registry requests are made **anonymously**. A public repository on any registry
+implementing the v2 API works — the `WWW-Authenticate` challenge is followed
+wherever it points, so no registry is special-cased. A **private** repository
+answers that challenge with a `401`, which surfaces as
+`ConnectorError::AuthFailed` naming the repository and saying that Loom does not
+yet support registry credentials.
+
+That is a real limitation, stated plainly rather than presented as "no update
+available". Fixing it is a decision about credential storage, not about HTTP.
+
+## Action log
+
+Every invocation of `POST /connector-instances/{id}/actions/{actionId}` is
+recorded, for every action on every connector, whatever the outcome. This is
+not something a connector opts into or a client asks for: it happens in the
+endpoint, so "who restarted the media server, and when?" is answerable without
+anyone having planned to ask. See
+[`adr/0022-action-log-and-update-checking.md`](adr/0022-action-log-and-update-checking.md).
+
+A row is written **before** the action is dispatched, carrying the caller, the
+parameters as submitted, and any pre-action snapshot. It is updated when the
+action returns. Two consequences worth knowing:
+
+- **An action that cannot be recorded is not performed.** A failure to write
+  the row answers 500 and dispatches nothing. An audit trail whose gaps are
+  exactly the interesting invocations is not one.
+- **A row with `completedAt: null` is meaningful.** The action was authorized
+  and dispatched and Loom never learned the outcome — which is what a restart
+  that took the process down with it looks like from here.
+
+### Pre-action snapshots
+
+A [`ConnectorAction`](#connectoraction) may declare `snapshotDataPointIds`.
+Before such an action runs, the backend reads each listed data point's current
+value **from the poll cache** — no extra call to the service — scoped to the
+action's own `targetId`, and stores the result on the log row as
+`{ "<dataPointId>": <value> }`.
+
+Ids the connector never reported are simply absent from the snapshot. A
+snapshot is a record of what was known, not a guarantee that everything listed
+was available: refusing to run an action because a reading was missing would be
+the worse failure.
+
+### `GET /connector-instances/{id}/action-log`
+
+Requires a global `connectors.view` grant — reading the history is looking, not
+doing, and the people most in need of "what happened to this service?" are
+exactly the ones without authority to have done it.
+
+| Query parameter | Meaning | Default |
+| --- | --- | --- |
+| `actionId` | Only invocations of this action. | All actions. |
+| `targetId` | Only invocations against this sub-target. | All targets. |
+| `limit` | Maximum rows. Clamped to 1–200 rather than refused, because an over-large value means "as much as there is". | 50 |
+
+**Response 200** — newest first:
+
+```json
+[
+  {
+    "id": "0f2f1a5c-6b0e-4a1f-9a2e-2b6f4e1c33d0",
+    "actionId": "recalibrate",
+    "targetId": null,
+    "params": {},
+    "invokedBy": {
+      "id": "48ae87dc-fc35-42db-a3de-467677ff8061",
+      "username": "admin",
+      "system": false
+    },
+    "invokedAt": "2026-08-28T18:00:00+00:00",
+    "completedAt": "2026-08-28T18:00:02+00:00",
+    "success": true,
+    "resultMessage": "Simulated service recalibrated.",
+    "snapshot": { "load": 41.7 }
+  }
+]
+```
+
+| Field | JSON type | Meaning | Nullability |
+| --- | --- | --- | --- |
+| `id` | string | This log entry. | Always present. |
+| `actionId` | string | The action as invoked. | Always present. |
+| `targetId` | string | The sub-target addressed. | `null` for an instance-level action. |
+| `params` | any | The parameters as submitted, not normalized. | Always present; `null` when the caller sent no body. |
+| `invokedBy` | object | `{ id, username, system }` — named, not merely identified, so the log reads without a second lookup. `system: true` marks an action Loom invoked itself, today meaning the [update scheduler](#the-scheduler). | `id` and `username` are `null` exactly when `system` is `true`; the database enforces that the two cannot both identify the actor. |
+| `invokedAt` | string | When the action was dispatched. | Always present. |
+| `completedAt` | string | When it returned. | **`null` while outstanding** — see above. |
+| `success` | boolean | Whether the service carried the action out. A reached-and-declined action and a request that never arrived are both `false`, distinguished by `resultMessage`. | `null` while outstanding. |
+| `resultMessage` | string | The `ActionResult`'s message, or the connector error's. | `null` while outstanding. |
+| `snapshot` | object | Declared data points' values from just before the action ran. | `null` when the action declared none. |
+
+| Status | Meaning |
+| --- | --- |
+| 200 | Entries returned; an empty array means nothing has been invoked here. |
+| 403 | The caller lacks a global `connectors.view` grant. |
+| 404 | No instance with that id. |
+
+**Deleting a connector instance deletes its log** (`ON DELETE CASCADE`) — a
+history of something that no longer exists is not evidence. **Deleting a *user*
+named in the log is refused** with 409; deactivate the account instead.
+Attribution a later account deletion can erase is not an audit trail.
+
 ## Resource browser
 
 Some connectors manage *collections* — a Docker daemon's images, volumes, and
@@ -2670,7 +2896,8 @@ the number is live.
   "label": "Restart",
   "description": "Restarts the service.",
   "paramsSchema": {},
-  "isDisruptive": true
+  "isDisruptive": true,
+  "snapshotDataPointIds": ["load"]
 }
 ```
 
@@ -2682,6 +2909,7 @@ the number is live.
 | `description` | string | Longer explanation for tooltips and confirmation prompts — the place to warn that an action is disruptive. | Serialized as **`null`** when absent, never omitted. |
 | `paramsSchema` | object | JSON Schema for this action's parameters, driving client-side form generation and server-side validation. | Always present; `{}` for a parameterless action, never `null`. |
 | `isDisruptive` | boolean | Whether running this makes the service stop answering for a while. Raises a [`pendingOperation`](#pending-operations-and-diagnosis) while it runs. | Always present; `false` unless the connector opts in. |
+| `snapshotDataPointIds` | array of string | Data points whose current values are recorded on the [action log](#action-log) entry before this action runs. | Always present; `[]` unless the connector opts in. |
 
 **`isDisruptive` is not "is this dangerous".** The test is whether a user would
 be *surprised* by the gap. `stop` takes a service down, but the person who

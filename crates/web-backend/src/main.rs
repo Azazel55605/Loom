@@ -207,6 +207,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         connectors::ConnectorRuntime::load(&pool, connectors::builtin_registry()).await?;
     let _poller = connectors.spawn_poller();
 
+    let state = AppState::new(pool, jwt_secret, avatars_dir, connectors);
+    // A second background task, deliberately not folded into the poller: one
+    // asks a local daemon how things are every few seconds, the other asks a
+    // third-party registry what exists every few hours. See
+    // `connectors::updates`.
+    let _update_scheduler = connectors::updates::spawn_scheduler(state.clone());
+
     let listener = tokio::net::TcpListener::bind(&bind_addr).await?;
     info!(
         addr = %listener.local_addr()?,
@@ -214,11 +221,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         "loom web-backend listening"
     );
 
-    axum::serve(
-        listener,
-        app(AppState::new(pool, jwt_secret, avatars_dir, connectors)),
-    )
-    .await?;
+    axum::serve(listener, app(state)).await?;
     Ok(())
 }
 
@@ -231,6 +234,7 @@ mod tests {
         body::Body,
         http::{Request, StatusCode},
     };
+    use chrono::TimeZone;
     use http_body_util::BodyExt;
     use loom_core::connector::debug::DebugConnector;
     use loom_core::connector::{
@@ -238,6 +242,7 @@ mod tests {
         ConnectorStatus, DataPointDescriptor, DisplayField, WidgetLayout,
     };
     use serde_json::Value;
+    use std::time::Duration;
     use tower::ServiceExt;
 
     /// A router backed by its own throwaway database.
@@ -250,6 +255,10 @@ mod tests {
         router: Router,
         connectors: connectors::ConnectorRuntime,
         pool: SqlitePool,
+        /// The same state the router serves from, so a test can drive a
+        /// background task — the update scheduler — against the very instances
+        /// the HTTP tests are looking at.
+        state: AppState,
         /// Kept so tests can look at the avatar directory on disk — the point
         /// of several of them is that a file is really there, or really gone.
         dir: tempfile::TempDir,
@@ -293,15 +302,13 @@ mod tests {
             .expect("an empty connector table must load");
         connectors.poll_once().await;
 
+        let state = AppState::new(pool.clone(), secret, avatars, connectors.clone());
+
         TestApp {
-            router: app(AppState::new(
-                pool.clone(),
-                secret,
-                avatars,
-                connectors.clone(),
-            )),
+            router: app(state.clone()),
             connectors,
             pool,
+            state,
             dir,
         }
     }
@@ -1185,7 +1192,11 @@ mod tests {
                 .iter()
                 .map(|kind| kind["kind"].as_str().expect("kind id"))
                 .collect::<Vec<_>>(),
-            vec!["widgets", "gadgets"]
+            // The first two are the fixture's own; the third is the
+            // platform's, offered because this connector supports update
+            // checking and served from Loom's action log rather than from the
+            // connector.
+            vec!["widgets", "gadgets", "recentlyUpdated"]
         );
         assert_eq!(kinds[0]["columns"][1]["valueType"], "bytes");
         assert_eq!(kinds[0]["rowActions"][0]["id"], "recycle");
@@ -1259,6 +1270,8 @@ mod tests {
         )
         .await;
         assert_eq!(status, StatusCode::OK, "{kinds:#}");
+        // A connector using the trait's defaults browses nothing and cannot
+        // check for updates, so it gets no platform kind either.
         assert_eq!(kinds, serde_json::json!([]));
 
         let (status, body) = send(
@@ -2126,16 +2139,16 @@ mod tests {
             "nothing is running yet"
         );
 
-        // `restart` is the fixture's disruptive action; `ping` is not. Both are
-        // read from the connector's own descriptors, never from a name this
-        // test or the route recognises.
+        // `restart` and `recalibrate` are the fixture's disruptive actions;
+        // `ping` is not. All are read from the connector's own descriptors,
+        // never from a name this test or the route recognises.
         let actions = created["actions"].as_array().expect("actions");
         let disruptive: Vec<&str> = actions
             .iter()
             .filter(|action| action["isDisruptive"] == true && action["targetId"].is_null())
             .map(|action| action["id"].as_str().expect("id"))
             .collect();
-        assert_eq!(disruptive, vec!["restart"]);
+        assert_eq!(disruptive, vec!["restart", "recalibrate"]);
 
         // Seed the underlying status explicitly; production's process poller
         // does this on its next tick.
@@ -2276,6 +2289,946 @@ mod tests {
             diagnosis.contains("unreachable on port `1`"),
             "the diagnosis should name the port that was tried: {diagnosis}"
         );
+    }
+
+    /// Reads an instance's action log through the real endpoint.
+    async fn action_log(
+        app: &TestApp,
+        token: &str,
+        id: &str,
+        query: &str,
+    ) -> Vec<serde_json::Value> {
+        let (status, body) = send(
+            &app.router,
+            get_with_auth(
+                &format!("/connector-instances/{id}/action-log{query}"),
+                &bearer(token),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body:#}");
+        body.as_array().expect("a list of log entries").clone()
+    }
+
+    #[tokio::test]
+    async fn every_action_is_recorded_with_its_caller_params_and_outcome() {
+        let app = test_app().await;
+        let (access, _) = setup_and_login(&app.router).await;
+        let id = create_debug_instance(&app.router, &access, "Audited").await;
+        let admin_id = current_user_id(&app.router, &access).await;
+
+        assert!(
+            action_log(&app, &access, &id, "").await.is_empty(),
+            "nothing has been invoked yet"
+        );
+
+        let (status, _) = send(
+            &app.router,
+            post_json_auth(
+                &format!("/connector-instances/{id}/actions/set-label"),
+                &access,
+                serde_json::json!({ "label": "audited" }),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+
+        let entries = action_log(&app, &access, &id, "").await;
+        assert_eq!(entries.len(), 1);
+        let entry = &entries[0];
+        assert_eq!(entry["actionId"], "set-label");
+        assert_eq!(entry["targetId"], serde_json::Value::Null);
+        assert_eq!(entry["params"], serde_json::json!({ "label": "audited" }));
+        assert_eq!(entry["invokedBy"]["id"], admin_id);
+        // The username, not merely the id: a log nobody can read without a
+        // second lookup is a log nobody reads.
+        assert_eq!(entry["invokedBy"]["username"], "admin");
+        assert_eq!(entry["success"], true);
+        assert_eq!(entry["resultMessage"], "Simulated label updated.");
+        assert!(entry["invokedAt"].is_string());
+        assert!(entry["completedAt"].is_string());
+        // No snapshot was declared for this action, and none was invented.
+        assert_eq!(entry["snapshot"], serde_json::Value::Null);
+
+        // A refusal is recorded as emphatically as a success. The fixture
+        // rejects a bad parameter, and that is exactly the invocation someone
+        // will later want to find.
+        let (status, _) = send(
+            &app.router,
+            post_json_auth(
+                &format!("/connector-instances/{id}/actions/set-load"),
+                &access,
+                serde_json::json!({ "value": 900 }),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+
+        let entries = action_log(&app, &access, &id, "").await;
+        assert_eq!(entries.len(), 2, "newest first");
+        assert_eq!(entries[0]["actionId"], "set-load");
+        assert_eq!(entries[0]["success"], false);
+        assert!(entries[0]["resultMessage"]
+            .as_str()
+            .is_some_and(|message| message.contains("between 0 and 100")));
+
+        // A targeted action records which target it addressed.
+        let (status, _) = send(
+            &app.router,
+            post_json_auth(
+                &format!("/connector-instances/{id}/actions/ping"),
+                &access,
+                serde_json::json!({ "targetId": "fixture-a", "params": {} }),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(
+            action_log(&app, &access, &id, "").await[0]["targetId"],
+            "fixture-a"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_snapshot_bearing_action_records_the_reading_it_was_about_to_destroy() {
+        let app = test_app().await;
+        let (access, _) = setup_and_login(&app.router).await;
+        let id = create_debug_instance(&app.router, &access, "Snapshotted").await;
+
+        // The snapshot comes from the poll cache, so there has to have been a
+        // poll. Production's poller does this on its own tick.
+        app.connectors.poll_once().await;
+        let cached = app
+            .connectors
+            .cached_status(&uuid::Uuid::parse_str(&id).expect("uuid"))
+            .await
+            .and_then(|snapshot| snapshot.status)
+            .expect("a cached reading");
+        let load_before = cached
+            .data_point_value("load")
+            .cloned()
+            .expect("the load reading");
+
+        let (status, body) = send(
+            &app.router,
+            post_json_auth(
+                &format!("/connector-instances/{id}/actions/recalibrate"),
+                &access,
+                serde_json::json!({}),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body:#}");
+
+        let entry = action_log(&app, &access, &id, "").await.remove(0);
+        assert_eq!(entry["actionId"], "recalibrate");
+        assert_eq!(
+            entry["snapshot"],
+            serde_json::json!({ "load": load_before }),
+            "the snapshot must hold the value from before the action ran"
+        );
+        // And the action really did overwrite it, which is what makes the
+        // snapshot the only remaining record.
+        assert_eq!(body["payload"]["previousLoad"], load_before);
+    }
+
+    #[tokio::test]
+    async fn the_action_log_filters_by_action_and_target_and_caps_its_page() {
+        let app = test_app().await;
+        let (access, _) = setup_and_login(&app.router).await;
+        let id = create_debug_instance(&app.router, &access, "Busy").await;
+
+        for _ in 0..3 {
+            let (status, _) = send(
+                &app.router,
+                post_json_auth(
+                    &format!("/connector-instances/{id}/actions/ping"),
+                    &access,
+                    serde_json::json!({}),
+                ),
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK);
+        }
+        for target in ["fixture-a", "fixture-b"] {
+            let (status, _) = send(
+                &app.router,
+                post_json_auth(
+                    &format!("/connector-instances/{id}/actions/restart"),
+                    &access,
+                    serde_json::json!({ "targetId": target, "params": {} }),
+                ),
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK);
+        }
+
+        assert_eq!(action_log(&app, &access, &id, "").await.len(), 5);
+        assert_eq!(
+            action_log(&app, &access, &id, "?actionId=ping").await.len(),
+            3
+        );
+        let targeted = action_log(&app, &access, &id, "?targetId=fixture-b").await;
+        assert_eq!(targeted.len(), 1);
+        assert_eq!(targeted[0]["actionId"], "restart");
+        assert_eq!(
+            action_log(&app, &access, &id, "?actionId=restart&targetId=fixture-a")
+                .await
+                .len(),
+            1
+        );
+
+        // `limit` narrows the page...
+        assert_eq!(action_log(&app, &access, &id, "?limit=2").await.len(), 2);
+        // ...and an absurd one is clamped rather than refused, because the
+        // caller meant "as much as there is".
+        assert_eq!(
+            action_log(&app, &access, &id, "?limit=100000").await.len(),
+            5
+        );
+
+        // A filter matching nothing is an empty list, not a 404: the instance
+        // exists and has simply never been asked to do that.
+        assert!(action_log(&app, &access, &id, "?actionId=never-invoked")
+            .await
+            .is_empty());
+
+        // An unknown instance *is* a 404 — "nothing happened here" and "there
+        // is no here" are different answers.
+        let (status, _) = send(
+            &app.router,
+            get_with_auth(
+                "/connector-instances/00000000-0000-0000-0000-000000000000/action-log",
+                &bearer(&access),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+    }
+
+    /// Reading the history is looking, not doing — and the people who most need
+    /// "what happened to this?" are the ones who could not have done it.
+    #[tokio::test]
+    async fn the_action_log_is_readable_with_view_and_not_without_it() {
+        let app = test_app().await;
+        let (admin, _) = setup_and_login(&app.router).await;
+        let id = create_debug_instance(&app.router, &admin, "Audited").await;
+        let (status, _) = send(
+            &app.router,
+            post_json_auth(
+                &format!("/connector-instances/{id}/actions/ping"),
+                &admin,
+                serde_json::json!({}),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+
+        let viewer = user_with_grants(
+            &app.router,
+            &admin,
+            "viewer",
+            serde_json::json!([{
+                "key": "connectors.view",
+                "resourceType": null,
+                "resourceId": null,
+            }]),
+        )
+        .await;
+        assert_eq!(action_log(&app, &viewer, &id, "").await.len(), 1);
+
+        let nobody = user_with_grants(&app.router, &admin, "nobody", serde_json::json!([])).await;
+        let (status, _) = send(
+            &app.router,
+            get_with_auth(
+                &format!("/connector-instances/{id}/action-log"),
+                &bearer(&nobody),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+
+        let (status, _) = send(
+            &app.router,
+            get(&format!("/connector-instances/{id}/action-log")),
+        )
+        .await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+    }
+
+    /// The log outlives the action but not the instance: a deleted connector
+    /// takes its history with it, because the rows reference a row that is no
+    /// longer there and a log about nothing is not evidence.
+    #[tokio::test]
+    async fn deleting_an_instance_takes_its_action_log_with_it() {
+        let app = test_app().await;
+        let (access, _) = setup_and_login(&app.router).await;
+        let id = create_debug_instance(&app.router, &access, "Doomed").await;
+        let (status, _) = send(
+            &app.router,
+            post_json_auth(
+                &format!("/connector-instances/{id}/actions/ping"),
+                &access,
+                serde_json::json!({}),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+
+        let rows: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM connector_action_log WHERE instance_id = ?")
+                .bind(&id)
+                .fetch_one(&app.pool)
+                .await
+                .expect("counting log rows");
+        assert_eq!(rows, 1);
+
+        let (status, _) = send(
+            &app.router,
+            delete_auth(&format!("/connector-instances/{id}"), &access),
+        )
+        .await;
+        assert_eq!(status, StatusCode::NO_CONTENT);
+
+        let rows: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM connector_action_log WHERE instance_id = ?")
+                .bind(&id)
+                .fetch_one(&app.pool)
+                .await
+                .expect("counting log rows");
+        assert_eq!(
+            rows, 0,
+            "the cascade must clear the history with the instance"
+        );
+    }
+
+    /// The other half of that decision: a *user* who appears in the log cannot
+    /// be deleted out from under it. Attribution a later delete can erase is
+    /// not an audit trail, so the account is refused with an explanation rather
+    /// than the database refusing it with a 500.
+    #[tokio::test]
+    async fn a_user_named_in_the_action_log_cannot_be_deleted() {
+        let app = test_app().await;
+        let (admin, _) = setup_and_login(&app.router).await;
+        let id = create_debug_instance(&app.router, &admin, "Audited").await;
+        let operator = user_with_grants(
+            &app.router,
+            &admin,
+            "operator",
+            serde_json::json!([{
+                "key": "connectors.control",
+                "resourceType": null,
+                "resourceId": null,
+            }]),
+        )
+        .await;
+        let operator_id = current_user_id(&app.router, &operator).await;
+
+        let (status, _) = send(
+            &app.router,
+            post_json_auth(
+                &format!("/connector-instances/{id}/actions/ping"),
+                &operator,
+                serde_json::json!({}),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+
+        let (status, body) = send(
+            &app.router,
+            delete_auth(&format!("/users/{operator_id}"), &admin),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CONFLICT, "{body:#}");
+        assert!(body["error"]
+            .as_str()
+            .is_some_and(|message| message.contains("action log")));
+    }
+
+    #[tokio::test]
+    async fn the_update_check_capability_reaches_the_instance_detail() {
+        let app = test_app().await;
+        let (access, _) = setup_and_login(&app.router).await;
+
+        // The fixture supports checking, and reports whatever its stored
+        // configuration asked for — both answers reachable without a registry.
+        let outdated = DebugConnector::from_config_value(serde_json::json!({
+            "simulatedUpdateAvailable": true,
+        }))
+        .expect("a valid fixture configuration");
+        assert!(outdated.supports_update_checking());
+        assert_eq!(
+            outdated
+                .check_for_updates(None)
+                .await
+                .expect("the check should succeed")
+                .latest_ref
+                .as_deref(),
+            Some("debug-fixture:2.0.0")
+        );
+
+        // And an instance built through the ordinary create endpoint carries
+        // that configuration into its live connector.
+        let (status, created) = send(
+            &app.router,
+            post_json_auth(
+                "/connector-instances",
+                &access,
+                serde_json::json!({
+                    "connectorType": "debug",
+                    "name": "Outdated",
+                    "config": { "simulatedUpdateAvailable": true },
+                }),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED, "{created:#}");
+        let uuid = uuid::Uuid::parse_str(created["id"].as_str().expect("id")).expect("uuid");
+        let connector = app.connectors.get(&uuid).await.expect("a live connector");
+        assert!(connector.supports_update_checking());
+        assert!(
+            connector
+                .check_for_updates(None)
+                .await
+                .expect("the check should succeed")
+                .available
+        );
+    }
+
+    /* ---------------------------------------------------------------- */
+    /* Update scheduler                                                  */
+    /* ---------------------------------------------------------------- */
+
+    /// A connector that can be checked for updates and can apply one.
+    ///
+    /// Not `DebugConnector` extended: the fixture in Core deliberately denies
+    /// unknown configuration keys, and what is under test here is the
+    /// *platform's* scheduler — the settings convention, the interval, the
+    /// stagger, the auto-apply path — against any connector that participates.
+    /// A local fixture keeps that generality honest, and lets the test count
+    /// exactly how many times a registry would have been asked.
+    /// One recorded `check_for_updates` call: which target, and when.
+    type CheckRecord = (Option<String>, std::time::Instant);
+
+    #[derive(Clone)]
+    struct UpdatableConnector {
+        targets: Vec<String>,
+        /// One entry per `check_for_updates` call: the target, and when.
+        checks: Arc<std::sync::Mutex<Vec<CheckRecord>>>,
+        /// One entry per `applyUpdate` invocation.
+        applied: Arc<std::sync::Mutex<Vec<(String, String)>>>,
+        available: Arc<std::sync::atomic::AtomicBool>,
+    }
+
+    impl UpdatableConnector {
+        fn new(targets: &[&str]) -> Self {
+            Self {
+                targets: targets.iter().map(|target| (*target).to_owned()).collect(),
+                checks: Arc::new(std::sync::Mutex::new(Vec::new())),
+                applied: Arc::new(std::sync::Mutex::new(Vec::new())),
+                available: Arc::new(std::sync::atomic::AtomicBool::new(true)),
+            }
+        }
+
+        fn checks(&self) -> Vec<CheckRecord> {
+            self.checks.lock().unwrap().clone()
+        }
+
+        fn applied(&self) -> Vec<(String, String)> {
+            self.applied.lock().unwrap().clone()
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl Connector for UpdatableConnector {
+        async fn status(&self) -> Result<ConnectorStatus, ConnectorError> {
+            let mut details = Value::Object(Default::default());
+            for target in &self.targets {
+                loom_core::connector::details::set_detail(
+                    &mut details,
+                    Some(target),
+                    "currentImageRef",
+                    serde_json::json!(format!("example/{target}:1.0")),
+                );
+            }
+            Ok(ConnectorStatus::new(
+                loom_core::connector::HealthState::Healthy,
+                details,
+            ))
+        }
+
+        async fn actions(&self) -> Vec<ConnectorAction> {
+            self.targets
+                .iter()
+                .map(|target| {
+                    ConnectorAction::simple("applyUpdate", "Apply update")
+                        .disruptive()
+                        .snapshotting(["currentImageRef"])
+                        .for_target(target)
+                })
+                .collect()
+        }
+
+        async fn execute_action(
+            &self,
+            action_id: &str,
+            target_id: Option<&str>,
+            params: Value,
+        ) -> Result<ActionResult, ConnectorError> {
+            if action_id != "applyUpdate" {
+                return Err(ConnectorError::invalid_action(action_id));
+            }
+            let target = target_id.unwrap_or_default().to_owned();
+            let image = params
+                .get("targetImageRef")
+                .and_then(Value::as_str)
+                .ok_or_else(|| ConnectorError::InvalidParams {
+                    action_id: action_id.to_owned(),
+                    reason: "expected `targetImageRef`".to_owned(),
+                })?
+                .to_owned();
+            self.applied
+                .lock()
+                .unwrap()
+                .push((target.clone(), image.clone()));
+            Ok(ActionResult::ok(format!("{target} now running {image}")))
+        }
+
+        fn supports_sub_targets(&self) -> bool {
+            true
+        }
+
+        async fn list_sub_targets(
+            &self,
+        ) -> Result<Vec<loom_core::connector::SubTarget>, ConnectorError> {
+            Ok(self
+                .targets
+                .iter()
+                .map(|id| loom_core::connector::SubTarget {
+                    id: id.clone(),
+                    label: id.clone(),
+                })
+                .collect())
+        }
+
+        fn supports_update_checking(&self) -> bool {
+            true
+        }
+
+        async fn check_for_updates(
+            &self,
+            target_id: Option<&str>,
+        ) -> Result<loom_core::connector::UpdateCheckResult, ConnectorError> {
+            self.checks
+                .lock()
+                .unwrap()
+                .push((target_id.map(str::to_owned), std::time::Instant::now()));
+            Ok(
+                if self.available.load(std::sync::atomic::Ordering::SeqCst) {
+                    loom_core::connector::UpdateCheckResult::available(format!(
+                        "example/{}@sha256:newer",
+                        target_id.unwrap_or("host")
+                    ))
+                } else {
+                    loom_core::connector::UpdateCheckResult::up_to_date()
+                },
+            )
+        }
+
+        fn config_schema(&self) -> Value {
+            serde_json::json!({ "type": "object" })
+        }
+
+        fn metadata(&self) -> ConnectorMetadata {
+            ConnectorMetadata {
+                id: "debug".to_owned(),
+                name: "Updatable fixture".to_owned(),
+                icon: None,
+                version: "1.0.0".to_owned(),
+                min_size: (1, 1),
+            }
+        }
+
+        fn display_fields(&self) -> Vec<DisplayField> {
+            Vec::new()
+        }
+
+        fn data_points(&self) -> Vec<DataPointDescriptor> {
+            self.targets
+                .iter()
+                .map(|target| {
+                    DataPointDescriptor::new(
+                        "currentImageRef",
+                        "Image",
+                        loom_core::connector::DataPointValueType::String,
+                    )
+                    .for_target(target)
+                })
+                .collect()
+        }
+
+        fn default_layout(&self) -> WidgetLayout {
+            WidgetLayout::default()
+        }
+    }
+
+    /// Installs an updatable connector over a real instance row and gives that
+    /// row the update settings under test.
+    ///
+    /// The settings go into the stored configuration directly rather than
+    /// through the create endpoint, because the settings convention is the
+    /// *platform's* and the fixture connector's schema is not the thing being
+    /// tested.
+    async fn updatable_instance(
+        app: &TestApp,
+        token: &str,
+        name: &str,
+        targets: &[&str],
+        settings: serde_json::Value,
+    ) -> (String, UpdatableConnector) {
+        let id = create_debug_instance(&app.router, token, name).await;
+        sqlx::query("UPDATE connector_instances SET config = ? WHERE id = ?")
+            .bind(settings.to_string())
+            .bind(&id)
+            .execute(&app.pool)
+            .await
+            .expect("storing the update settings");
+
+        let connector = UpdatableConnector::new(targets);
+        app.connectors
+            .insert(
+                uuid::Uuid::parse_str(&id).expect("uuid"),
+                Arc::new(connector.clone()),
+            )
+            .await;
+        (id, connector)
+    }
+
+    #[tokio::test]
+    async fn the_scheduler_checks_only_what_is_configured_and_only_when_due() {
+        let app = test_app().await;
+        let (access, _) = setup_and_login(&app.router).await;
+
+        let (checked_id, checked) = updatable_instance(
+            &app,
+            &access,
+            "Checked",
+            &["web"],
+            serde_json::json!({ "checkForUpdates": true, "checkIntervalMinutes": 60 }),
+        )
+        .await;
+        // Same connector, same capability — but its configuration never asked
+        // for checking, so it is never contacted.
+        let (_, unchecked) = updatable_instance(
+            &app,
+            &access,
+            "Unchecked",
+            &["web"],
+            serde_json::json!({ "checkForUpdates": false }),
+        )
+        .await;
+
+        let start = chrono::Utc::now();
+        let state = app.state.clone();
+        connectors::updates::run_tick(&state, start, Duration::ZERO).await;
+        assert_eq!(checked.checks().len(), 1);
+        assert!(
+            unchecked.checks().is_empty(),
+            "opting out must mean opting out"
+        );
+
+        // A tick a minute later is not due: the interval is an hour.
+        connectors::updates::run_tick(&state, start + chrono::Duration::minutes(1), Duration::ZERO)
+            .await;
+        assert_eq!(checked.checks().len(), 1, "the interval must be respected");
+
+        // An hour later it is.
+        connectors::updates::run_tick(
+            &state,
+            start + chrono::Duration::minutes(61),
+            Duration::ZERO,
+        )
+        .await;
+        assert_eq!(checked.checks().len(), 2);
+
+        // And the reading reaches the client, per target, with its own age.
+        let (status, detail) = send(
+            &app.router,
+            get_with_auth(
+                &format!("/connector-instances/{checked_id}"),
+                &bearer(&access),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{detail:#}");
+        assert_eq!(detail["supportsUpdateChecking"], true);
+        assert_eq!(detail["updateStatus"]["web"]["available"], true);
+        assert_eq!(
+            detail["updateStatus"]["web"]["latestRef"],
+            "example/web@sha256:newer"
+        );
+        assert!(detail["updateStatus"]["web"]["lastChecked"].is_string());
+    }
+
+    /// Registries rate-limit by source address. Thirty containers checked in
+    /// the same instant is the fastest way to be told to go away.
+    #[tokio::test]
+    async fn the_scheduler_staggers_its_checks_within_one_instance() {
+        let app = test_app().await;
+        let (access, _) = setup_and_login(&app.router).await;
+        let (_, connector) = updatable_instance(
+            &app,
+            &access,
+            "Busy",
+            &["one", "two", "three"],
+            serde_json::json!({ "checkForUpdates": true }),
+        )
+        .await;
+
+        let stagger = Duration::from_millis(60);
+        connectors::updates::run_tick(&app.state, chrono::Utc::now(), stagger).await;
+
+        let checks = connector.checks();
+        assert_eq!(checks.len(), 3, "every target is checked");
+        assert_eq!(
+            checks
+                .iter()
+                .map(|(target, _)| target.as_deref().unwrap_or(""))
+                .collect::<Vec<_>>(),
+            vec!["one", "two", "three"],
+            "sequentially, in enumeration order"
+        );
+        for pair in checks.windows(2) {
+            assert!(
+                pair[1].1.duration_since(pair[0].1) >= stagger,
+                "consecutive checks must be spaced out"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn an_automatic_update_runs_through_the_ordinary_action_path() {
+        let app = test_app().await;
+        let (access, _) = setup_and_login(&app.router).await;
+        let (id, connector) = updatable_instance(
+            &app,
+            &access,
+            "Auto",
+            &["web"],
+            serde_json::json!({
+                "checkForUpdates": true,
+                "autoApplyUpdates": true,
+            }),
+        )
+        .await;
+
+        // The snapshot is read from the poll cache, so there has to have been a
+        // poll — production's poller does this on its own tick.
+        app.connectors.poll_once().await;
+
+        connectors::updates::run_tick(&app.state, chrono::Utc::now(), Duration::ZERO).await;
+
+        assert_eq!(
+            connector.applied(),
+            vec![("web".to_owned(), "example/web@sha256:newer".to_owned())],
+            "an available update with no window is applied at once"
+        );
+
+        // The point of routing it through `invoke_action`: it is in the audit
+        // log, attributed to Loom rather than to a person, with the pre-action
+        // image recorded by the snapshot mechanism.
+        let entries = action_log(&app, &access, &id, "").await;
+        assert_eq!(entries.len(), 1);
+        let entry = &entries[0];
+        assert_eq!(entry["actionId"], "applyUpdate");
+        assert_eq!(entry["targetId"], "web");
+        assert_eq!(entry["invokedBy"]["system"], true);
+        assert_eq!(entry["invokedBy"]["id"], serde_json::Value::Null);
+        assert_eq!(entry["invokedBy"]["username"], serde_json::Value::Null);
+        assert_eq!(entry["success"], true);
+        assert_eq!(
+            entry["snapshot"],
+            serde_json::json!({ "currentImageRef": "example/web:1.0" }),
+            "the reference it was running before is what a rollback needs"
+        );
+        assert_eq!(
+            entry["params"],
+            serde_json::json!({ "targetImageRef": "example/web@sha256:newer" })
+        );
+
+        // Applied once, not once per tick: the cached availability is cleared
+        // when the update succeeds.
+        connectors::updates::run_tick(&app.state, chrono::Utc::now(), Duration::ZERO).await;
+        assert_eq!(connector.applied().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn an_excluded_instance_is_checked_but_never_applied() {
+        let app = test_app().await;
+        let (access, _) = setup_and_login(&app.router).await;
+        let (_, connector) = updatable_instance(
+            &app,
+            &access,
+            "Hands off",
+            &["web"],
+            serde_json::json!({
+                "checkForUpdates": true,
+                "autoApplyUpdates": true,
+                "excludeFromAutoUpdate": true,
+            }),
+        )
+        .await;
+
+        connectors::updates::run_tick(&app.state, chrono::Utc::now(), Duration::ZERO).await;
+        assert_eq!(connector.checks().len(), 1, "it is still reported on");
+        assert!(
+            connector.applied().is_empty(),
+            "the exclusion is what makes 'tell me, do not touch it' expressible"
+        );
+    }
+
+    /// A maintenance window is a promise that the service will not vanish
+    /// during the day.
+    #[tokio::test]
+    async fn a_maintenance_window_holds_an_update_until_its_hour() {
+        let app = test_app().await;
+        let (access, _) = setup_and_login(&app.router).await;
+
+        // A fixed local afternoon rather than "now plus two minutes": a
+        // relative window computed near midnight would wrap to the next day
+        // and the test would fail once a day for a two-minute band. The
+        // scheduler is told what time it is, so the test picks one.
+        let midday = chrono::Local
+            .with_ymd_and_hms(2026, 1, 15, 12, 0, 0)
+            .single()
+            .expect("a real local time");
+        let window = "12:30";
+        let (_, connector) = updatable_instance(
+            &app,
+            &access,
+            "Windowed",
+            &["web"],
+            serde_json::json!({
+                "checkForUpdates": true,
+                "autoApplyUpdates": true,
+                "autoApplyAtTime": window,
+            }),
+        )
+        .await;
+
+        connectors::updates::run_tick(
+            &app.state,
+            midday.with_timezone(&chrono::Utc),
+            Duration::ZERO,
+        )
+        .await;
+        assert_eq!(connector.checks().len(), 1);
+        assert!(
+            connector.applied().is_empty(),
+            "before the window, an available update waits"
+        );
+
+        // A tick after the window opens applies it.
+        connectors::updates::run_tick(
+            &app.state,
+            (midday + chrono::Duration::minutes(31)).with_timezone(&chrono::Utc),
+            Duration::ZERO,
+        )
+        .await;
+        assert_eq!(connector.applied().len(), 1, "inside the window, it runs");
+
+        // And not again the same day, however many ticks follow — a container
+        // whose update keeps failing must not be recreated every minute from
+        // 03:00 until somebody notices.
+        connectors::updates::run_tick(
+            &app.state,
+            (midday + chrono::Duration::minutes(45)).with_timezone(&chrono::Utc),
+            Duration::ZERO,
+        )
+        .await;
+        assert_eq!(connector.applied().len(), 1, "one window, one attempt");
+    }
+
+    #[tokio::test]
+    async fn the_recently_updated_table_is_the_action_log_and_its_rows_roll_back() {
+        let app = test_app().await;
+        let (access, _) = setup_and_login(&app.router).await;
+        let (id, _connector) = updatable_instance(
+            &app,
+            &access,
+            "History",
+            &["web"],
+            serde_json::json!({ "checkForUpdates": true }),
+        )
+        .await;
+        app.connectors.poll_once().await;
+
+        // A person applying an update by hand, through the ordinary endpoint.
+        let (status, body) = send(
+            &app.router,
+            post_json_auth(
+                &format!("/connector-instances/{id}/actions/applyUpdate"),
+                &access,
+                serde_json::json!({
+                    "targetId": "web",
+                    "params": { "targetImageRef": "example/web:2.0" },
+                }),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body:#}");
+
+        let (status, kinds) = send(
+            &app.router,
+            get_with_auth(
+                &format!("/connector-instances/{id}/resource-kinds"),
+                &bearer(&access),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{kinds:#}");
+        let recently = kinds
+            .as_array()
+            .expect("kinds")
+            .iter()
+            .find(|kind| kind["kind"] == "recentlyUpdated")
+            .expect("the platform kind is offered for an update-checking connector")
+            .clone();
+        assert_eq!(
+            recently["columns"]
+                .as_array()
+                .expect("columns")
+                .iter()
+                .map(|column| column["key"].as_str().expect("key"))
+                .collect::<Vec<_>>(),
+            vec![
+                "targetId",
+                "targetImageRef",
+                "newRef",
+                "appliedAt",
+                "appliedBy"
+            ]
+        );
+
+        let (status, rows) = send(
+            &app.router,
+            get_with_auth(
+                &format!("/connector-instances/{id}/resources/recentlyUpdated"),
+                &bearer(&access),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{rows:#}");
+        let rows = rows.as_array().expect("rows");
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0]["fields"]["targetId"], "web");
+        assert_eq!(rows[0]["fields"]["newRef"], "example/web:2.0");
+        // The rollback target, recorded by the snapshot mechanism rather than
+        // by anything this feature stores.
+        assert_eq!(rows[0]["fields"]["targetImageRef"], "example/web:1.0");
+        assert_eq!(rows[0]["fields"]["appliedBy"], "admin");
+        assert!(rows[0]["fields"]["appliedAt"].is_string());
     }
 
     #[tokio::test]

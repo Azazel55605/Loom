@@ -196,6 +196,65 @@ export type DisplayWidgetType =
   | "statusDot"
   | "logStream";
 
+/**
+ * How a resource table's cell should be *formatted*.
+ *
+ * Not `DataPointValueType`, though they overlap. A data point's type decides
+ * which widget may bind to it, so it needs `timeSeries` and has no use for a
+ * byte count; a table cell is the reverse. The wire value is always the raw one
+ * — `bytes` is an exact byte count, `timestamp` an ISO 8601 string — and
+ * scaling and localizing are the client's business, so two clients never
+ * disagree about what the number meant.
+ */
+export type ColumnValueType = "text" | "number" | "bool" | "timestamp" | "bytes";
+
+/** One column of a browsable resource table. */
+export type ColumnDescriptor = {
+  /** Machine key this column's value appears under in `ResourceItem.fields`. */
+  key: string;
+  label: string;
+  valueType: ColumnValueType;
+};
+
+/** One row of a browsable resource table. */
+export type ResourceItem = {
+  /** Stable row id, passed back as `resourceId` when a row action is invoked. */
+  id: string;
+  /** Cell values keyed by `ColumnDescriptor.key`. A missing key is an empty
+   *  cell; an unknown key is ignored. */
+  fields: Record<string, unknown>;
+};
+
+/**
+ * One browsable collection a connector holds — images, volumes, updates.
+ *
+ * Entirely descriptor-driven: a client renders the table from `columns` and
+ * offers `rowActions`/`kindActions` beside it without knowing what the
+ * connector is. A row action names its row through `resourceId` in the
+ * submitted params, which is the caller's job to add — see
+ * `ResourceKindBrowser`, which does it so no call site has to remember.
+ */
+export type ResourceKindDescriptor = {
+  kind: string;
+  label: string;
+  columns: ColumnDescriptor[];
+  /** Actions on one row. The caller adds `resourceId`. */
+  rowActions: ConnectorAction[];
+  /** Actions on the collection as a whole. No `resourceId`. */
+  kindActions: ConnectorAction[];
+};
+
+/** What the update scheduler last found for one target. */
+export type UpdateStatus = {
+  available: boolean;
+  /** What the newer thing is called in the managed system's own terms — a
+   *  digest, a tag, a version. Opaque here. */
+  latestRef: string | null;
+  /** When this was established. Hours old by design, which is why it is shown
+   *  rather than implied. */
+  lastChecked: string;
+};
+
 /** How an action is offered. Every variant invokes `executeConnectorAction`. */
 export type ActionWidgetType =
   | "button"
@@ -410,6 +469,18 @@ export type ConnectorInstanceDetail = ConnectorInstanceSummary & {
   supportsSubTargets: boolean;
   /** Type id this live instance can discover, or null when unsupported. */
   discoverableType: string | null;
+  /** Whether this connector can be asked if what it manages is out of date. */
+  supportsUpdateChecking: boolean;
+  /**
+   * What the update scheduler last found, keyed by target with `""` for the
+   * instance itself — the same convention `status.details` uses.
+   *
+   * **Empty until a check has run**, and every entry carries its own
+   * `lastChecked`. Beside `status` rather than inside it: a registry reading is
+   * hours old by design and a status reading is seconds old, and one object
+   * carrying both would invite treating them as equally fresh.
+   */
+  updateStatus: Record<string, UpdateStatus>;
 };
 
 /** The caller's effective role for one dashboard. */
@@ -1214,6 +1285,46 @@ function getSubTargets(
   );
 }
 
+/** `GET /connector-instances/{id}/resource-kinds` — the browsable tables this
+ *  instance publishes, live from its connector. */
+function getResourceKinds(
+  runtime: ApiRuntime,
+  id: string,
+  signal?: AbortSignal,
+): Promise<ResourceKindDescriptor[]> {
+  return authorizedRequest<ResourceKindDescriptor[]>(
+    runtime,
+    `/connector-instances/${encodeURIComponent(id)}/resource-kinds`,
+    { signal },
+  );
+}
+
+/**
+ * `GET /connector-instances/{id}/resources/{kind}` — the current rows of one
+ * table, optionally scoped to a sub-target.
+ *
+ * A `kind` this instance does not declare is a 400, not an empty list: the
+ * backend validates it against the live descriptors so an empty table and a
+ * typo are distinguishable.
+ */
+function getResourceItems(
+  runtime: ApiRuntime,
+  id: string,
+  kind: string,
+  targetId?: string | null,
+  signal?: AbortSignal,
+): Promise<ResourceItem[]> {
+  const query =
+    targetId === undefined || targetId === null
+      ? ""
+      : `?targetId=${encodeURIComponent(targetId)}`;
+  return authorizedRequest<ResourceItem[]>(
+    runtime,
+    `/connector-instances/${encodeURIComponent(id)}/resources/${encodeURIComponent(kind)}${query}`,
+    { signal },
+  );
+}
+
 /** Run discovery through one configured connector instance. */
 function discoverConnectorResources(
   runtime: ApiRuntime,
@@ -1952,6 +2063,13 @@ export function createApiClient(options: {
     getConnectorInstance: (id: string, signal?: AbortSignal) =>
       getConnectorInstance(runtime, id, signal),
     getSubTargets: (id: string, signal?: AbortSignal) => getSubTargets(runtime, id, signal),
+    getResourceKinds: (id: string, signal?: AbortSignal) => getResourceKinds(runtime, id, signal),
+    getResourceItems: (
+      id: string,
+      kind: string,
+      targetId?: string | null,
+      signal?: AbortSignal,
+    ) => getResourceItems(runtime, id, kind, targetId, signal),
     discoverConnectorResources: (id: string, signal?: AbortSignal) =>
       discoverConnectorResources(runtime, id, signal),
     discoverForType: (typeId: string, candidateConfig: unknown, signal?: AbortSignal) =>

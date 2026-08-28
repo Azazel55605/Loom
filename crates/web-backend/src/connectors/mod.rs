@@ -20,6 +20,8 @@
 pub mod diagnostics;
 pub mod registry;
 pub mod runtime;
+pub mod updates;
 
 pub use registry::builtin_registry;
 pub use runtime::ConnectorRuntime;
+pub use updates::UpdateCache;

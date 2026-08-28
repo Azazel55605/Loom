@@ -16,16 +16,19 @@ use chrono::{DateTime, Utc};
 use futures_util::{stream, StreamExt};
 use loom_core::connector::{
     details::set_detail, ActionResult, ActionWidgetType, CapabilityRequirement, CapabilityStatus,
-    ChartType, ConnectionTestResult, Connector, ConnectorAction, ConnectorError, ConnectorMetadata,
-    ConnectorStatus, DataPointDescriptor, DataPointValueType, DisplayField, DisplayWidgetType,
-    HealthState, NetworkTarget, SetupGuide, SetupGuideToggle, SetupGuideVariant, SubTarget,
-    WidgetBinding, WidgetLayout,
+    ChartType, ColumnDescriptor, ColumnValueType, ConnectionTestResult, Connector, ConnectorAction,
+    ConnectorError, ConnectorMetadata, ConnectorStatus, DataPointDescriptor, DataPointValueType,
+    DisplayField, DisplayWidgetType, HealthState, NetworkTarget, ResourceItem,
+    ResourceKindDescriptor, SetupGuide, SetupGuideToggle, SetupGuideVariant, SubTarget,
+    UpdateCheckResult, WidgetBinding, WidgetLayout,
 };
 use serde::Serialize;
 use serde_json::{json, Map, Value};
 
 use crate::config::{config_schema, DockerConnectorConfig};
 use crate::metrics::{cpu_percent, format_uptime, health_for_state};
+use crate::registry::{HttpRegistry, RegistryTransport};
+use crate::updates::{apply_update, check_container, configured_image_ref, UpdateCache};
 
 /// The connector type id this registers under.
 pub const TYPE_ID: &str = "docker";
@@ -44,6 +47,22 @@ pub const DISPLAY_NAME: &str = "Docker";
 /// connector actually reports.
 pub const ICON: &str = "brand:docker";
 
+/// The action id that replaces a container's image — in either direction.
+///
+/// Takes `{ "targetImageRef": string }`. Given a newer reference it is an
+/// update; given the reference the action log recorded before the last update
+/// it is a rollback. There is deliberately no second action for the second
+/// case: they are the same operation with a different argument, and a separate
+/// `rollback` would need its own state to know what to roll back *to* — state
+/// the action log already holds.
+pub const ACTION_APPLY_UPDATE: &str = "applyUpdate";
+
+/// Resource kind listing containers with an update waiting.
+pub const RESOURCE_KIND_UPDATES: &str = "updates";
+
+/// The kind-level action that applies every waiting update in turn.
+pub const ACTION_UPDATE_ALL: &str = "updateAll";
+
 /// Data point ids. Public because a dashboard layout stores them, so a rename
 /// is a breaking change to saved layouts and should be visible as one.
 pub const DATA_POINT_STATUS: &str = "status";
@@ -53,6 +72,15 @@ pub const DATA_POINT_MEMORY_USAGE_BYTES: &str = "memoryUsageBytes";
 pub const DATA_POINT_MEMORY_HISTORY: &str = "memoryHistory";
 pub const DATA_POINT_UPTIME: &str = "uptime";
 pub const DATA_POINT_LOGS: &str = "logs";
+/// The image reference a container was created from.
+///
+/// A data point rather than an internal lookup, because that is what makes it
+/// snapshottable: [`ACTION_APPLY_UPDATE`] declares this id in
+/// `snapshot_data_point_ids`, so the platform records what the container was
+/// running *before* an update, in the action log, with no Docker-specific
+/// bookkeeping. That recorded value is what a rollback later passes back in as
+/// `targetImageRef`.
+pub const DATA_POINT_IMAGE_REF: &str = "currentImageRef";
 pub const DATA_POINT_TOTAL_CONTAINERS: &str = "totalContainers";
 pub const DATA_POINT_RUNNING_CONTAINERS: &str = "runningContainers";
 pub const DATA_POINT_STOPPED_CONTAINERS: &str = "stoppedContainers";
@@ -368,6 +396,18 @@ pub struct DockerConnector {
     /// Cached because Docker's disk-usage endpoint is far more expensive than
     /// the five-second health cadence and can overwhelm a remote socket proxy.
     host_details: Arc<Mutex<Option<CachedHostDetails>>>,
+    /// What the last update check found, per container.
+    ///
+    /// Held here rather than only in the backend because the browsable
+    /// `updates` table is a connector-declared resource kind, and a listing
+    /// that re-queried the registry per browse would spend someone else's rate
+    /// limit on a page refresh. The scheduler's checks fill this in; the table
+    /// reports what they found and says when.
+    update_cache: Arc<Mutex<UpdateCache>>,
+    /// HTTPS client for registry queries. `None` when one could not be built,
+    /// which makes update checking unavailable rather than the connector
+    /// unusable — a Docker host is still worth monitoring without it.
+    registry: Option<Arc<dyn RegistryTransport>>,
 }
 
 /// Hand-written because `bollard::Docker` is not `Debug`, and because the
@@ -394,6 +434,10 @@ impl DockerConnector {
             history: Arc::new(Mutex::new(HashMap::new())),
             known_targets: Arc::new(Mutex::new(Vec::new())),
             host_details: Arc::new(Mutex::new(None)),
+            update_cache: Arc::new(Mutex::new(UpdateCache::new())),
+            registry: HttpRegistry::new()
+                .ok()
+                .map(|client| Arc::new(client) as Arc<dyn RegistryTransport>),
         })
     }
 
@@ -427,6 +471,80 @@ impl DockerConnector {
     /// factory would turn that useful capability result into an early 400.
     pub fn from_config_value_for_connection_test(config: Value) -> Result<Self, ConnectorError> {
         Self::prepare(DockerConnectorConfig::from_value(config)?)
+    }
+
+    /// Every container with an update waiting, as the last check left it.
+    ///
+    /// Read from the cache rather than checked live: a browse must not spend
+    /// registry budget, and "when this was last checked" is a column in the
+    /// table precisely so the reading's age is visible rather than implied.
+    fn outdated_containers(&self) -> Vec<(String, crate::updates::UpdateReading)> {
+        let cache = self
+            .update_cache
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let mut rows: Vec<(String, crate::updates::UpdateReading)> = cache
+            .iter()
+            .filter(|(_, reading)| reading.available)
+            .map(|(name, reading)| (name.clone(), reading.clone()))
+            .collect();
+        // Sorted by name so a table does not reshuffle between refreshes; a
+        // `HashMap`'s order varies per process.
+        rows.sort_by(|left, right| left.0.cmp(&right.0));
+        rows
+    }
+
+    /// Applies every waiting update, one container at a time.
+    ///
+    /// **Sequential on purpose, and not only for the registry's sake.** Pulling
+    /// several images at once on a home server saturates the link the services
+    /// themselves are answering on, and recreating several containers at once
+    /// takes down things that depend on each other simultaneously. One at a
+    /// time is slower and is the behaviour someone would choose if asked.
+    ///
+    /// A container that fails does not stop the rest: the point of "update all"
+    /// is to get through the list, and the per-container outcome is reported in
+    /// the summary and recorded, invocation by invocation, in the action log.
+    async fn update_all(&self) -> Result<ActionResult, ConnectorError> {
+        let waiting = self.outdated_containers();
+        if waiting.is_empty() {
+            return Ok(ActionResult::ok("No containers have a waiting update."));
+        }
+
+        let mut applied = Vec::new();
+        let mut failed = Vec::new();
+        for (name, reading) in waiting {
+            let Some(target) = reading.latest_ref.as_deref().or(Some(&reading.current_ref)) else {
+                continue;
+            };
+            match apply_update(&self.control, &name, target).await {
+                Ok(result) if result.success => {
+                    self.update_cache
+                        .lock()
+                        .unwrap_or_else(|poisoned| poisoned.into_inner())
+                        .remove(&name);
+                    applied.push(name);
+                }
+                Ok(result) => failed.push(format!("{name} ({})", result.message)),
+                Err(error) => failed.push(format!("{name} ({error})")),
+            }
+        }
+
+        let message = match (applied.len(), failed.len()) {
+            (updated, 0) => format!("Updated {updated} container(s): {}.", applied.join(", ")),
+            (0, _) => format!("No container could be updated: {}.", failed.join("; ")),
+            (updated, _) => format!(
+                "Updated {updated} container(s): {}. Failed: {}.",
+                applied.join(", "),
+                failed.join("; ")
+            ),
+        };
+
+        Ok(ActionResult {
+            success: failed.is_empty(),
+            message,
+            payload: Some(json!({ "applied": applied, "failed": failed })),
+        })
     }
 
     /// One immediate sample of cumulative container stats.
@@ -943,14 +1061,144 @@ impl Connector for DockerConnector {
         &self,
         action_id: &str,
         target_id: Option<&str>,
-        _params: Value,
+        params: Value,
     ) -> Result<ActionResult, ConnectorError> {
-        // Every action is parameterless, so `params` is ignored rather than
-        // validated. A future action that takes one must validate its own.
+        // The one host-scoped action: "update everything that is behind" is a
+        // question about the host, not about any one container.
+        if action_id == ACTION_UPDATE_ALL {
+            return self.update_all().await;
+        }
+
         let Some(target_id) = target_id else {
             return Err(ConnectorError::invalid_action(action_id));
         };
+
+        if action_id == ACTION_APPLY_UPDATE {
+            let target_image_ref = params
+                .get("targetImageRef")
+                .and_then(Value::as_str)
+                .ok_or_else(|| ConnectorError::InvalidParams {
+                    action_id: action_id.to_owned(),
+                    reason: "expected a non-empty string `targetImageRef`".to_owned(),
+                })?;
+            let result = apply_update(&self.control, target_id, target_image_ref).await?;
+            if result.success {
+                // The cached reading described the container that has just been
+                // replaced. Dropping it is more honest than leaving a stale
+                // "update available" row pointing at an image that is now
+                // running; the next scheduled check refills it.
+                self.update_cache
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .remove(target_id);
+            }
+            return Ok(result);
+        }
+
+        // The lifecycle actions are parameterless, so `params` is ignored
+        // rather than validated for them.
         self.run_lifecycle(action_id, target_id).await
+    }
+
+    /// Only for a container, never for the host.
+    ///
+    /// A host runs no single image, so there is no version of "is this out of
+    /// date?" that has one answer. Saying `false` at the host level is not a
+    /// limitation being admitted — it is the accurate answer to a question that
+    /// does not apply, and it keeps a client from offering a control that could
+    /// only ever report nothing.
+    fn supports_update_checking(&self) -> bool {
+        true
+    }
+
+    async fn check_for_updates(
+        &self,
+        target_id: Option<&str>,
+    ) -> Result<UpdateCheckResult, ConnectorError> {
+        let Some(container_name) = target_id else {
+            return Ok(UpdateCheckResult::up_to_date());
+        };
+        let Some(registry) = self.registry.as_ref() else {
+            return Err(ConnectorError::Internal(
+                "no HTTPS client is available, so registries cannot be queried".to_owned(),
+            ));
+        };
+
+        let reading = check_container(&self.docker, registry.as_ref(), container_name).await?;
+        let result = reading.as_result();
+        self.update_cache
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .insert(container_name.to_owned(), reading);
+        Ok(result)
+    }
+
+    /// One browsable table: the containers with an update waiting.
+    ///
+    /// Host-scoped, because the interesting view is *across* containers — "what
+    /// on this host is behind?" — and a per-container table with at most one
+    /// row in it would be a worse answer to a question nobody asked.
+    ///
+    /// The row action is [`ACTION_APPLY_UPDATE`] with no `targetImageRef`
+    /// filled in: the descriptor says what the action needs, and the caller
+    /// fills it from the row it is acting on. The kind action applies every
+    /// waiting update in turn.
+    fn resource_kinds(&self) -> Vec<ResourceKindDescriptor> {
+        vec![ResourceKindDescriptor::new(
+            RESOURCE_KIND_UPDATES,
+            "Updates available",
+            vec![
+                // Keyed `targetId`, not `container`: a row in a host-scoped table
+                // has to be able to say which sub-target its actions address,
+                // and this is the platform's name for that.
+                ColumnDescriptor::new("targetId", "Container", ColumnValueType::Text),
+                ColumnDescriptor::new("currentRef", "Running", ColumnValueType::Text),
+                // Named after `applyUpdate`'s parameter, not after the concept:
+                // a client that sees a column key matching a parameter can answer
+                // that parameter from the row, which turns "apply this one" into
+                // a single click instead of a dialog asking for a value printed
+                // in the cell beside the button.
+                ColumnDescriptor::new("targetImageRef", "Available", ColumnValueType::Text),
+                ColumnDescriptor::new("checkedAt", "Checked", ColumnValueType::Timestamp),
+            ],
+        )
+        .with_row_actions(vec![apply_update_action()])
+        .with_kind_actions(vec![ConnectorAction {
+            id: ACTION_UPDATE_ALL.to_owned(),
+            target_id: None,
+            label: "Update all".to_owned(),
+            description: Some(
+                "Recreate every container with a waiting update, one after another.".to_owned(),
+            ),
+            params_schema: json!({ "type": "object", "additionalProperties": false }),
+            is_disruptive: true,
+            snapshot_data_point_ids: Vec::new(),
+        }])]
+    }
+
+    async fn list_resource_items(
+        &self,
+        kind: &str,
+        _target_id: Option<&str>,
+    ) -> Result<Vec<ResourceItem>, ConnectorError> {
+        if kind != RESOURCE_KIND_UPDATES {
+            return Ok(Vec::new());
+        }
+
+        Ok(self
+            .outdated_containers()
+            .into_iter()
+            .map(|(name, reading)| {
+                ResourceItem::new(name.clone())
+                    .with_field("targetId", name)
+                    .with_field("currentRef", reading.current_ref)
+                    .with_field(
+                        "targetImageRef",
+                        reading.latest_ref.unwrap_or_else(|| "unknown".to_owned()),
+                    )
+                    .with_field("checkedAt", reading.checked_at.to_rfc3339())
+            })
+            .collect())
     }
 
     fn supports_sub_targets(&self) -> bool {
@@ -1159,9 +1407,46 @@ fn container_data_points(target_id: &str) -> Vec<DataPointDescriptor> {
         .for_target(target_id),
         DataPointDescriptor::new(DATA_POINT_UPTIME, "Uptime", DataPointValueType::String)
             .for_target(target_id),
+        DataPointDescriptor::new(DATA_POINT_IMAGE_REF, "Image", DataPointValueType::String)
+            .for_target(target_id),
         DataPointDescriptor::new(DATA_POINT_LOGS, "Recent logs", DataPointValueType::String)
             .for_target(target_id),
     ]
+}
+
+/// The image-replacing action, as a descriptor.
+///
+/// `snapshot_data_point_ids` is the whole rollback story. Naming
+/// [`DATA_POINT_IMAGE_REF`] here makes the platform record what the container
+/// was running immediately before the action, on the action-log entry, without
+/// this connector storing anything: a later rollback is the same action invoked
+/// with that recorded value. See `docs/adr/0022-action-log-and-update-checking.md`.
+fn apply_update_action() -> ConnectorAction {
+    ConnectorAction {
+        id: ACTION_APPLY_UPDATE.to_owned(),
+        target_id: None,
+        label: "Apply update".to_owned(),
+        description: Some(
+            "Pull the named image and recreate this container on it, keeping its \
+             configuration. Also the way back: pass the reference the container ran before."
+                .to_owned(),
+        ),
+        params_schema: json!({
+            "type": "object",
+            "properties": {
+                "targetImageRef": {
+                    "type": "string",
+                    "minLength": 1,
+                    "description": "Image reference to recreate the container from, such as \
+                                    `example/app:2.0`."
+                }
+            },
+            "required": ["targetImageRef"],
+            "additionalProperties": false
+        }),
+        is_disruptive: true,
+        snapshot_data_point_ids: vec![DATA_POINT_IMAGE_REF.to_owned()],
+    }
 }
 
 fn container_actions(target_id: &str) -> Vec<ConnectorAction> {
@@ -1185,6 +1470,7 @@ fn container_actions(target_id: &str) -> Vec<ConnectorAction> {
         ConnectorAction::simple(ACTION_UNPAUSE, "Resume")
             .with_description("Resume a paused container.")
             .for_target(target_id),
+        apply_update_action().for_target(target_id),
     ]
 }
 
@@ -1304,6 +1590,9 @@ impl DockerConnector {
         container_name: &str,
         inspect: ContainerInspectResponse,
     ) -> (HealthState, Value) {
+        // Read before `state` is taken out of the response, so the snapshot
+        // data point and the state come from the same inspect.
+        let image_ref = configured_image_ref(&inspect).unwrap_or_else(|| "unknown".to_owned());
         let state = inspect.state.unwrap_or_default();
         let status_enum = state.status;
         let health = health_for_state(status_enum);
@@ -1379,6 +1668,9 @@ impl DockerConnector {
             json!(format_uptime(state.started_at.as_deref(), running, now)),
         );
         details.insert(DATA_POINT_LOGS.to_owned(), json!(logs));
+        // Reported on every poll so the platform's pre-action snapshot has
+        // something current to record — see `ACTION_APPLY_UPDATE`.
+        details.insert(DATA_POINT_IMAGE_REF.to_owned(), json!(image_ref));
 
         (health, Value::Object(details))
     }
@@ -1398,6 +1690,7 @@ fn unavailable_details(reason: &str) -> Value {
         DATA_POINT_MEMORY_HISTORY: [],
         DATA_POINT_UPTIME: "not running",
         DATA_POINT_LOGS: "",
+        DATA_POINT_IMAGE_REF: "unknown",
         // Not a declared data point on purpose — see `status`.
         "error": reason,
     })
@@ -1503,6 +1796,7 @@ mod tests {
     fn detached(docker_host: &str, targets: &[&str]) -> DockerConnector {
         let config = DockerConnectorConfig {
             docker_host: docker_host.to_owned(),
+            ..DockerConnectorConfig::default()
         };
         let docker = config.connect().expect("building a client does no I/O");
         DockerConnector {
@@ -1520,6 +1814,8 @@ mod tests {
                     .collect(),
             )),
             host_details: Arc::new(Mutex::new(None)),
+            update_cache: Arc::new(Mutex::new(UpdateCache::new())),
+            registry: None,
         }
     }
 
@@ -1700,9 +1996,25 @@ mod tests {
             .collect();
         assert_eq!(
             disruptive,
-            vec![ACTION_RESTART.to_owned()],
-            "stop and start take the container where the user asked; only restart \
-             brings it back on its own"
+            vec![ACTION_RESTART.to_owned(), ACTION_APPLY_UPDATE.to_owned()],
+            "stop and start take the container where the user asked; restart and an \
+             image replacement both take it away and bring it back on their own"
+        );
+
+        // The image replacement is also the one action that declares a
+        // snapshot, and that declaration is the entire rollback mechanism.
+        let apply = container_actions("web")
+            .into_iter()
+            .find(|action| action.id == ACTION_APPLY_UPDATE)
+            .expect("applyUpdate must be offered per container");
+        assert_eq!(
+            apply.snapshot_data_point_ids,
+            vec![DATA_POINT_IMAGE_REF.to_owned()]
+        );
+        assert_eq!(
+            apply.params_schema["required"],
+            json!(["targetImageRef"]),
+            "the caller must name what to move to, in either direction"
         );
     }
 
@@ -1714,6 +2026,101 @@ mod tests {
                 &bollard::errors::Error::RequestTimeoutError,
             ),
             "Docker disk usage timed out. Container status and actions remain available."
+        );
+    }
+
+    #[tokio::test]
+    async fn the_updates_table_lists_what_the_last_check_found() {
+        let connector = detached("tcp://docker-proxy.example:2375", &["web", "db"]);
+
+        let kinds = connector.resource_kinds();
+        assert_eq!(kinds.len(), 1);
+        let updates = &kinds[0];
+        assert_eq!(updates.kind, RESOURCE_KIND_UPDATES);
+        assert_eq!(
+            updates
+                .columns
+                .iter()
+                .map(|column| (column.key.as_str(), column.value_type))
+                .collect::<Vec<_>>(),
+            vec![
+                ("targetId", ColumnValueType::Text),
+                ("currentRef", ColumnValueType::Text),
+                ("targetImageRef", ColumnValueType::Text),
+                ("checkedAt", ColumnValueType::Timestamp),
+            ]
+        );
+        assert_eq!(updates.row_actions[0].id, ACTION_APPLY_UPDATE);
+        assert_eq!(updates.kind_actions[0].id, ACTION_UPDATE_ALL);
+
+        // Nothing checked yet is an empty table, not an error.
+        assert!(connector
+            .list_resource_items(RESOURCE_KIND_UPDATES, None)
+            .await
+            .expect("an unchecked host browses empty")
+            .is_empty());
+
+        let checked_at = Utc::now();
+        {
+            let mut cache = connector.update_cache.lock().unwrap();
+            cache.insert(
+                "web".to_owned(),
+                crate::updates::UpdateReading {
+                    current_ref: "example/app:1.0".to_owned(),
+                    available: true,
+                    latest_ref: Some("example/app@sha256:aaaa".to_owned()),
+                    checked_at,
+                },
+            );
+            // Up to date, and therefore not a row: the table is "what needs
+            // attention", not "what was checked".
+            cache.insert(
+                "db".to_owned(),
+                crate::updates::UpdateReading {
+                    current_ref: "example/db:16".to_owned(),
+                    available: false,
+                    latest_ref: None,
+                    checked_at,
+                },
+            );
+        }
+
+        let rows = connector
+            .list_resource_items(RESOURCE_KIND_UPDATES, None)
+            .await
+            .expect("listing the updates table");
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].id, "web");
+        assert_eq!(rows[0].fields["targetId"], json!("web"));
+        assert_eq!(rows[0].fields["currentRef"], json!("example/app:1.0"));
+        assert_eq!(
+            rows[0].fields["targetImageRef"],
+            json!("example/app@sha256:aaaa")
+        );
+        assert_eq!(rows[0].fields["checkedAt"], json!(checked_at.to_rfc3339()));
+
+        // A kind this connector does not declare is empty rather than an error,
+        // per the trait's contract.
+        assert!(connector
+            .list_resource_items("volumes", None)
+            .await
+            .expect("an unknown kind is not a failure")
+            .is_empty());
+    }
+
+    #[tokio::test]
+    async fn the_host_target_has_no_image_to_check() {
+        let connector = detached("tcp://docker-proxy.example:2375", &["web"]);
+        // Supported at the connector level — every container below it can be
+        // checked — but the host itself runs no single image, so asking about
+        // it answers "nothing available" rather than reaching for a registry.
+        assert!(connector.supports_update_checking());
+        assert_eq!(
+            connector
+                .check_for_updates(None)
+                .await
+                .expect("the host answers without a registry call"),
+            UpdateCheckResult::up_to_date()
         );
     }
 
@@ -1737,7 +2144,7 @@ mod tests {
                 .iter()
                 .filter(|point| point.target_id.as_deref() == Some(target))
                 .collect();
-            assert_eq!(targeted.len(), 7);
+            assert_eq!(targeted.len(), 8);
         }
         assert_eq!(connector.default_layout_for(None).bindings.len(), 6);
         assert_eq!(connector.default_layout_for(Some("web")).bindings.len(), 7);
