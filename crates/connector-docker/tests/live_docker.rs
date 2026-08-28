@@ -182,7 +182,7 @@ async fn a_reachable_unix_socket_reports_full_setup_capabilities() {
         .expect("the already-reachable daemon must build");
     let result = connector.test_connection().await;
     assert!(result.reachable);
-    assert_eq!(result.capabilities.len(), 5);
+    assert_eq!(result.capabilities.len(), 8);
     assert!(result
         .capabilities
         .iter()

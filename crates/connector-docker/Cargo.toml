@@ -3,7 +3,7 @@ name = "loom-connector-docker"
 description = "Loom connector for Docker host monitoring, container discovery, and per-container control."
 edition.workspace = true
 license.workspace = true
-version = "0.4.0"
+version = "0.4.1"
 repository.workspace = true
 rust-version.workspace = true
 

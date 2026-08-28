@@ -69,8 +69,11 @@ pub const ACTION_UNPAUSE: &str = "unpause";
 
 const CAPABILITY_LIST_CONTAINERS: &str = "list-containers";
 const CAPABILITY_READ_LOGS: &str = "read-logs";
-const CAPABILITY_START_STOP: &str = "start-stop-containers";
+const CAPABILITY_START: &str = "start-containers";
+const CAPABILITY_STOP: &str = "stop-containers";
 const CAPABILITY_RESTART: &str = "restart-containers";
+const CAPABILITY_PAUSE: &str = "pause-containers";
+const CAPABILITY_UNPAUSE: &str = "unpause-containers";
 const CAPABILITY_HOST_SUMMARY: &str = "host-summary";
 
 fn setup_toggle(
@@ -123,9 +126,9 @@ pub fn setup_guide() -> SetupGuide {
             SetupGuideVariant {
                 id: "proxy".to_owned(),
                 label: "Via socket proxy".to_owned(),
-                description: "Recommended for a remote Docker host, and useful for reducing blast radius on the same host. docker-socket-proxy gates Docker API path groups behind opt-in environment flags. Security note: upstream issue #182 reports that CONTAINERS=1 in the current released proxy also exposes container archive, export, logs, and process data; v0.5.0 predates that report and upstream fix #183 is not merged. Review the issue and release status before deploying, and keep the proxy reachable only by Loom."
+                description: "Uses LinuxServer's socket-proxy, whose current rules provide separate opt-in gates for logs, archive, export, process, and lifecycle endpoints. CVE-2026-78122 names Tecnativa docker-socket-proxy through 0.5.0; no published advisory against LinuxServer's image was found when this guide was verified, and its current image includes the finer-grained read gates. A Docker proxy remains highly privileged: keep it reachable only by Loom and review upstream release notes before updating."
                     .to_owned(),
-                template: "services:\n  docker-socket-proxy:\n    # No patched tag for upstream issue #182 was verified when this guide shipped.\n    # Review the linked issue/releases, then replace <reviewed-tag>.\n    image: ghcr.io/tecnativa/docker-socket-proxy:<reviewed-tag>\n    environment:\n      PING: \"{{PING}}\"\n      VERSION: \"{{VERSION}}\"\n      CONTAINERS: \"{{CONTAINERS}}\"\n      POST: \"{{POST}}\"\n      ALLOW_RESTARTS: \"{{ALLOW_RESTARTS}}\"\n      INFO: \"{{INFO}}\"\n      SYSTEM: \"{{SYSTEM}}\"\n    volumes:\n      - /var/run/docker.sock:/var/run/docker.sock\n    networks:\n      - loom-docker-api\n\n  web-backend:\n    networks:\n      - loom-docker-api\n\nnetworks:\n  loom-docker-api:\n    internal: true\n\n# Enter this in Loom:\ndockerHost: tcp://docker-socket-proxy:2375\n\n# Same-host default: do not publish port 2375. For a remote-host deployment,\n# bind/publish it only behind a VPN, firewall rule, or TLS tunnel. Never expose\n# this unauthenticated plain-HTTP proxy on 0.0.0.0 without such protection."
+                template: "services:\n  socket-proxy:\n    image: lscr.io/linuxserver/socket-proxy:latest\n    environment:\n      PING: \"{{PING}}\"\n      VERSION: \"{{VERSION}}\"\n      CONTAINERS: \"{{CONTAINERS}}\"\n      ALLOW_LOGS: \"{{ALLOW_LOGS}}\"\n      ALLOW_START: \"{{ALLOW_START}}\"\n      ALLOW_STOP: \"{{ALLOW_STOP}}\"\n      ALLOW_RESTARTS: \"{{ALLOW_RESTARTS}}\"\n      ALLOW_PAUSE: \"{{ALLOW_PAUSE}}\"\n      ALLOW_UNPAUSE: \"{{ALLOW_UNPAUSE}}\"\n      INFO: \"{{INFO}}\"\n      SYSTEM: \"{{SYSTEM}}\"\n      POST: \"{{POST}}\"\n      # Loom does not use these sensitive read endpoints. Keep them denied.\n      ALLOW_ARCHIVE: \"0\"\n      ALLOW_CHANGES: \"0\"\n      ALLOW_EXPORT: \"0\"\n      ALLOW_TOP: \"0\"\n    volumes:\n      - /var/run/docker.sock:/var/run/docker.sock:ro\n    read_only: true\n    tmpfs:\n      - /run\n    networks:\n      - loom-docker-api\n\n  web-backend:\n    networks:\n      - loom-docker-api\n\nnetworks:\n  loom-docker-api:\n    internal: true\n\n# Enter this in Loom:\ndockerHost: tcp://socket-proxy:2375\n\n# Do not publish port 2375. If the proxy and Loom must be on different hosts,\n# expose it only through a VPN, firewall allowlist, or authenticated TLS tunnel.\n# Never expose this unauthenticated plain-HTTP proxy on 0.0.0.0."
                     .to_owned(),
                 toggles: vec![
                     setup_toggle(
@@ -148,15 +151,31 @@ pub fn setup_guide() -> SetupGuide {
                         "containers",
                         "CONTAINERS",
                         "Allow container access",
-                        "Required for listing, inspecting, stats, and logs. Upstream default: off; this guide enables it because those are Loom's core container features. Current releases also expose archive/export/process endpoints under this broad flag; review upstream issue #182 before enabling it.",
+                        "Required for listing, inspecting, and stats. LinuxServer default: off; this guide enables it because those are Loom's core container features. Sensitive subpaths remain behind the separate ALLOW_* gates below.",
                         true,
                         true,
                     ),
                     setup_toggle(
-                        "post",
-                        "POST",
-                        "Allow container actions",
-                        "Required for Loom's start, stop, restart, pause, and resume calls. Upstream default: off. With current proxy rule ordering, POST=1 plus CONTAINERS=1 permits all of these container POST endpoints.",
+                        "allowLogs",
+                        "ALLOW_LOGS",
+                        "Allow logs",
+                        "Allows only the container logs subpath. LinuxServer default: off; recommended because Loom's logs data point uses it.",
+                        true,
+                        true,
+                    ),
+                    setup_toggle(
+                        "allowStart",
+                        "ALLOW_START",
+                        "Allow start",
+                        "Allows Loom's start action. LinuxServer default: off; this action-specific gate works while POST remains off.",
+                        true,
+                        true,
+                    ),
+                    setup_toggle(
+                        "allowStop",
+                        "ALLOW_STOP",
+                        "Allow stop",
+                        "Allows Loom's stop action. LinuxServer default: off; this action-specific gate works while POST remains off.",
                         true,
                         true,
                     ),
@@ -164,15 +183,31 @@ pub fn setup_guide() -> SetupGuide {
                         "allowRestarts",
                         "ALLOW_RESTARTS",
                         "Allow restarts",
-                        "Upstream default: off. The current proxy exposes this flag, but it is not an effective extra boundary once POST and CONTAINERS are enabled; Loom therefore does not rely on it when predicting capabilities.",
+                        "Allows restart and kill, and also permits stop in LinuxServer's current rules. Default: off; keep this disruptive action opt-in.",
                         false,
                         false,
+                    ),
+                    setup_toggle(
+                        "allowPause",
+                        "ALLOW_PAUSE",
+                        "Allow pause",
+                        "Allows Loom's pause action. LinuxServer default: off; this action-specific gate works while POST remains off.",
+                        true,
+                        true,
+                    ),
+                    setup_toggle(
+                        "allowUnpause",
+                        "ALLOW_UNPAUSE",
+                        "Allow unpause",
+                        "Allows Loom's resume action. LinuxServer default: off; this action-specific gate works while POST remains off.",
+                        true,
+                        true,
                     ),
                     setup_toggle(
                         "info",
                         "INFO",
                         "Allow host information",
-                        "Enables Docker host container/image totals used by Loom's host-summary view. Upstream default: off; leave it off if you only need per-container views.",
+                        "Enables Docker host container and image totals used by Loom's host-summary view. LinuxServer default: off; leave it off for per-container-only views.",
                         false,
                         false,
                     ),
@@ -180,7 +215,15 @@ pub fn setup_guide() -> SetupGuide {
                         "system",
                         "SYSTEM",
                         "Allow disk-usage information",
-                        "Enables /system/df, which Loom uses for Docker disk usage. Upstream default: off; leave it off unless you want the host-summary view.",
+                        "Enables /system/df, which Loom uses for Docker disk usage. LinuxServer default: off; leave it off unless you want the host-summary view.",
+                        false,
+                        false,
+                    ),
+                    setup_toggle(
+                        "post",
+                        "POST",
+                        "Allow other write requests",
+                        "LinuxServer default: off. Loom's lifecycle actions use their narrower ALLOW_* gates even with POST=0, so leave this broad master write gate off unless another trusted client explicitly needs it.",
                         false,
                         false,
                     ),
@@ -194,17 +237,32 @@ pub fn setup_guide() -> SetupGuide {
                     capability_requirement(
                         CAPABILITY_READ_LOGS,
                         "Read container logs",
-                        &["containers"],
+                        &["containers", "allowLogs"],
                     ),
                     capability_requirement(
-                        CAPABILITY_START_STOP,
-                        "Start, stop, pause, and resume containers",
-                        &["containers", "post"],
+                        CAPABILITY_START,
+                        "Start containers",
+                        &["containers", "allowStart"],
+                    ),
+                    capability_requirement(
+                        CAPABILITY_STOP,
+                        "Stop containers",
+                        &["containers", "allowStop"],
                     ),
                     capability_requirement(
                         CAPABILITY_RESTART,
                         "Restart containers",
-                        &["containers", "post"],
+                        &["containers", "allowRestarts"],
+                    ),
+                    capability_requirement(
+                        CAPABILITY_PAUSE,
+                        "Pause containers",
+                        &["containers", "allowPause"],
+                    ),
+                    capability_requirement(
+                        CAPABILITY_UNPAUSE,
+                        "Resume containers",
+                        &["containers", "allowUnpause"],
                     ),
                     capability_requirement(
                         CAPABILITY_HOST_SUMMARY,
@@ -792,11 +850,11 @@ impl Connector for DockerConnector {
                 capabilities: vec![
                     available_capability(CAPABILITY_LIST_CONTAINERS, "List containers"),
                     available_capability(CAPABILITY_READ_LOGS, "Read container logs"),
-                    available_capability(
-                        CAPABILITY_START_STOP,
-                        "Start, stop, pause, and resume containers",
-                    ),
+                    available_capability(CAPABILITY_START, "Start containers"),
+                    available_capability(CAPABILITY_STOP, "Stop containers"),
                     available_capability(CAPABILITY_RESTART, "Restart containers"),
+                    available_capability(CAPABILITY_PAUSE, "Pause containers"),
+                    available_capability(CAPABILITY_UNPAUSE, "Resume containers"),
                     available_capability(CAPABILITY_HOST_SUMMARY, "View host summary"),
                 ],
                 message: Some(
@@ -829,18 +887,33 @@ impl Connector for DockerConnector {
                 proxy_read_capability(
                     CAPABILITY_READ_LOGS,
                     "Read container logs",
-                    "CONTAINERS",
+                    "CONTAINERS and ALLOW_LOGS",
                     logs,
                 ),
                 write_capability(
-                    CAPABILITY_START_STOP,
-                    "Start, stop, pause, and resume containers",
-                    "POST and CONTAINERS",
+                    CAPABILITY_START,
+                    "Start containers",
+                    "CONTAINERS and ALLOW_START",
+                ),
+                write_capability(
+                    CAPABILITY_STOP,
+                    "Stop containers",
+                    "CONTAINERS and ALLOW_STOP",
                 ),
                 write_capability(
                     CAPABILITY_RESTART,
                     "Restart containers",
-                    "POST and CONTAINERS",
+                    "CONTAINERS and ALLOW_RESTARTS",
+                ),
+                write_capability(
+                    CAPABILITY_PAUSE,
+                    "Pause containers",
+                    "CONTAINERS and ALLOW_PAUSE",
+                ),
+                write_capability(
+                    CAPABILITY_UNPAUSE,
+                    "Resume containers",
+                    "CONTAINERS and ALLOW_UNPAUSE",
                 ),
                 combine_host_summary_probes(info, system),
             ],
@@ -1511,16 +1584,55 @@ mod tests {
                 "PING",
                 "VERSION",
                 "CONTAINERS",
-                "POST",
+                "ALLOW_LOGS",
+                "ALLOW_START",
+                "ALLOW_STOP",
                 "ALLOW_RESTARTS",
+                "ALLOW_PAUSE",
+                "ALLOW_UNPAUSE",
                 "INFO",
-                "SYSTEM"
+                "SYSTEM",
+                "POST",
             ]
         );
         assert!(!env_vars.contains(&"IMAGES"), "Loom never calls /images");
+        assert!(proxy
+            .template
+            .contains("lscr.io/linuxserver/socket-proxy:latest"));
+        assert!(proxy.template.contains("ALLOW_ARCHIVE: \"0\""));
+        assert!(proxy.template.contains("ALLOW_EXPORT: \"0\""));
+        assert!(proxy.template.contains("ALLOW_TOP: \"0\""));
         assert!(proxy.template.contains("internal: true"));
         assert!(!proxy.template.contains("ports:"));
-        assert!(proxy.description.contains("#182"));
+        assert!(proxy.description.contains("CVE-2026-78122"));
+
+        let requirements = proxy
+            .capability_requirements
+            .iter()
+            .map(|requirement| {
+                (
+                    requirement.capability_key.as_str(),
+                    requirement
+                        .required_toggle_keys
+                        .iter()
+                        .map(String::as_str)
+                        .collect::<Vec<_>>(),
+                )
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            requirements,
+            vec![
+                (CAPABILITY_LIST_CONTAINERS, vec!["containers"]),
+                (CAPABILITY_READ_LOGS, vec!["containers", "allowLogs"]),
+                (CAPABILITY_START, vec!["containers", "allowStart"]),
+                (CAPABILITY_STOP, vec!["containers", "allowStop"]),
+                (CAPABILITY_RESTART, vec!["containers", "allowRestarts"]),
+                (CAPABILITY_PAUSE, vec!["containers", "allowPause"]),
+                (CAPABILITY_UNPAUSE, vec!["containers", "allowUnpause"]),
+                (CAPABILITY_HOST_SUMMARY, vec!["info", "system", "version"]),
+            ]
+        );
     }
 
     #[tokio::test]
@@ -1534,16 +1646,17 @@ mod tests {
         .await;
         let result = detached(&host, &[]).test_connection().await;
         assert!(result.reachable);
-        assert_eq!(result.capabilities.len(), 5);
+        assert_eq!(result.capabilities.len(), 8);
         assert!(result.capabilities[0].available);
         assert!(result.capabilities[1].available);
-        assert!(!result.capabilities[2].available);
-        assert!(!result.capabilities[3].available);
-        assert!(result.capabilities[4].available);
-        assert!(result.capabilities[2]
+        assert!(result.capabilities[2..7]
+            .iter()
+            .all(|capability| !capability.available));
+        assert!(result.capabilities[7].available);
+        assert!(result.capabilities[2..7].iter().all(|capability| capability
             .note
             .as_deref()
-            .is_some_and(|note| note.contains("without performing an action")));
+            .is_some_and(|note| note.contains("without performing an action"))));
     }
 
     #[tokio::test]
@@ -1559,12 +1672,16 @@ mod tests {
         assert!(result.reachable, "PING and VERSION remain available");
         assert!(!result.capabilities[0].available);
         assert!(!result.capabilities[1].available);
-        assert!(!result.capabilities[4].available);
+        assert!(!result.capabilities[7].available);
         assert!(result.capabilities[0]
             .note
             .as_deref()
             .is_some_and(|note| note.contains("CONTAINERS")));
-        assert!(result.capabilities[4]
+        assert!(result.capabilities[1]
+            .note
+            .as_deref()
+            .is_some_and(|note| note.contains("ALLOW_LOGS")));
+        assert!(result.capabilities[7]
             .note
             .as_deref()
             .is_some_and(|note| note.contains("INFO and SYSTEM")));

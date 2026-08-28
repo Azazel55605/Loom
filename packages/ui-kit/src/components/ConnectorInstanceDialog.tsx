@@ -32,6 +32,7 @@ import {
   validateSchemaValues,
 } from "@loom/ui-kit/components/SchemaForm";
 import { Skeleton } from "@loom/ui-kit/components/ui/skeleton";
+import { Tabs, TabsContent, TabsList, TabsTrigger } from "@loom/ui-kit/components/ui/tabs";
 import type { ConnectorInstanceSummary } from "@loom/ui-kit/lib/api";
 import { useApiClient } from "@loom/ui-kit/lib/api-context";
 import { describeAdminFailure } from "@loom/ui-kit/lib/admin-error";
@@ -107,7 +108,7 @@ export function ConnectorInstanceDialog({
   const [isSubmitting, setIsSubmitting] = React.useState(false);
 
   const selectedType = types.data?.find((candidate) => candidate.typeId === typeId) ?? null;
-  const setupGuide = !isEditing ? (selectedType?.setupGuide ?? null) : null;
+  const setupGuide = selectedType?.setupGuide ?? null;
   const hasSetupGuide = (setupGuide?.variants.length ?? 0) > 0;
 
   // Seed the config form once the schema is known: on create from the schema's
@@ -215,8 +216,8 @@ export function ConnectorInstanceDialog({
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent
         className={cn(
-          "max-h-[85vh] overflow-y-auto",
-          hasSetupGuide && "sm:max-w-3xl",
+          "max-h-[calc(100dvh-2rem)] w-[calc(100%-2rem)] overflow-y-auto",
+          hasSetupGuide && "sm:max-w-4xl",
         )}
       >
         <DialogHeader>
@@ -358,30 +359,61 @@ export function ConnectorInstanceDialog({
           ) : null}
 
           {selectedType !== null && !isLoading && (
-            <div className="space-y-2 border-t border-border pt-4">
-              <p className="text-sm font-medium">{selectedType.displayName} configuration</p>
-              <div
-                className={cn(
-                  "grid gap-4",
-                  hasSetupGuide && "lg:grid-cols-2 lg:items-start",
-                )}
-              >
-                <SchemaForm
-                  schema={selectedType.configSchema}
-                  value={config}
-                  onChange={setConfig}
-                  errors={errors}
-                  disabled={isSubmitting}
-                  idPrefix={`config-${selectedType.typeId}`}
-                />
-                {setupGuide !== null && hasSetupGuide ? (
-                  <SetupGuidePanel
-                    guide={setupGuide}
-                    typeId={selectedType.typeId}
-                    formValues={config}
+            <div className="flex flex-col gap-2 border-t border-border pt-4">
+              {setupGuide !== null && hasSetupGuide ? (
+                <Tabs defaultValue="configuration">
+                  <TabsList className="h-auto w-full justify-start overflow-x-auto">
+                    <TabsTrigger value="configuration" className="min-h-11 flex-1">
+                      Configuration
+                    </TabsTrigger>
+                    <TabsTrigger value="setup-guide" className="min-h-11 flex-1">
+                      Setup guide
+                    </TabsTrigger>
+                  </TabsList>
+                  <TabsContent
+                    value="configuration"
+                    forceMount
+                    className="data-[state=inactive]:hidden"
+                  >
+                    <p className="mb-2 text-sm font-medium">
+                      {selectedType.displayName} configuration
+                    </p>
+                    <SchemaForm
+                      schema={selectedType.configSchema}
+                      value={config}
+                      onChange={setConfig}
+                      errors={errors}
+                      disabled={isSubmitting}
+                      idPrefix={`config-${selectedType.typeId}`}
+                    />
+                  </TabsContent>
+                  <TabsContent
+                    value="setup-guide"
+                    forceMount
+                    className="data-[state=inactive]:hidden"
+                  >
+                    <SetupGuidePanel
+                      guide={setupGuide}
+                      typeId={selectedType.typeId}
+                      formValues={config}
+                    />
+                  </TabsContent>
+                </Tabs>
+              ) : (
+                <>
+                  <p className="text-sm font-medium">
+                    {selectedType.displayName} configuration
+                  </p>
+                  <SchemaForm
+                    schema={selectedType.configSchema}
+                    value={config}
+                    onChange={setConfig}
+                    errors={errors}
+                    disabled={isSubmitting}
+                    idPrefix={`config-${selectedType.typeId}`}
                   />
-                ) : null}
-              </div>
+                </>
+              )}
             </div>
           )}
 

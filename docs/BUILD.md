@@ -55,12 +55,14 @@ their placements against one host-level `docker` instance. A stale
 `containerName` key in stored configuration is ignored safely while the row is
 being recreated; it does not select a container under the new model.
 
-For a TCP Docker socket proxy, Loom needs read access to the ping/version,
-container, info, and system endpoints. Container actions additionally require
-the proxy's POST permission and the corresponding start, stop, restart, pause,
-and unpause permissions. Denying the optional system disk-usage call leaves
-the connector usable but Degraded, with the refusal reported in its status;
-it does not make connector creation or actions wait for a full inventory.
+For the LinuxServer TCP Docker socket proxy, Loom needs ping/version and
+container access, plus the separate logs gate for the logs data point. Each
+container action uses its corresponding start, stop, restart, pause, or
+unpause gate; those narrow gates intentionally work while the broad `POST`
+permission remains disabled. The optional info and system gates complete the
+host summary. Denying the system disk-usage call leaves the connector usable
+but Degraded, with the refusal reported in its status; it does not make
+connector creation or actions wait for a full inventory.
 
 ### `pnpm build` builds frontend apps and shared packages only
 

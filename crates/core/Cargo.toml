@@ -3,7 +3,7 @@ name = "loom-core"
 description = "Shared library for Loom: connector logic, business logic, and (later) the shared UI kit."
 edition.workspace = true
 license.workspace = true
-version = "0.2.0"
+version = "0.2.1"
 repository.workspace = true
 rust-version.workspace = true
 

@@ -798,22 +798,30 @@ the instances they may see are on `/connector-instances`, which asks only for
         {
           "id": "proxy",
           "label": "Via socket proxy",
-          "description": "Network-isolated docker-socket-proxy setup with an upstream security caveat.",
-          "template": "services:\n  docker-socket-proxy:\n    image: ghcr.io/tecnativa/docker-socket-proxy:<reviewed-tag>\n    environment:\n      PING: \"{{PING}}\"\n      VERSION: \"{{VERSION}}\"\n      CONTAINERS: \"{{CONTAINERS}}\"\n      POST: \"{{POST}}\"\n      ALLOW_RESTARTS: \"{{ALLOW_RESTARTS}}\"\n      INFO: \"{{INFO}}\"\n      SYSTEM: \"{{SYSTEM}}\"\n    networks: [loom-docker-api]\n\ndockerHost: tcp://docker-socket-proxy:2375",
+          "description": "Network-isolated LinuxServer socket-proxy setup with fine-grained read and lifecycle gates.",
+          "template": "services:\n  socket-proxy:\n    image: lscr.io/linuxserver/socket-proxy:latest\n    environment:\n      PING: \"{{PING}}\"\n      VERSION: \"{{VERSION}}\"\n      CONTAINERS: \"{{CONTAINERS}}\"\n      ALLOW_LOGS: \"{{ALLOW_LOGS}}\"\n      ALLOW_START: \"{{ALLOW_START}}\"\n      ALLOW_STOP: \"{{ALLOW_STOP}}\"\n      ALLOW_RESTARTS: \"{{ALLOW_RESTARTS}}\"\n      ALLOW_PAUSE: \"{{ALLOW_PAUSE}}\"\n      ALLOW_UNPAUSE: \"{{ALLOW_UNPAUSE}}\"\n      INFO: \"{{INFO}}\"\n      SYSTEM: \"{{SYSTEM}}\"\n      POST: \"{{POST}}\"\n      ALLOW_ARCHIVE: \"0\"\n      ALLOW_CHANGES: \"0\"\n      ALLOW_EXPORT: \"0\"\n      ALLOW_TOP: \"0\"\n    networks: [loom-docker-api]\n\ndockerHost: tcp://socket-proxy:2375",
           "toggles": [
             { "key": "ping", "envVar": "PING", "label": "Allow ping", "description": "Reachability check.", "default": true, "recommended": true },
             { "key": "version", "envVar": "VERSION", "label": "Allow version", "description": "Version check and host-summary version.", "default": true, "recommended": true },
-            { "key": "containers", "envVar": "CONTAINERS", "label": "Allow container access", "description": "Listing, inspect, stats, and logs.", "default": true, "recommended": true },
-            { "key": "post", "envVar": "POST", "label": "Allow container actions", "description": "Container lifecycle POST calls.", "default": true, "recommended": true },
-            { "key": "allowRestarts", "envVar": "ALLOW_RESTARTS", "label": "Allow restarts", "description": "Visible upstream flag; not an effective extra boundary with POST plus CONTAINERS in the current rules.", "default": false, "recommended": false },
+            { "key": "containers", "envVar": "CONTAINERS", "label": "Allow container access", "description": "Listing, inspect, and stats.", "default": true, "recommended": true },
+            { "key": "allowLogs", "envVar": "ALLOW_LOGS", "label": "Allow logs", "description": "Container logs subpath only.", "default": true, "recommended": true },
+            { "key": "allowStart", "envVar": "ALLOW_START", "label": "Allow start", "description": "Start action; works with POST disabled.", "default": true, "recommended": true },
+            { "key": "allowStop", "envVar": "ALLOW_STOP", "label": "Allow stop", "description": "Stop action; works with POST disabled.", "default": true, "recommended": true },
+            { "key": "allowRestarts", "envVar": "ALLOW_RESTARTS", "label": "Allow restarts", "description": "Restart/kill and stop actions; disruptive and opt-in.", "default": false, "recommended": false },
+            { "key": "allowPause", "envVar": "ALLOW_PAUSE", "label": "Allow pause", "description": "Pause action; works with POST disabled.", "default": true, "recommended": true },
+            { "key": "allowUnpause", "envVar": "ALLOW_UNPAUSE", "label": "Allow unpause", "description": "Resume action; works with POST disabled.", "default": true, "recommended": true },
             { "key": "info", "envVar": "INFO", "label": "Allow host information", "description": "Host container and image totals.", "default": false, "recommended": false },
-            { "key": "system", "envVar": "SYSTEM", "label": "Allow disk-usage information", "description": "Docker disk usage from /system/df.", "default": false, "recommended": false }
+            { "key": "system", "envVar": "SYSTEM", "label": "Allow disk-usage information", "description": "Docker disk usage from /system/df.", "default": false, "recommended": false },
+            { "key": "post", "envVar": "POST", "label": "Allow other write requests", "description": "Broad write gate; Loom does not need it for lifecycle actions.", "default": false, "recommended": false }
           ],
           "capabilityRequirements": [
             { "capabilityKey": "list-containers", "label": "List containers", "requiredToggleKeys": ["containers"] },
-            { "capabilityKey": "read-logs", "label": "Read container logs", "requiredToggleKeys": ["containers"] },
-            { "capabilityKey": "start-stop-containers", "label": "Start, stop, pause, and resume containers", "requiredToggleKeys": ["containers", "post"] },
-            { "capabilityKey": "restart-containers", "label": "Restart containers", "requiredToggleKeys": ["containers", "post"] },
+            { "capabilityKey": "read-logs", "label": "Read container logs", "requiredToggleKeys": ["containers", "allowLogs"] },
+            { "capabilityKey": "start-containers", "label": "Start containers", "requiredToggleKeys": ["containers", "allowStart"] },
+            { "capabilityKey": "stop-containers", "label": "Stop containers", "requiredToggleKeys": ["containers", "allowStop"] },
+            { "capabilityKey": "restart-containers", "label": "Restart containers", "requiredToggleKeys": ["containers", "allowRestarts"] },
+            { "capabilityKey": "pause-containers", "label": "Pause containers", "requiredToggleKeys": ["containers", "allowPause"] },
+            { "capabilityKey": "unpause-containers", "label": "Resume containers", "requiredToggleKeys": ["containers", "allowUnpause"] },
             { "capabilityKey": "host-summary", "label": "View host summary", "requiredToggleKeys": ["info", "system", "version"] }
           ]
         }
@@ -875,26 +883,37 @@ but the schema no longer offers it for new instances.
 
 #### Docker socket-proxy mapping and security status
 
-The Docker setup guide is derived from Tecnativa's current
-[`Dockerfile`](https://github.com/Tecnativa/docker-socket-proxy/blob/master/Dockerfile),
-[`haproxy.cfg`](https://github.com/Tecnativa/docker-socket-proxy/blob/master/haproxy.cfg),
-and [README](https://github.com/Tecnativa/docker-socket-proxy/blob/master/README.md).
-The upstream defaults are `PING=1`, `VERSION=1`, and `EVENTS=1`; the Loom-relevant
-`CONTAINERS`, `POST`, `ALLOW_RESTARTS`, `INFO`, and `SYSTEM` gates default to
-`0`. Loom does not call `/images`: image totals come from `/info` (`INFO`) and
-disk usage comes from `/system/df` (`SYSTEM`). Container listing, inspect,
-stats, and logs all fall under the broad `CONTAINERS` path gate.
+The Docker setup guide is derived from LinuxServer's current
+[`readme-vars.yml`](https://github.com/linuxserver/docker-socket-proxy/blob/main/readme-vars.yml),
+generated [README](https://github.com/linuxserver/docker-socket-proxy/blob/main/README.md),
+and [HAProxy template](https://github.com/linuxserver/docker-socket-proxy/blob/main/root/templates/haproxy.cfg).
+The Docker-compatible API gates and their current defaults are:
 
-As verified on 2026-08-28, the supplied `CVE-2026-78122` identifier has no
-public CVE/NVD record that could be corroborated. The underlying disclosure is
-nevertheless concrete: upstream [issue #182](https://github.com/Tecnativa/docker-socket-proxy/issues/182)
-documents that `CONTAINERS=1` also permits GET-based archive/export/log/process
-access. The proposed granular fix is still an open
-[pull request #183](https://github.com/Tecnativa/docker-socket-proxy/pull/183),
-and the latest tagged [v0.5.0 release](https://github.com/Tecnativa/docker-socket-proxy/releases/tag/v0.5.0)
-predates the report, so there is no verified patched release to recommend yet.
-The guide therefore states the caveat prominently and keeps the proxy on an
-internal Compose network with no published host port.
+- enabled (`1`): `EVENTS`, `PING`, `VERSION`;
+- disabled (`0`): `ALLOW_ARCHIVE`, `ALLOW_CHANGES`, `ALLOW_EXPORT`,
+  `ALLOW_LOGS`, `ALLOW_PAUSE`, `ALLOW_RESTARTS`, `ALLOW_START`, `ALLOW_STOP`,
+  `ALLOW_TOP`, `ALLOW_UNPAUSE`, `AUTH`, `BUILD`, `COMMIT`, `CONFIGS`,
+  `CONTAINERS`, `DISTRIBUTION`, `EXEC`, `IMAGES`, `INFO`, `NETWORKS`, `NODES`,
+  `PLUGINS`, `POST`, `SECRETS`, `SERVICES`, `SESSION`, `SWARM`, `SYSTEM`,
+  `TASKS`, and `VOLUMES`.
+
+`ALLOW_START`, `ALLOW_STOP`, `ALLOW_RESTARTS`, `ALLOW_PAUSE`, and
+`ALLOW_UNPAUSE` are checked before the broad `POST` rejection and therefore
+work with `POST=0`. Loom leaves `POST` disabled and enables only the individual
+lifecycle gates selected in the guide. `ALLOW_RESTARTS` also admits stop and
+kill in the current rules, which is why the guide labels it disruptive. Logs
+require both the base `CONTAINERS` section and `ALLOW_LOGS`. Loom does not call
+`/images`: image totals come from `/info` (`INFO`) and disk usage comes from
+`/system/df` (`SYSTEM`), so `IMAGES` remains disabled.
+
+As verified on 2026-08-28, [CVE-2026-78122](https://nvd.nist.gov/vuln/detail/CVE-2026-78122)
+identifies Tecnativa `docker-socket-proxy` through 0.5.0, not LinuxServer's
+image. LinuxServer's current configuration includes the granular archive,
+change, export, logs, and top gates and its repository lists no published
+security advisory specific to the image. That is not a reason to expose the
+proxy publicly: it still fronts a root-equivalent API, so the generated Compose
+keeps it on an internal network with no published host port and explicitly
+leaves unused sensitive read paths disabled.
 
 ### `GET /connector-instances`
 

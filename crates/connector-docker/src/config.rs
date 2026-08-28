@@ -139,7 +139,7 @@ pub fn config_schema() -> Value {
                 "default": DEFAULT_DOCKER_HOST,
                 "description": "Docker connection URI. Use `unix:///var/run/docker.sock` for a \
                                 local socket, or `tcp://host:port` for a remote host or a \
-                                docker-socket-proxy container."
+                                Docker socket-proxy container."
             }
         },
         "required": ["dockerHost"],
