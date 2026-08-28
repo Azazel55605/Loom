@@ -7,6 +7,7 @@ import type {
   WidgetBinding,
 } from "@loom/ui-kit/lib/api";
 import { GaugeSkeleton, GaugeWidget } from "@loom/ui-kit/widgets/Gauge";
+import { LogPreviewSkeleton, LogPreviewWidget } from "@loom/ui-kit/widgets/LogPreview";
 import { LogStreamSkeleton, LogStreamWidget } from "@loom/ui-kit/widgets/LogStream";
 import { MetricChartSkeleton, MetricChartWidget } from "@loom/ui-kit/widgets/MetricChart";
 import { ProgressBarSkeleton, ProgressBarWidget } from "@loom/ui-kit/widgets/ProgressBar";
@@ -51,6 +52,16 @@ export type RenderWidgetOptions = {
   unavailableReason?: string | null;
   className?: string;
   size?: "compact" | "expanded";
+  /**
+   * Opens this placement's detail view, for the widgets that only show part of
+   * what they have.
+   *
+   * Today that is the log preview and only on a compact placement. Passing it
+   * is what makes the expand affordance appear at all, so a context with
+   * nowhere to expand into simply omits it rather than rendering a button that
+   * does nothing.
+   */
+  onExpand?: () => void;
 };
 
 /**
@@ -82,6 +93,7 @@ export function renderWidget({
   unavailableReason,
   className,
   size = "compact",
+  onExpand,
 }: RenderWidgetOptions) {
   if ("display" in binding) {
     const { dataPointId, widgetType, config } = binding.display;
@@ -105,7 +117,7 @@ export function renderWidget({
         case "progressBar": return <ProgressBarSkeleton className={className} />;
         case "gauge": return <GaugeSkeleton className={className} />;
         case "statusDot": return <StatusDotSkeleton className={className} />;
-        case "logStream": return <LogStreamSkeleton className={className} expanded={size === "expanded"} />;
+        case "logStream": return size === "expanded" ? <LogStreamSkeleton className={className} expanded /> : <LogPreviewSkeleton className={className} />;
       }
     }
 
@@ -123,7 +135,17 @@ export function renderWidget({
       case "statusDot":
         return <StatusDotWidget {...shared} />;
       case "logStream":
-        return <LogStreamWidget {...shared} expanded={size === "expanded"} />;
+        // One binding, two renderings, chosen by where it is being drawn
+        // rather than by anything the user picked. A grid tile gets the newest
+        // line and a way to open the rest; the expanded modal, which has the
+        // room, gets the full scrollable pane. Making this a second widget
+        // type would have forced everyone with a saved log placement to choose
+        // between "unreadable in the grid" and "unreadable in the modal".
+        return size === "expanded" ? (
+          <LogStreamWidget {...shared} expanded />
+        ) : (
+          <LogPreviewWidget {...shared} onExpand={onExpand} />
+        );
       default:
         // Unreachable while the union and this switch agree. Kept because they
         // are updated in different repositories' worth of code — Core adds the

@@ -33,6 +33,11 @@ import {
 import { hasPermission, PERMISSION_KEYS } from "@loom/ui-kit/lib/permissions";
 import { useRetainedStatusDetails } from "@loom/ui-kit/lib/use-retained-status-details";
 
+/** How long the dialog's open animation needs before its body can be scrolled
+ *  meaningfully. Comfortably longer than the 150ms transition it is waiting on;
+ *  a scroll that lands late is invisible, one that lands early does nothing. */
+const DIALOG_OPEN_SETTLE_MS = 220;
+
 type LiveReading = {
   status: ConnectorStatus | null;
   statusError?: ConnectorError;
@@ -44,10 +49,22 @@ export function ConnectorDetailModal({
   placement,
   open,
   onOpenChange,
+  focus = null,
 }: {
   placement: DashboardPlacement;
   open: boolean;
   onOpenChange: (open: boolean) => void;
+  /**
+   * Which widget the modal was opened *for*, when it was opened for one.
+   *
+   * `"logs"` comes from a log preview's expand affordance: the reader asked to
+   * see that log, and on a placement with eight other widgets the pane they
+   * asked for may be below the fold. Deliberately one narrow enum rather than a
+   * general "scroll to binding N" API — this is the only case that exists, and
+   * a selector taking indices would encode a placement's binding order into its
+   * caller.
+   */
+  focus?: "logs" | null;
 }) {
   const api = useApiClient();
   const socket = useConnectorStatusSocket();
@@ -113,6 +130,43 @@ export function ConnectorDetailModal({
     detail.data?.dataPoints.filter((point) => matchesTarget(point, placement.targetId)) ?? [];
   const targetActions =
     detail.data?.actions.filter((action) => matchesTarget(action, placement.targetId)) ?? [];
+  // The first log pane on this placement, so the "logs" focus has something to
+  // aim at. Indexed rather than ref-per-widget: `renderWidget` returns one
+  // element per binding and the wrapper around it is the only thing this
+  // component owns.
+  const focusIndex = placement.widgetBindings.findIndex(
+    (binding) => "display" in binding && binding.display.widgetType === "logStream",
+  );
+
+  // A **callback ref**, not an effect reading a ref object, and that is not a
+  // style preference. Radix renders the dialog's contents into a portal that
+  // commits *after* this component's own effects, so an effect that reaches
+  // for the pane at open time finds `null` every single time and scrolls
+  // nothing. Doing the work when the node itself attaches is the only ordering
+  // that is actually guaranteed.
+  const focusPending = React.useRef(false);
+  const scrollTimer = React.useRef(0);
+  React.useEffect(() => {
+    focusPending.current = open && focus === "logs";
+  }, [open, focus]);
+  React.useEffect(() => () => window.clearTimeout(scrollTimer.current), []);
+  const focusRef = React.useCallback((node: HTMLDivElement | null) => {
+    if (node === null || !focusPending.current) return;
+    // One shot per open: re-scrolling on every re-render would fight a reader
+    // who has since scrolled somewhere else.
+    focusPending.current = false;
+    // *After* the dialog's open animation, not on the same tick as it. A
+    // dialog still growing into place has a body with no scrollable extent
+    // yet, so an immediate scroll silently does nothing.
+    //
+    // `block: "start"` rather than `"nearest"`: the reader asked for this pane
+    // specifically, and "nearest" satisfies itself with one line of it showing
+    // at the bottom edge.
+    scrollTimer.current = window.setTimeout(() => {
+      window.requestAnimationFrame(() => node.scrollIntoView({ block: "start" }));
+    }, DIALOG_OPEN_SETTLE_MS);
+  }, []);
+
   const boundActions = new Set(
     placement.widgetBindings.flatMap((binding) => "action" in binding ? [binding.action.actionId] : []),
   );
@@ -163,7 +217,7 @@ export function ConnectorDetailModal({
               {reading.statusError !== undefined ? <Alert variant="destructive"><AlertCircle aria-hidden="true" /><AlertDescription>{describeConnectorError(reading.statusError)}</AlertDescription></Alert> : null}
               <div className="grid gap-5 md:grid-cols-2">
                 {placement.widgetBindings.map((binding, index) => (
-                  <React.Fragment key={index}>{renderWidget({ binding, statusDetails, dataPoints: targetDataPoints, actions: targetActions, onExecute: runAction, disabled: !canControl, unavailableReason: availability.unavailableReason, size: "expanded", className: "min-h-[5rem]" })}</React.Fragment>
+                  <div key={index} ref={index === focusIndex ? focusRef : undefined} className="min-w-0">{renderWidget({ binding, statusDetails, dataPoints: targetDataPoints, actions: targetActions, onExecute: runAction, disabled: !canControl, unavailableReason: availability.unavailableReason, size: "expanded", className: "min-h-[5rem]" })}</div>
                 ))}
               </div>
               {targetActions.some((action) => !boundActions.has(action.id)) ? (

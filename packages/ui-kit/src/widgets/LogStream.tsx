@@ -21,6 +21,11 @@ const FOLLOW_THRESHOLD_PX = 24;
  * value type, and inventing a second wire shape for the same declared type is
  * how a renderer and a connector quietly disagree.
  *
+ * **Its height is capped and it scrolls inside itself.** A log is the one
+ * reading with no natural maximum size, so the pane is bounded and the overflow
+ * goes to its own scrollbar. Nothing about how long the log is may reach the
+ * layout around it.
+ *
  * **Auto-scroll follows, it does not force.** Pinning to the bottom on every
  * update would yank a reader out of the line they were reading, so the pane
  * only re-pins when it was already at the bottom when the update arrived. The
@@ -63,7 +68,13 @@ export function LogStreamWidget({ label, value, config, className, expanded = fa
         // demand, it just does not interrupt.
         aria-live="off"
         tabIndex={0}
-        className={cn("surface-panel min-h-0 flex-1 overflow-auto rounded-md border p-2 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring", expanded && "min-h-[20rem]")}
+        className={cn(
+          "surface-panel min-h-0 flex-1 overflow-y-auto rounded-md border p-2 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring",
+          // The cap is the whole point: without it the pane is as tall as the
+          // log is long, and a widget that grows without limit drags its tile
+          // — and the grid rows either side of it — along with it.
+          expanded ? "max-h-[28rem] min-h-[20rem]" : "max-h-[14rem]",
+        )}
       >
         {visible.length === 0 ? (
           <p className="text-xs text-muted-foreground">Nothing reported yet.</p>

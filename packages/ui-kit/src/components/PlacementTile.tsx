@@ -119,6 +119,14 @@ export function PlacementTile({
   const { user } = useAuth();
   const instance = placement.connector;
   const [detailOpen, setDetailOpen] = React.useState(false);
+  // Which part of the detail view was asked for. The header's expand button
+  // means "show me this connector"; a log preview's means "show me *that*",
+  // and a modal that opens on a stat tile has ignored the question.
+  const [detailFocus, setDetailFocus] = React.useState<"logs" | null>(null);
+  const openDetail = React.useCallback((focus: "logs" | null = null) => {
+    setDetailFocus(focus);
+    setDetailOpen(true);
+  }, []);
 
   // Visibility only. **Not a security boundary**: the backend checks
   // `connectors.control` on every action request, scoped to this instance id,
@@ -347,7 +355,7 @@ export function PlacementTile({
               size="icon"
               className="loom-grid-control h-7 w-7"
               aria-label={`Expand ${instance.name}`}
-              onClick={() => setDetailOpen(true)}
+              onClick={() => openDetail()}
               title={`Open ${instance.name} details`}
             >
               <Maximize2 aria-hidden="true" />
@@ -400,15 +408,18 @@ export function PlacementTile({
                   // cannot be reached at all. A button that fails on click
                   // teaches nothing; one that says why before the click does.
                   unavailableReason: availability.unavailableReason,
+                  onExpand: () => openDetail("logs"),
                   className:
-                    // A chart or a log pane needs room; the scalar widgets do
-                    // not. Spanning them is what keeps a mixed card readable
-                    // without the binding having to carry a size.
-                    "display" in binding &&
-                    (typeof binding.display.widgetType !== "string" ||
-                      binding.display.widgetType === "logStream")
+                    // A chart needs room; the scalar widgets do not. Spanning
+                    // it is what keeps a mixed card readable without the
+                    // binding having to carry a size. A log spans the row too —
+                    // one line of monospace wants the width — but takes no
+                    // height beyond it, because in the grid it *is* one line.
+                    "display" in binding && typeof binding.display.widgetType !== "string"
                       ? "col-span-full min-h-[8rem]"
-                      : undefined,
+                      : "display" in binding && binding.display.widgetType === "logStream"
+                        ? "col-span-full"
+                        : undefined,
                 })}
               </React.Fragment>
             ))}
@@ -420,6 +431,7 @@ export function PlacementTile({
         placement={placement}
         open={detailOpen}
         onOpenChange={setDetailOpen}
+        focus={detailFocus}
       />
     </>
   );
