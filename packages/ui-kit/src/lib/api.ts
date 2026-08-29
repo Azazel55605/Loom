@@ -242,7 +242,49 @@ export type ResourceKindDescriptor = {
   rowActions: ConnectorAction[];
   /** Actions on the collection as a whole. No `resourceId`. */
   kindActions: ConnectorAction[];
+  /**
+   * A `ColumnDescriptor.key` whose value rows should be gathered under.
+   *
+   * A hint: the rows are the same rows either way, and rendering a flat table
+   * is a correct reading of a grouped kind. Docker's images use it — twenty
+   * rows of which four are `nginx` is a list you have to read, the same twenty
+   * under seven repository headings is one you can scan.
+   */
+  groupByKey: string | null;
+  /** Whether this kind means anything at the host, at one sub-target, or
+   *  both. */
+  applicableTarget: ApplicableTarget;
 };
+
+/**
+ * Where a browsable kind is worth showing.
+ *
+ * Declared by the connector rather than inferred from an empty listing, which
+ * cannot tell "this does not apply here" from "there are none right now" — the
+ * difference between a tab that is empty today and one that will never fill.
+ */
+export type ApplicableTarget = "hostOnly" | "targetOnly" | "any";
+
+/**
+ * Whether a kind belongs in a view of `targetId`.
+ *
+ * `null` is the host view. An unrecognised value is shown rather than hidden: a
+ * newer backend inventing a fourth case must not make a table disappear from an
+ * older client with no explanation.
+ */
+export function appliesToTarget(
+  descriptor: ResourceKindDescriptor,
+  targetId: string | null | undefined,
+): boolean {
+  switch (descriptor.applicableTarget) {
+    case "hostOnly":
+      return targetId === null || targetId === undefined;
+    case "targetOnly":
+      return targetId !== null && targetId !== undefined;
+    default:
+      return true;
+  }
+}
 
 /** What the update scheduler last found for one target. */
 export type UpdateStatus = {

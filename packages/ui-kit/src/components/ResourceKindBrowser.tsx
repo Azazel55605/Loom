@@ -1,9 +1,10 @@
 import * as React from "react";
 import { useMutation, useQuery } from "@tanstack/react-query";
-import { AlertCircle, Check, Loader2, X } from "lucide-react";
+import { AlertCircle, Check, ChevronDown, Loader2, X } from "lucide-react";
 import { toast } from "sonner";
 
 import { Alert, AlertDescription } from "@loom/ui-kit/components/ui/alert";
+import { Badge } from "@loom/ui-kit/components/ui/badge";
 import { Button } from "@loom/ui-kit/components/ui/button";
 import { Skeleton } from "@loom/ui-kit/components/ui/skeleton";
 import {
@@ -120,6 +121,63 @@ export function ResourceKindBrowser({
 
   const columns = descriptor.columns;
   const hasRowActions = descriptor.rowActions.length > 0;
+  const columnCount = columns.length + (hasRowActions ? 1 : 0);
+  // Collapsed rather than expanded state, so a group that appears between two
+  // refreshes starts open like every other one — remembering which groups are
+  // *shut* survives a changing list, remembering which are open does not.
+  const [collapsed, setCollapsed] = React.useState<ReadonlySet<string>>(() => new Set());
+  const groups = React.useMemo(
+    () => groupRows(descriptor.groupByKey, items.data ?? []),
+    [descriptor.groupByKey, items.data],
+  );
+
+  /** One row, identical whether it stands alone or under a group heading. */
+  function renderRow(item: ResourceItem) {
+    return (
+      <TableRow key={item.id}>
+        {columns.map((column) => (
+          <TableCell key={column.key} className="align-top">
+            <ResourceCell column={column} value={item.fields[column.key]} />
+          </TableCell>
+        ))}
+        {hasRowActions ? (
+          <TableCell className="text-right align-top">
+            <div className="flex justify-end gap-1">
+              {descriptor.rowActions.map((action) => {
+                const pending: PendingAction = {
+                  action,
+                  // The convention plus anything the row already answers,
+                  // applied here so no call site has to remember it and no
+                  // user retypes a visible cell.
+                  params: paramsFromRow(action, item),
+                  targetId: rowTarget(action, targetId, item),
+                };
+                return (
+                  <Button
+                    key={action.id}
+                    type="button"
+                    variant="ghost"
+                    size="sm"
+                    disabled={disabled || run.isPending}
+                    title={disabledReason ?? action.description ?? undefined}
+                    onClick={() => start(pending)}
+                  >
+                    {runningId === pendingKey(pending) ? (
+                      <Loader2 className="animate-spin" aria-hidden="true" />
+                    ) : null}
+                    {action.label}
+                    {takesParameters(withoutSupplied(action, paramsFromRow(action, item))) ? (
+                      <span aria-hidden="true">…</span>
+                    ) : null}
+                  </Button>
+                );
+              })}
+            </div>
+          </TableCell>
+        ) : null}
+      </TableRow>
+    );
+  }
 
   return (
     <div className={cn("space-y-3", className)}>
@@ -178,52 +236,47 @@ export function ResourceKindBrowser({
               </TableRow>
             </TableHeader>
             <TableBody>
-              {items.data.map((item) => (
-                <TableRow key={item.id}>
-                  {columns.map((column) => (
-                    <TableCell key={column.key} className="align-top">
-                      <ResourceCell column={column} value={item.fields[column.key]} />
-                    </TableCell>
-                  ))}
-                  {hasRowActions ? (
-                    <TableCell className="text-right align-top">
-                      <div className="flex justify-end gap-1">
-                        {descriptor.rowActions.map((action) => {
-                          const pending: PendingAction = {
-                            action,
-                            // The convention plus anything the row already
-                            // answers, applied here so no call site has to
-                            // remember it and no user retypes a visible cell.
-                            params: paramsFromRow(action, item),
-                            targetId: rowTarget(action, targetId, item),
-                          };
-                          return (
+              {groups === null
+                ? items.data.map(renderRow)
+                : groups.map((group) => {
+                    const shut = collapsed.has(group.value);
+                    return (
+                      <React.Fragment key={group.value}>
+                        {/* The same collapsible-group row the connectors
+                            screen uses, so a grouped table here reads as the
+                            same idea rather than as a second invention. */}
+                        <TableRow className="bg-muted/40 hover:bg-muted/40">
+                          <TableCell colSpan={columnCount} className="p-1">
                             <Button
-                              key={action.id}
                               type="button"
                               variant="ghost"
                               size="sm"
-                              disabled={disabled || run.isPending}
-                              title={disabledReason ?? action.description ?? undefined}
-                              onClick={() => start(pending)}
+                              className="w-full justify-start gap-2"
+                              aria-expanded={!shut}
+                              onClick={() =>
+                                setCollapsed((current) => {
+                                  const next = new Set(current);
+                                  if (shut) next.delete(group.value);
+                                  else next.add(group.value);
+                                  return next;
+                                })
+                              }
                             >
-                              {runningId === pendingKey(pending) ? (
-                                <Loader2 className="animate-spin" aria-hidden="true" />
-                              ) : null}
-                              {action.label}
-                              {takesParameters(
-                                withoutSupplied(action, paramsFromRow(action, item)),
-                              ) ? (
-                                <span aria-hidden="true">…</span>
-                              ) : null}
+                              <ChevronDown
+                                aria-hidden="true"
+                                className={cn("transition-transform", shut && "-rotate-90")}
+                              />
+                              <span className="font-semibold">{group.value}</span>
+                              <Badge variant="secondary" className="ml-auto">
+                                {group.items.length}
+                              </Badge>
                             </Button>
-                          );
-                        })}
-                      </div>
-                    </TableCell>
-                  ) : null}
-                </TableRow>
-              ))}
+                          </TableCell>
+                        </TableRow>
+                        {shut ? null : group.items.map(renderRow)}
+                      </React.Fragment>
+                    );
+                  })}
             </TableBody>
           </Table>
         </div>
@@ -342,6 +395,40 @@ function paramsFromRow(action: ConnectorAction, item: ResourceItem): Record<stri
     }
   }
   return supplied;
+}
+
+/** Rows under one heading. */
+type ResourceGroup = { value: string; items: ResourceItem[] };
+
+/**
+ * Rows gathered under the grouping column's value, or `null` for a flat table.
+ *
+ * `null` rather than "one group holding everything" so an ungrouped kind
+ * renders exactly the markup it rendered before grouping existed — no heading
+ * row, no chevron, nothing to collapse.
+ *
+ * Insertion-ordered: whatever order the backend sent the rows in is the order
+ * the groups appear in, which is how a connector that sorted its rows keeps
+ * control of how its table reads. A row with no value for the key is not
+ * dropped — it lands under a heading of its own, because a row that is
+ * invisible is worse than a row under an odd heading.
+ */
+function groupRows(
+  key: string | null | undefined,
+  items: ResourceItem[],
+): ResourceGroup[] | null {
+  if (key === null || key === undefined || key === "") return null;
+
+  const groups = new Map<string, ResourceItem[]>();
+  for (const item of items) {
+    const raw = item.fields[key];
+    const value =
+      typeof raw === "string" && raw.length > 0 ? raw : typeof raw === "number" ? String(raw) : "—";
+    const existing = groups.get(value);
+    if (existing === undefined) groups.set(value, [item]);
+    else existing.push(item);
+  }
+  return [...groups].map(([value, items]) => ({ value, items }));
 }
 
 /**

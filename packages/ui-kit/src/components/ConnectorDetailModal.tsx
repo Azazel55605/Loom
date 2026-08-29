@@ -29,6 +29,7 @@ import type {
   DashboardPlacement,
   PendingOperation,
 } from "@loom/ui-kit/lib/api";
+import { appliesToTarget } from "@loom/ui-kit/lib/api";
 import { connectorAvailability } from "@loom/ui-kit/lib/connector-availability";
 import { useApiClient, useConnectorStatusSocket } from "@loom/ui-kit/lib/api-context";
 import { useAuth } from "@loom/ui-kit/lib/auth-context";
@@ -183,6 +184,15 @@ export function ConnectorDetailModal({
     }, DIALOG_OPEN_SETTLE_MS);
   }, []);
 
+  // Only the kinds that mean something at this altitude. A container's modal
+  // must not offer "Images" — the daemon's image list is not a smaller thing
+  // when you are looking at one container, it is a different question — and
+  // the host's modal must not offer a kind that only exists per target. The
+  // connector declares which, so nothing here knows what any of them are.
+  const browsableKinds = (resourceKinds.data ?? []).filter((kind) =>
+    appliesToTarget(kind, placement.targetId),
+  );
+
   const boundActions = new Set(
     placement.widgetBindings.flatMap((binding) => "action" in binding ? [binding.action.actionId] : []),
   );
@@ -241,17 +251,17 @@ export function ConnectorDetailModal({
                   their buttons all come from the descriptors. A connector that
                   browses nothing renders no tab strip at all rather than an
                   empty one. */}
-              {(resourceKinds.data ?? []).length > 0 ? (
+              {browsableKinds.length > 0 ? (
                 <section className="space-y-3 border-t pt-5">
-                  <Tabs defaultValue={resourceKinds.data![0].kind}>
+                  <Tabs defaultValue={browsableKinds[0].kind}>
                     <TabsList>
-                      {resourceKinds.data!.map((kind) => (
+                      {browsableKinds.map((kind) => (
                         <TabsTrigger key={kind.kind} value={kind.kind}>
                           {kind.label}
                         </TabsTrigger>
                       ))}
                     </TabsList>
-                    {resourceKinds.data!.map((kind) => (
+                    {browsableKinds.map((kind) => (
                       <TabsContent key={kind.kind} value={kind.kind} className="pt-3">
                         <ResourceKindBrowser
                           instanceId={instance.id}

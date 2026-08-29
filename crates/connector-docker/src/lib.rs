@@ -18,6 +18,7 @@ mod config;
 mod connector;
 mod metrics;
 mod registry;
+mod resources;
 mod updates;
 
 pub use config::{
@@ -35,4 +36,9 @@ pub use connector::{
 };
 pub use metrics::{cpu_percent, format_uptime, health_for_state};
 pub use registry::{current_digest, http_registry, is_outdated, ImageReference, RegistryTransport};
+pub use resources::{
+    ACTION_CHECK_IMAGE_UPDATE, ACTION_CREATE_NETWORK, ACTION_CREATE_VOLUME, ACTION_DELETE_IMAGE,
+    ACTION_DELETE_NETWORK, ACTION_DELETE_VOLUME, ACTION_PULL_IMAGE, RESOURCE_KIND_IMAGES,
+    RESOURCE_KIND_NETWORKS, RESOURCE_KIND_VOLUMES,
+};
 pub use updates::{apply_update, check_container, recreate_body, UpdateReading};

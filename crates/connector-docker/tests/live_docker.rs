@@ -40,13 +40,17 @@ use bollard::query_parameters::{
 use bollard::Docker;
 use futures_util::StreamExt;
 use loom_connector_docker::{
-    DockerConnector, DockerConnectorConfig, ACTION_APPLY_UPDATE, ACTION_RESTART, ACTION_START,
-    ACTION_STOP, DATA_POINT_CPU_HISTORY, DATA_POINT_CPU_PERCENT, DATA_POINT_DISK_USAGE_BYTES,
-    DATA_POINT_DOCKER_VERSION, DATA_POINT_LOGS, DATA_POINT_MEMORY_USAGE_BYTES,
-    DATA_POINT_RUNNING_CONTAINERS, DATA_POINT_STATUS, DATA_POINT_STOPPED_CONTAINERS,
-    DATA_POINT_TOTAL_CONTAINERS, DATA_POINT_TOTAL_IMAGES, DATA_POINT_UPTIME, DEFAULT_DOCKER_HOST,
+    DockerConnector, DockerConnectorConfig, ACTION_APPLY_UPDATE, ACTION_CREATE_NETWORK,
+    ACTION_CREATE_VOLUME, ACTION_DELETE_IMAGE, ACTION_DELETE_NETWORK, ACTION_DELETE_VOLUME,
+    ACTION_PULL_IMAGE, ACTION_RESTART, ACTION_START, ACTION_STOP, DATA_POINT_CPU_HISTORY,
+    DATA_POINT_CPU_PERCENT, DATA_POINT_DISK_USAGE_BYTES, DATA_POINT_DOCKER_VERSION,
+    DATA_POINT_LOGS, DATA_POINT_MEMORY_USAGE_BYTES, DATA_POINT_RUNNING_CONTAINERS,
+    DATA_POINT_STATUS, DATA_POINT_STOPPED_CONTAINERS, DATA_POINT_TOTAL_CONTAINERS,
+    DATA_POINT_TOTAL_IMAGES, DATA_POINT_UPTIME, DEFAULT_DOCKER_HOST, RESOURCE_KIND_IMAGES,
+    RESOURCE_KIND_NETWORKS, RESOURCE_KIND_VOLUMES,
 };
 use loom_core::connector::{Connector, ConnectorError, HealthState};
+use serde_json::json;
 
 /// A tiny image with a shell. Pulled rather than assumed present, because a
 /// fresh CI runner has no images at all.
@@ -107,12 +111,20 @@ fn test_docker_host() -> String {
 struct TestContainer {
     docker: Docker,
     name: String,
+    /// Named volumes this container was created with.
+    ///
+    /// A volume outlives the container that mounted it, so removing the
+    /// container is not enough: without this, every run of a test that mounts
+    /// one leaves a volume behind for good, and a machine that runs the suite a
+    /// few dozen times accumulates a few dozen of them.
+    volumes: Vec<String>,
 }
 
 impl Drop for TestContainer {
     fn drop(&mut self) {
         let docker = self.docker.clone();
         let name = self.name.clone();
+        let volumes = std::mem::take(&mut self.volumes);
         // `Drop` cannot await. A detached task would not be polled if the
         // runtime shuts down first, so this blocks on a throwaway runtime on a
         // throwaway thread — slow, and correct even when the test panicked.
@@ -126,6 +138,20 @@ impl Drop for TestContainer {
             runtime.block_on(async {
                 let options = RemoveContainerOptionsBuilder::new().force(true).build();
                 let _ = docker.remove_container(&name, Some(options)).await;
+                // After the container, never before: Docker refuses to remove a
+                // volume something is still mounting.
+                for volume in volumes {
+                    let _ = docker
+                        .remove_volume(
+                            &volume,
+                            Some(
+                                bollard::query_parameters::RemoveVolumeOptionsBuilder::new()
+                                    .force(true)
+                                    .build(),
+                            ),
+                        )
+                        .await;
+                }
             });
         })
         .join();
@@ -239,6 +265,7 @@ async fn start_test_container(docker: &Docker, suffix: &str) -> TestContainer {
     let guard = TestContainer {
         docker: docker.clone(),
         name: name.clone(),
+        volumes: Vec::new(),
     };
     docker
         .start_container(&name, None)
@@ -679,6 +706,7 @@ async fn applying_an_update_recreates_the_container_with_its_configuration() {
     let guard = TestContainer {
         docker: docker.clone(),
         name: name.clone(),
+        volumes: vec![volume_name.clone()],
     };
     docker
         .start_container(&name, None)
@@ -824,4 +852,389 @@ async fn a_failed_pull_leaves_the_container_running() {
         "the container should never have been touched",
     )
     .await;
+}
+
+/* ------------------------------------------------------------------ */
+/* Host inventory: images, volumes, networks                           */
+/* ------------------------------------------------------------------ */
+
+/// A volume and a network that remove themselves when the test ends.
+///
+/// The same reasoning as [`TestContainer`]: an assertion failure unwinds, and a
+/// test that leaks a volume on every failure leaves a dirtier machine every
+/// time somebody debugs it.
+struct TestInventory {
+    docker: Docker,
+    volume: String,
+    network: String,
+}
+
+impl Drop for TestInventory {
+    fn drop(&mut self) {
+        let docker = self.docker.clone();
+        let volume = self.volume.clone();
+        let network = self.network.clone();
+        let _ = std::thread::spawn(move || {
+            let Ok(runtime) = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+            else {
+                return;
+            };
+            runtime.block_on(async {
+                let _ = docker
+                    .remove_volume(
+                        &volume,
+                        Some(
+                            bollard::query_parameters::RemoveVolumeOptionsBuilder::new()
+                                .force(true)
+                                .build(),
+                        ),
+                    )
+                    .await;
+                let _ = docker.remove_network(&network).await;
+            });
+        })
+        .join();
+    }
+}
+
+/// A host-mode connector, a volume, a network, and a container using both.
+///
+/// The volume and network are created through the connector's own *kind
+/// actions* rather than through bollard directly. That is deliberate: it means
+/// one setup proves `createVolume` and `createNetwork` work against a real
+/// daemon, and the tables that follow are reading things this code path
+/// created.
+async fn inventory_fixture(
+    docker: &Docker,
+    suffix: &str,
+) -> (DockerConnector, TestInventory, TestContainer) {
+    let unique = format!("loom-connector-docker-test-{}-{suffix}", std::process::id());
+    let volume = format!("{unique}-vol");
+    let network = format!("{unique}-net");
+
+    // Leftovers from an interrupted earlier run.
+    let _ = docker
+        .remove_container(
+            &unique,
+            Some(RemoveContainerOptionsBuilder::new().force(true).build()),
+        )
+        .await;
+    let _ = docker
+        .remove_volume(
+            &volume,
+            Some(
+                bollard::query_parameters::RemoveVolumeOptionsBuilder::new()
+                    .force(true)
+                    .build(),
+            ),
+        )
+        .await;
+    let _ = docker.remove_network(&network).await;
+
+    let connector = DockerConnector::connect(config_for(&unique))
+        .await
+        .expect("connecting to the local daemon must succeed");
+
+    let created = connector
+        .execute_action(ACTION_CREATE_VOLUME, None, json!({ "name": volume }))
+        .await
+        .expect("creating a volume must reach the daemon");
+    assert!(created.success, "createVolume said: {}", created.message);
+    let created = connector
+        .execute_action(ACTION_CREATE_NETWORK, None, json!({ "name": network }))
+        .await
+        .expect("creating a network must reach the daemon");
+    assert!(created.success, "createNetwork said: {}", created.message);
+
+    let inventory = TestInventory {
+        docker: docker.clone(),
+        volume: volume.clone(),
+        network: network.clone(),
+    };
+
+    ensure_test_image(docker).await;
+    docker
+        .create_container(
+            Some(CreateContainerOptionsBuilder::new().name(&unique).build()),
+            ContainerCreateBody {
+                image: Some(format!("{TEST_IMAGE}:{TEST_TAG}")),
+                cmd: Some(vec!["sh".into(), "-c".into(), "sleep 3600".into()]),
+                host_config: Some(bollard::models::HostConfig {
+                    binds: Some(vec![format!("{volume}:/data")]),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("creating the test container must succeed");
+    let container = TestContainer {
+        docker: docker.clone(),
+        name: unique.clone(),
+        volumes: Vec::new(),
+    };
+    docker
+        .connect_network(
+            &network,
+            bollard::models::NetworkConnectRequest {
+                container: unique.clone(),
+                endpoint_config: None,
+            },
+        )
+        .await
+        .expect("attaching the test container to its network must succeed");
+    docker
+        .start_container(
+            &unique,
+            None::<bollard::query_parameters::StartContainerOptions>,
+        )
+        .await
+        .expect("starting the test container must succeed");
+
+    (connector, inventory, container)
+}
+
+/// Every column the descriptor declares is present on every row.
+///
+/// A missing key is a legal empty cell by the contract, so this is not checking
+/// the contract — it is checking that these three connectors' rows actually
+/// fill the columns they promised, which is the thing a table renderer's user
+/// notices.
+fn assert_rows_match_columns(
+    kind: &loom_core::connector::ResourceKindDescriptor,
+    rows: &[loom_core::connector::ResourceItem],
+) {
+    for row in rows {
+        assert!(!row.id.is_empty(), "{}: a row has no id", kind.kind);
+        for column in &kind.columns {
+            assert!(
+                row.fields.contains_key(&column.key),
+                "{}: row {} has no `{}`",
+                kind.kind,
+                row.id,
+                column.key
+            );
+        }
+    }
+}
+
+fn kind_named<'a>(
+    kinds: &'a [loom_core::connector::ResourceKindDescriptor],
+    name: &str,
+) -> &'a loom_core::connector::ResourceKindDescriptor {
+    kinds
+        .iter()
+        .find(|kind| kind.kind == name)
+        .unwrap_or_else(|| panic!("the connector must declare a `{name}` kind"))
+}
+
+#[tokio::test]
+async fn the_host_inventory_tables_describe_what_the_daemon_actually_holds() {
+    let test_name = "the_host_inventory_tables_describe_what_the_daemon_actually_holds";
+    let Some(docker) = docker_or_skip(test_name).await else {
+        return;
+    };
+    let (connector, inventory, container) = inventory_fixture(&docker, "inventory").await;
+
+    let kinds = connector.resource_kinds();
+
+    // --- Images -----------------------------------------------------
+    let images = kind_named(&kinds, RESOURCE_KIND_IMAGES);
+    assert_eq!(images.group_by_key.as_deref(), Some("repository"));
+    let rows = connector
+        .list_resource_items(RESOURCE_KIND_IMAGES, None)
+        .await
+        .expect("browsing images must reach the daemon");
+    assert_rows_match_columns(images, &rows);
+    let test_row = rows
+        .iter()
+        .find(|row| row.id == format!("{TEST_IMAGE}:{TEST_TAG}"))
+        .expect("the image this test pulled must be listed");
+    assert_eq!(test_row.fields["repository"], json!(TEST_IMAGE));
+    assert_eq!(test_row.fields["tag"], json!(TEST_TAG));
+    assert!(
+        test_row.fields["size"].as_i64().unwrap_or(0) > 0,
+        "an image with no size is not a real reading"
+    );
+    // Cross-referencing: the container this test started runs that image.
+    let used_by = test_row.fields["usedBy"].as_str().unwrap_or_default();
+    assert!(
+        used_by.split(", ").any(|name| name == container.name),
+        "images.usedBy was {used_by:?}, which does not name {}",
+        container.name
+    );
+    // Rows arrive grouped: every row of one repository is contiguous, so a
+    // client can build its sections without re-sorting.
+    let repositories: Vec<&str> = rows
+        .iter()
+        .map(|row| row.fields["repository"].as_str().unwrap_or_default())
+        .collect();
+    let mut seen: Vec<&str> = Vec::new();
+    for repository in &repositories {
+        if seen.last() != Some(repository) {
+            assert!(
+                !seen.contains(repository),
+                "image rows for {repository} are not contiguous, so a client cannot group them \
+                 without re-sorting"
+            );
+            seen.push(repository);
+        }
+    }
+    // Untagged images come last, after every repository with a name.
+    if let Some(first) = repositories.iter().position(|value| *value == "<none>") {
+        assert!(
+            repositories[first..].iter().all(|value| *value == "<none>"),
+            "untagged images should sort after every named repository"
+        );
+    }
+
+    // The kind action, against an image that is already local, so this asserts
+    // the pull path without depending on the registry being reachable.
+    let pulled = connector
+        .execute_action(
+            ACTION_PULL_IMAGE,
+            None,
+            json!({ "imageRef": format!("{TEST_IMAGE}:{TEST_TAG}") }),
+        )
+        .await
+        .expect("pulling must reach the daemon");
+    assert!(pulled.success, "pullImage said: {}", pulled.message);
+
+    // --- Volumes ----------------------------------------------------
+    let volumes = kind_named(&kinds, RESOURCE_KIND_VOLUMES);
+    let rows = connector
+        .list_resource_items(RESOURCE_KIND_VOLUMES, None)
+        .await
+        .expect("browsing volumes must reach the daemon");
+    assert_rows_match_columns(volumes, &rows);
+    let row = rows
+        .iter()
+        .find(|row| row.id == inventory.volume)
+        .expect("the volume this test created must be listed");
+    assert_eq!(row.fields["name"], json!(inventory.volume));
+    assert_eq!(row.fields["driver"], json!("local"));
+    assert!(!row.fields["mountpoint"]
+        .as_str()
+        .unwrap_or_default()
+        .is_empty());
+    assert_eq!(row.fields["usedBy"], json!(container.name));
+
+    // --- Networks ---------------------------------------------------
+    let networks = kind_named(&kinds, RESOURCE_KIND_NETWORKS);
+    let rows = connector
+        .list_resource_items(RESOURCE_KIND_NETWORKS, None)
+        .await
+        .expect("browsing networks must reach the daemon");
+    assert_rows_match_columns(networks, &rows);
+    let row = rows
+        .iter()
+        .find(|row| row.fields["name"] == json!(inventory.network))
+        .expect("the network this test created must be listed");
+    assert_eq!(row.fields["driver"], json!("bridge"));
+    assert_eq!(row.fields["scope"], json!("local"));
+    // Best-effort by contract, but a freshly created bridge network does get a
+    // subnet, and a silently empty column would be indistinguishable from a
+    // parsing mistake.
+    assert!(
+        !row.fields["subnet"].as_str().unwrap_or_default().is_empty(),
+        "a new bridge network should report the subnet Docker assigned it"
+    );
+    assert_eq!(row.fields["usedBy"], json!(container.name));
+}
+
+#[tokio::test]
+async fn deleting_something_in_use_returns_dockers_own_refusal() {
+    let test_name = "deleting_something_in_use_returns_dockers_own_refusal";
+    let Some(docker) = docker_or_skip(test_name).await else {
+        return;
+    };
+    let (connector, inventory, _container) = inventory_fixture(&docker, "in-use").await;
+
+    // A volume a running container has mounted.
+    let refused = connector
+        .execute_action(
+            ACTION_DELETE_VOLUME,
+            None,
+            json!({ "resourceId": inventory.volume }),
+        )
+        .await
+        .expect("the daemon answered, so this is not a transport failure");
+    assert!(
+        !refused.success,
+        "removing an in-use volume must not report success"
+    );
+    assert!(
+        refused.message.contains("in use"),
+        "the refusal should be Docker's own words, was: {}",
+        refused.message
+    );
+
+    // A network a running container is attached to.
+    let refused = connector
+        .execute_action(
+            ACTION_DELETE_NETWORK,
+            None,
+            json!({ "resourceId": inventory.network }),
+        )
+        .await
+        .expect("the daemon answered, so this is not a transport failure");
+    assert!(
+        !refused.success,
+        "removing an in-use network must not report success"
+    );
+    assert!(
+        refused.message.contains("has active endpoints"),
+        "the refusal should be Docker's own words, was: {}",
+        refused.message
+    );
+
+    // An image a container was created from.
+    let refused = connector
+        .execute_action(
+            ACTION_DELETE_IMAGE,
+            None,
+            json!({ "resourceId": format!("{TEST_IMAGE}:{TEST_TAG}") }),
+        )
+        .await
+        .expect("the daemon answered, so this is not a transport failure");
+    assert!(
+        !refused.success,
+        "removing an in-use image must not report success"
+    );
+    assert!(
+        refused.message.contains("is using its referenced image"),
+        "the refusal should be Docker's own words, was: {}",
+        refused.message
+    );
+}
+
+#[tokio::test]
+async fn a_built_in_network_cannot_be_removed_and_says_so() {
+    let test_name = "a_built_in_network_cannot_be_removed_and_says_so";
+    let Some(_docker) = docker_or_skip(test_name).await else {
+        return;
+    };
+    let connector = DockerConnector::connect(config_for("bridge"))
+        .await
+        .expect("connecting to the local daemon must succeed");
+
+    // The delete button is deliberately offered for every row, including the
+    // three networks Docker will never remove. This is the case that proves the
+    // refusal is legible rather than a bare 403.
+    let refused = connector
+        .execute_action(
+            ACTION_DELETE_NETWORK,
+            None,
+            json!({ "resourceId": "bridge" }),
+        )
+        .await
+        .expect("the daemon answered, so this is not a transport failure");
+    assert!(!refused.success);
+    assert!(
+        refused.message.contains("pre-defined network"),
+        "the refusal should be Docker's own words, was: {}",
+        refused.message
+    );
 }

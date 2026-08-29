@@ -22,9 +22,9 @@ use axum::response::{IntoResponse, Response};
 use axum::Json;
 use chrono::Utc;
 use loom_core::connector::{
-    ActionResult, ColumnDescriptor, ColumnValueType, Connector, ConnectorAction, ConnectorError,
-    ConnectorMetadata, ConnectorStatus, DataPointDescriptor, DisplayField, ResourceItem,
-    ResourceKindDescriptor, SetupGuide, WidgetLayout,
+    ActionResult, ApplicableTarget, ColumnDescriptor, ColumnValueType, Connector, ConnectorAction,
+    ConnectorError, ConnectorMetadata, ConnectorStatus, DataPointDescriptor, DisplayField,
+    ResourceItem, ResourceKindDescriptor, SetupGuide, WidgetLayout,
 };
 use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::Value;
@@ -542,7 +542,11 @@ fn platform_resource_kinds(connector: &dyn Connector) -> Vec<ResourceKindDescrip
             .find(|action| action.id == APPLY_UPDATE_ACTION)
             .into_iter()
             .collect(),
-    )]
+    )
+    // "What did we update?" is asked of a host, and its rows already say which
+    // target each one was about. A container's own view would show the same
+    // table filtered to one row, which is a worse answer than not offering it.
+    .applicable_to(ApplicableTarget::HostOnly)]
 }
 
 /// One `applyUpdate` entry, shaped as a browsable row.

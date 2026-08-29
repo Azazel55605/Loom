@@ -1036,6 +1036,33 @@ impl ResourceItem {
     }
 }
 
+/// Where a browsable kind makes sense.
+///
+/// A connector instance is looked at in two places: at the host, where it
+/// stands for the whole service, and at one [`SubTarget`], where it stands for
+/// a single container, share, or zone. Most kinds only answer a question in one
+/// of the two. Docker's images are a property of the daemon and reading them
+/// "for one container" is a category error; a future per-container kind —
+/// snapshots, mounted paths — is the same error the other way round.
+///
+/// Declared rather than inferred. The alternative is for every client to guess
+/// from whether a listing came back empty, which cannot distinguish "this does
+/// not apply here" from "there are none right now" and so shows an empty tab
+/// that will never fill. Defaults to [`Any`](ApplicableTarget::Any), so a kind
+/// that says nothing keeps the behaviour every existing kind already had.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum ApplicableTarget {
+    /// Only when the instance as a whole is being viewed.
+    HostOnly,
+    /// Only when one sub-target is being viewed.
+    TargetOnly,
+    /// Both. The default, and the right answer for a kind whose rows mean the
+    /// same thing at either altitude.
+    #[default]
+    Any,
+}
+
 /// One browsable collection of things a connector's service holds.
 ///
 /// The unit a resource browser is built from: a table of [`ResourceItem`] rows
@@ -1084,6 +1111,23 @@ pub struct ResourceKindDescriptor {
     /// "prune unused", "pull updates". Invoked exactly like any other action,
     /// with no `resourceId`.
     pub kind_actions: Vec<ConnectorAction>,
+    /// A [`ColumnDescriptor::key`] whose value rows should be gathered under,
+    /// when this table reads better grouped than flat.
+    ///
+    /// A hint, not a contract: the rows are the same rows either way, and a
+    /// client that ignores it renders a correct flat table. Docker's image list
+    /// is the case that earned it — twenty rows of which three are `postgres`
+    /// and four are `nginx` is a list you have to read, and the same twenty
+    /// under seven repository headings is a list you can scan.
+    ///
+    /// A key naming no column is ignored rather than an error, the same
+    /// tolerance [`ResourceItem::fields`] has.
+    #[serde(default)]
+    pub group_by_key: Option<String>,
+    /// Whether this kind is worth showing at the host, at one sub-target, or
+    /// both.
+    #[serde(default)]
+    pub applicable_target: ApplicableTarget,
 }
 
 impl ResourceKindDescriptor {
@@ -1099,6 +1143,8 @@ impl ResourceKindDescriptor {
             columns,
             row_actions: Vec::new(),
             kind_actions: Vec::new(),
+            group_by_key: None,
+            applicable_target: ApplicableTarget::Any,
         }
     }
 
@@ -1113,6 +1159,20 @@ impl ResourceKindDescriptor {
     #[must_use]
     pub fn with_kind_actions(mut self, actions: Vec<ConnectorAction>) -> Self {
         self.kind_actions = actions;
+        self
+    }
+
+    /// Declares the column rows should be grouped under.
+    #[must_use]
+    pub fn grouped_by(mut self, key: impl Into<String>) -> Self {
+        self.group_by_key = Some(key.into());
+        self
+    }
+
+    /// Declares where this kind is worth showing.
+    #[must_use]
+    pub fn applicable_to(mut self, target: ApplicableTarget) -> Self {
+        self.applicable_target = target;
         self
     }
 }
@@ -1683,7 +1743,9 @@ mod tests {
             ],
         )
         .with_row_actions(vec![ConnectorAction::simple("remove", "Remove")])
-        .with_kind_actions(vec![ConnectorAction::simple("prune", "Prune")]);
+        .with_kind_actions(vec![ConnectorAction::simple("prune", "Prune")])
+        .grouped_by("repository")
+        .applicable_to(ApplicableTarget::HostOnly);
 
         let value = serde_json::to_value(&kind).unwrap();
         assert_eq!(value["kind"], "images");
@@ -1691,6 +1753,8 @@ mod tests {
         assert_eq!(value["columns"][2]["valueType"], "timestamp");
         assert_eq!(value["rowActions"][0]["id"], "remove");
         assert_eq!(value["kindActions"][0]["id"], "prune");
+        assert_eq!(value["groupByKey"], "repository");
+        assert_eq!(value["applicableTarget"], "hostOnly");
         assert_eq!(
             serde_json::from_value::<ResourceKindDescriptor>(value).unwrap(),
             kind
@@ -1711,6 +1775,26 @@ mod tests {
         assert_eq!(
             serde_json::from_value::<ResourceItem>(serde_json::to_value(&item).unwrap()).unwrap(),
             item
+        );
+    }
+
+    /// The two hint fields are additive: a descriptor written before they
+    /// existed still deserializes, and keeps the behaviour it had.
+    #[test]
+    fn a_descriptor_without_the_hints_defaults_to_ungrouped_and_anywhere() {
+        let value = json!({
+            "kind": "widgets",
+            "label": "Widgets",
+            "columns": [],
+            "rowActions": [],
+            "kindActions": []
+        });
+        let kind: ResourceKindDescriptor = serde_json::from_value(value).unwrap();
+        assert_eq!(kind.group_by_key, None);
+        assert_eq!(kind.applicable_target, ApplicableTarget::Any);
+        assert_eq!(
+            ResourceKindDescriptor::new("widgets", "Widgets", Vec::new()),
+            kind
         );
     }
 

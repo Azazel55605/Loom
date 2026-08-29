@@ -1246,6 +1246,10 @@ Two browsable tables, through the ordinary
 | `updates` | The connector | Every target with a waiting update, from its last check | `applyUpdate` with the row's `latestRef` | `updateAll` — applies each in turn, sequentially |
 | `recentlyUpdated` | **The platform** | Successful `applyUpdate` entries from the action log | `applyUpdate` with the row's `previousRef` — this is the rollback | — |
 
+Both are `applicableTarget: "hostOnly"`. "What on this host is behind?" and
+"what did we update?" are questions about the host; a container's own view of
+either would be the same table filtered to one row.
+
 `recentlyUpdated` is the one kind Loom itself provides rather than the
 connector, and it is offered for **any** instance whose connector reports
 `supportsUpdateChecking`. Its rows are the action log's, and no connector can
@@ -1280,6 +1284,58 @@ yet support registry credentials.
 
 That is a real limitation, stated plainly rather than presented as "no update
 available". Fixing it is a decision about credential storage, not about HTTP.
+
+## Docker host inventory
+
+Three further browsable tables, all `applicableTarget: "hostOnly"` — images,
+volumes and networks belong to the daemon, and "the images of one container" is
+not a smaller version of that question but a different one with no answer.
+
+| Kind | `groupByKey` | Columns | Row actions | Kind action |
+| --- | --- | --- | --- | --- |
+| `images` | `repository` | `repository`, `tag`, `imageId`, `size` (bytes), `created`, `usedBy` | `deleteImage`, `checkImageUpdate` | `pullImage` (`{ "imageRef": string }`) |
+| `volumes` | — | `name`, `driver`, `mountpoint`, `created`, `usedBy` | `deleteVolume` | `createVolume` (`{ "name": string, "driver"?: string }`, default `local`) |
+| `networks` | — | `name`, `driver`, `scope`, `subnet`, `created`, `usedBy` | `deleteNetwork` | `createNetwork` (`{ "name": string, "driver"?: string }`, default `bridge`) |
+
+Row ids are what the corresponding action is given as `resourceId`: an image's
+`repository:tag` (or its content id, for an untagged image), a volume's name, a
+network's **id** — Docker accepts either a network's name or its id, and only
+the id is guaranteed unambiguous.
+
+Image rows are one per **tag**, so an image carrying three tags is three rows —
+a tag is what a person pulls, checks and deletes; the shared image behind them
+is what the repeated `imageId` and `size` say. An image with no tag gets one row
+keyed by its content id, and those sort **after** every named repository rather
+than into their alphabetical place: on a real host they are the largest group
+and the least interesting, and leading with three hundred `<none>` rows buries
+every image somebody could name.
+
+`usedBy` names the containers using that image, volume, or network, from one
+container listing read per browse rather than one per row. Images are matched by
+resolved image **id**, not by the reference a container was created from: a
+container created from `app:latest` goes on naming `app:latest` after the tag
+has moved, which would attribute it to whichever image holds that tag now rather
+than to the one it is running.
+
+`checkImageUpdate` reuses the same anonymous registry digest check the
+[update management](#update-management) feature does, and returns its finding as
+the action's `message` — "Update available", "Up to date", or the registry's
+refusal. It downloads nothing.
+
+**Volume size is deliberately not a column.** Docker only knows it from the
+`/system/df` endpoint, which walks every volume's directory tree and can take
+tens of seconds on a host with a large database volume — too expensive to pay on
+every browse. If it turns out to matter, the honest way to add it is from the
+connector's already-cached reading of that endpoint, with its age shown, rather
+than by making this listing slow.
+
+**Delete is offered on every row, including ones Docker will refuse** — a volume
+a container has mounted, and the built-in `bridge`, `host` and `none` networks.
+Docker's refusal is passed through verbatim as the action's `message` with
+`success: false`. This is a deliberate simplification: hiding the button would
+mean re-implementing the daemon's removability rules here, from the outside,
+where they would be wrong quietly and after a Docker upgrade, rather than wrong
+loudly at the moment someone tried.
 
 ## Action log
 
@@ -1385,7 +1441,9 @@ A connector publishes zero or more **resource kinds**. Each kind names its
 columns, its per-row actions, and its whole-kind actions. Nothing here is
 Docker-specific: a client renders a table from the descriptors without knowing
 what the connector is. See
-[`adr/0021-connector-resource-browser.md`](adr/0021-connector-resource-browser.md).
+[`adr/0021-connector-resource-browser.md`](adr/0021-connector-resource-browser.md)
+and, for the two presentation hints added once a second connector needed them,
+[`adr/0024-resource-kind-presentation-hints.md`](adr/0024-resource-kind-presentation-hints.md).
 
 ### Column value types
 
@@ -1469,7 +1527,9 @@ Loom, so this is the same read-only tier as sub-targets.
         "paramsSchema": {},
         "isDisruptive": false
       }
-    ]
+    ],
+    "groupByKey": null,
+    "applicableTarget": "any"
   }
 ]
 ```
@@ -1481,6 +1541,30 @@ Loom, so this is the same read-only tier as sub-targets.
 | `columns` | array | Column descriptors, in display order. | Always present; may be empty. |
 | `rowActions` | array | `ConnectorAction`s taking a `resourceId`. | Always present; **may be empty**. |
 | `kindActions` | array | `ConnectorAction`s addressing the kind as a whole. | Always present; **may be empty**. |
+| `groupByKey` | string | A `columns[].key` whose value rows should be gathered under. | **`null`** for a flat table. |
+| `applicableTarget` | string | Where this kind means anything: `hostOnly`, `targetOnly`, or `any`. | Always present; defaults to `any`. |
+
+#### `groupByKey`
+
+A **hint, not a contract**. The rows are the same rows either way, and a client
+that ignores it renders a correct flat table. Rows arrive already ordered by the
+grouping key, so a client builds contiguous sections without re-sorting; a row
+with no value for the key belongs to a group of its own rather than being
+dropped, and a key naming no column is ignored the way an unknown `fields` key
+is.
+
+#### `applicableTarget`
+
+Whether the kind belongs in a view of the instance as a whole (`hostOnly`), of
+one sub-target (`targetOnly`), or both (`any`, the default). Declared rather
+than inferred: an empty listing cannot distinguish "this does not apply here"
+from "there are none right now", which is the difference between a tab that will
+fill tomorrow and one that never will. A client that does not recognise the
+value should *show* the kind — a newer backend inventing a fourth case must not
+make a table vanish from an older client with no explanation.
+
+Both fields are additive. A descriptor written before they existed keeps exactly
+the behaviour it had.
 
 | Status | Meaning |
 | --- | --- |

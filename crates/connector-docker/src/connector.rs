@@ -15,12 +15,12 @@ use bollard::Docker;
 use chrono::{DateTime, Utc};
 use futures_util::{stream, StreamExt};
 use loom_core::connector::{
-    details::set_detail, ActionResult, ActionWidgetType, CapabilityRequirement, CapabilityStatus,
-    ChartType, ColumnDescriptor, ColumnValueType, ConnectionTestResult, Connector, ConnectorAction,
-    ConnectorError, ConnectorMetadata, ConnectorStatus, DataPointDescriptor, DataPointValueType,
-    DisplayField, DisplayWidgetType, HealthState, NetworkTarget, ResourceItem,
-    ResourceKindDescriptor, SetupGuide, SetupGuideToggle, SetupGuideVariant, SubTarget,
-    UpdateCheckResult, WidgetBinding, WidgetLayout,
+    details::set_detail, ActionResult, ActionWidgetType, ApplicableTarget, CapabilityRequirement,
+    CapabilityStatus, ChartType, ColumnDescriptor, ColumnValueType, ConnectionTestResult,
+    Connector, ConnectorAction, ConnectorError, ConnectorMetadata, ConnectorStatus,
+    DataPointDescriptor, DataPointValueType, DisplayField, DisplayWidgetType, HealthState,
+    NetworkTarget, ResourceItem, ResourceKindDescriptor, SetupGuide, SetupGuideToggle,
+    SetupGuideVariant, SubTarget, UpdateCheckResult, WidgetBinding, WidgetLayout,
 };
 use serde::Serialize;
 use serde_json::{json, Map, Value};
@@ -1069,6 +1069,19 @@ impl Connector for DockerConnector {
             return self.update_all().await;
         }
 
+        // The host inventory's actions are host-scoped too: an image, a volume
+        // and a network belong to the daemon, not to any one container, so they
+        // are routed before `target_id` is required below.
+        if crate::resources::owns_action(action_id) {
+            return crate::resources::execute(
+                &self.control,
+                self.registry.as_deref(),
+                action_id,
+                &params,
+            )
+            .await;
+        }
+
         let Some(target_id) = target_id else {
             return Err(ConnectorError::invalid_action(action_id));
         };
@@ -1144,7 +1157,7 @@ impl Connector for DockerConnector {
     /// fills it from the row it is acting on. The kind action applies every
     /// waiting update in turn.
     fn resource_kinds(&self) -> Vec<ResourceKindDescriptor> {
-        vec![ResourceKindDescriptor::new(
+        let mut kinds = vec![ResourceKindDescriptor::new(
             RESOURCE_KIND_UPDATES,
             "Updates available",
             vec![
@@ -1173,7 +1186,14 @@ impl Connector for DockerConnector {
             params_schema: json!({ "type": "object", "additionalProperties": false }),
             is_disruptive: true,
             snapshot_data_point_ids: Vec::new(),
-        }])]
+        }])
+        // Declared rather than left to be inferred from the fact that the rows
+        // happen to be containers: "what on this host is behind?" has no
+        // per-container version, and a client can now leave the tab out of a
+        // container's own view instead of showing one that will never fill.
+        .applicable_to(ApplicableTarget::HostOnly)];
+        kinds.extend(crate::resources::resource_kinds());
+        kinds
     }
 
     async fn list_resource_items(
@@ -1181,6 +1201,24 @@ impl Connector for DockerConnector {
         kind: &str,
         _target_id: Option<&str>,
     ) -> Result<Vec<ResourceItem>, ConnectorError> {
+        // The three inventory tables all want the same container listing for
+        // their "used by" column, so it is read once here and handed down.
+        match kind {
+            crate::resources::RESOURCE_KIND_IMAGES => {
+                let usage = crate::resources::usage(&self.docker).await;
+                return crate::resources::list_images(&self.docker, &usage).await;
+            }
+            crate::resources::RESOURCE_KIND_VOLUMES => {
+                let usage = crate::resources::usage(&self.docker).await;
+                return crate::resources::list_volumes(&self.docker, &usage).await;
+            }
+            crate::resources::RESOURCE_KIND_NETWORKS => {
+                let usage = crate::resources::usage(&self.docker).await;
+                return crate::resources::list_networks(&self.docker, &usage).await;
+            }
+            _ => {}
+        }
+
         if kind != RESOURCE_KIND_UPDATES {
             return Ok(Vec::new());
         }
@@ -2034,9 +2072,26 @@ mod tests {
         let connector = detached("tcp://docker-proxy.example:2375", &["web", "db"]);
 
         let kinds = connector.resource_kinds();
-        assert_eq!(kinds.len(), 1);
+        // The updates table plus the three host-inventory tables.
+        assert_eq!(
+            kinds
+                .iter()
+                .map(|kind| kind.kind.as_str())
+                .collect::<Vec<_>>(),
+            vec![
+                RESOURCE_KIND_UPDATES,
+                crate::resources::RESOURCE_KIND_IMAGES,
+                crate::resources::RESOURCE_KIND_VOLUMES,
+                crate::resources::RESOURCE_KIND_NETWORKS,
+            ]
+        );
         let updates = &kinds[0];
         assert_eq!(updates.kind, RESOURCE_KIND_UPDATES);
+        // Host-scoped, declared rather than inferred: a container's own modal
+        // must not offer a table that can only ever be about the whole host.
+        assert!(kinds
+            .iter()
+            .all(|kind| kind.applicable_target == ApplicableTarget::HostOnly));
         assert_eq!(
             updates
                 .columns
@@ -2102,7 +2157,7 @@ mod tests {
         // A kind this connector does not declare is empty rather than an error,
         // per the trait's contract.
         assert!(connector
-            .list_resource_items("volumes", None)
+            .list_resource_items("somethingThisConnectorHasNever", None)
             .await
             .expect("an unknown kind is not a failure")
             .is_empty());
