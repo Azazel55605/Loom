@@ -31,19 +31,20 @@
 //! be wrong quietly, whereas passing the refusal through is wrong loudly and
 //! only at the moment someone actually tried.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 
 use bollard::models::{ContainerSummary, NetworkCreateRequest, VolumeCreateRequest};
 use bollard::query_parameters::{
     CreateImageOptionsBuilder, ListContainersOptionsBuilder, ListImagesOptionsBuilder,
-    ListNetworksOptions, ListVolumesOptions, RemoveImageOptionsBuilder, RemoveVolumeOptions,
+    ListNetworksOptions, ListVolumesOptions, PruneImagesOptionsBuilder, RemoveImageOptionsBuilder,
+    RemoveVolumeOptions,
 };
 use bollard::Docker;
 use chrono::DateTime;
 use futures_util::StreamExt;
 use loom_core::connector::{
     ActionResult, ApplicableTarget, ColumnDescriptor, ColumnValueType, ConnectorAction,
-    ConnectorError, ResourceItem, ResourceKindDescriptor,
+    ConnectorError, ResourceItem, ResourceKindDescriptor, StatusTone, StatusValue,
 };
 use serde_json::{json, Value};
 
@@ -62,6 +63,8 @@ pub const ACTION_DELETE_IMAGE: &str = "deleteImage";
 pub const ACTION_CHECK_IMAGE_UPDATE: &str = "checkImageUpdate";
 /// Pulls a reference the user names.
 pub const ACTION_PULL_IMAGE: &str = "pullImage";
+/// Removes every image no container is using.
+pub const ACTION_PRUNE_IMAGES: &str = "pruneImages";
 /// Removes one volume.
 pub const ACTION_DELETE_VOLUME: &str = "deleteVolume";
 /// Creates one volume.
@@ -81,6 +84,19 @@ const UNTAGGED: &str = "<none>";
 /// The one `MountPoint.Type` the volume table lists. bollard types this field
 /// as a plain string rather than an enum, so the value is spelled out here.
 const MOUNT_TYPE_VOLUME: &str = "volume";
+
+/// Group-level fields the images table attaches to every row of a group.
+///
+/// Both are the *group's* answer repeated on each of its rows, which is what
+/// `group_summary` expects: the client reads them from any row rather than
+/// deriving them, because neither can be derived correctly from the rows alone.
+const GROUP_USAGE_FIELD: &str = "groupUsage";
+const GROUP_SIZE_FIELD: &str = "groupSize";
+
+/// Scratch field carrying an image's content id while group totals are being
+/// computed, removed before the rows are returned. Not a column: what a reader
+/// wants is the short id, which `imageId` already shows.
+const IMAGE_ID_FIELD: &str = "__imageId";
 
 /// The driver a volume gets when the caller does not name one.
 const DEFAULT_VOLUME_DRIVER: &str = "local";
@@ -238,11 +254,20 @@ fn images_kind() -> ResourceKindDescriptor {
             ColumnDescriptor::new("size", "Size", ColumnValueType::Bytes),
             ColumnDescriptor::new("created", "Created", ColumnValueType::Timestamp),
             ColumnDescriptor::new("usedBy", "Used by", ColumnValueType::Text),
+            ColumnDescriptor::new("usage", "Usage", ColumnValueType::Status),
         ],
     )
     // One repository with six tags is six rows that belong together; a flat
     // list of forty images is the thing `docker images` is hard to read for.
     .grouped_by("repository")
+    // What a collapsed heading has to say to be worth collapsing: whether
+    // there is anything to clean up in there, and how much disk it would give
+    // back. Both are computed here rather than summed by the client — see
+    // `ResourceKindDescriptor::group_summary` for why summing is wrong.
+    .with_group_summary(vec![
+        ColumnDescriptor::new(GROUP_USAGE_FIELD, "Usage", ColumnValueType::Status),
+        ColumnDescriptor::new(GROUP_SIZE_FIELD, "Combined size", ColumnValueType::Bytes),
+    ])
     .applicable_to(ApplicableTarget::HostOnly)
     .with_row_actions(vec![
         row_action(
@@ -260,27 +285,48 @@ fn images_kind() -> ResourceKindDescriptor {
             false,
         ),
     ])
-    .with_kind_actions(vec![ConnectorAction {
-        id: ACTION_PULL_IMAGE.to_owned(),
-        target_id: None,
-        label: "Pull image".to_owned(),
-        description: Some("Download an image by reference, for example `nginx:1.27`.".to_owned()),
-        params_schema: json!({
-            "type": "object",
-            "properties": {
-                "imageRef": {
-                    "type": "string",
-                    "title": "Image reference",
-                    "description": "Repository and tag, for example `nginx:1.27`. \
-                                    Without a tag, `latest` is pulled."
-                }
-            },
-            "required": ["imageRef"],
-            "additionalProperties": false
-        }),
-        is_disruptive: false,
-        snapshot_data_point_ids: Vec::new(),
-    }])
+    .with_kind_actions(vec![
+        ConnectorAction {
+            id: ACTION_PULL_IMAGE.to_owned(),
+            target_id: None,
+            label: "Pull image".to_owned(),
+            description: Some(
+                "Download an image by reference, for example `nginx:1.27`.".to_owned(),
+            ),
+            params_schema: json!({
+                "type": "object",
+                "properties": {
+                    "imageRef": {
+                        "type": "string",
+                        "title": "Image reference",
+                        "description": "Repository and tag, for example `nginx:1.27`. \
+                                        Without a tag, `latest` is pulled."
+                    }
+                },
+                "required": ["imageRef"],
+                "additionalProperties": false
+            }),
+            is_disruptive: false,
+            snapshot_data_point_ids: Vec::new(),
+        },
+        ConnectorAction {
+            id: ACTION_PRUNE_IMAGES.to_owned(),
+            target_id: None,
+            label: "Prune unused".to_owned(),
+            description: Some(
+                "Remove every image no container is using, and report the disk space that \
+             freed. Images a stopped container was created from count as in use and are \
+             kept."
+                    .to_owned(),
+            ),
+            params_schema: json!({ "type": "object", "additionalProperties": false }),
+            // Nothing running stops, but images go away and cannot be brought back
+            // without pulling them again — which needs the registry to still have
+            // them, and to be reachable.
+            is_disruptive: true,
+            snapshot_data_point_ids: Vec::new(),
+        },
+    ])
 }
 
 fn volumes_kind() -> ResourceKindDescriptor {
@@ -437,6 +483,7 @@ pub async fn list_images(
     let mut rows = Vec::new();
     for image in images {
         let used_by = usage.for_image(&image.id);
+        let in_use = !used_by.is_empty();
         let short = short_id(&image.id);
         let tags: Vec<String> = image
             .repo_tags
@@ -444,32 +491,36 @@ pub async fn list_images(
             .filter(|tag| !tag.is_empty() && !tag.starts_with(UNTAGGED))
             .collect();
 
+        // One `ResourceItem` per tag, but the *image* — its id and its size —
+        // is shared between them, which is what the group totals have to know.
+        let row = |reference: String, repository: String, tag: String| {
+            ResourceItem::new(reference)
+                .with_field("repository", repository)
+                .with_field("tag", tag)
+                .with_field("imageId", short.clone())
+                .with_field("size", image.size)
+                .with_field("created", iso_from_unix(image.created))
+                .with_field("usedBy", used_by.clone())
+                .with_field("usage", row_usage(in_use))
+                // Carried alongside the row so the group total can be computed
+                // below without a second pass over the daemon's listing.
+                .with_field(IMAGE_ID_FIELD, image.id.clone())
+        };
+
         if tags.is_empty() {
             // A dangling image: no reference to act on, so the row is keyed by
             // the id, which is also the only thing `deleteImage` can be given.
-            rows.push(
-                ResourceItem::new(image.id.clone())
-                    .with_field("repository", UNTAGGED)
-                    .with_field("tag", UNTAGGED)
-                    .with_field("imageId", short.clone())
-                    .with_field("size", image.size)
-                    .with_field("created", iso_from_unix(image.created))
-                    .with_field("usedBy", used_by.clone()),
-            );
+            rows.push(row(
+                image.id.clone(),
+                UNTAGGED.to_owned(),
+                UNTAGGED.to_owned(),
+            ));
             continue;
         }
 
         for reference in tags {
             let (repository, tag) = split_reference(&reference);
-            rows.push(
-                ResourceItem::new(reference.clone())
-                    .with_field("repository", repository)
-                    .with_field("tag", tag)
-                    .with_field("imageId", short.clone())
-                    .with_field("size", image.size)
-                    .with_field("created", iso_from_unix(image.created))
-                    .with_field("usedBy", used_by.clone()),
-            );
+            rows.push(row(reference.clone(), repository, tag));
         }
     }
 
@@ -487,7 +538,95 @@ pub async fn list_images(
             .then_with(|| field(left, "repository").cmp(field(right, "repository")))
             .then_with(|| field(left, "tag").cmp(field(right, "tag")))
     });
+    attach_group_summary(&mut rows);
     Ok(rows)
+}
+
+/// One image's own verdict.
+fn row_usage(in_use: bool) -> StatusValue {
+    if in_use {
+        StatusValue::new("In use", StatusTone::Positive)
+    } else {
+        // Caution, not Negative: an unused image is not a fault, it is disk
+        // somebody may want back. Colouring it as an error would make a normal
+        // Docker host look broken.
+        StatusValue::new("Unused", StatusTone::Caution)
+    }
+}
+
+/// Fills in each row's group-level fields, in place.
+///
+/// Two things a client cannot work out for itself:
+///
+/// - **Combined size** is the sum over *distinct images*, not over rows. Three
+///   tags of one 2 GB image are three 2 GB rows; adding them gives 6 GB of disk
+///   that does not exist.
+/// - **The group's verdict** distinguishes "none of these is used", "some are"
+///   and "all are", which needs the same distinct-image view: two tags of one
+///   used image are not two used images.
+///
+/// # Why "combined" and not "total"
+///
+/// Docker's per-image `Size` counts every layer the image is built from, and
+/// images share layers — that is the whole point of layers. Summing even
+/// distinct images therefore counts shared layers once per image, so the result
+/// is an **upper bound on disk, not disk**. On a real host the gap is large:
+/// a machine reporting 102 GiB of Docker disk in total showed 297 GB across its
+/// untagged images alone.
+///
+/// The exact figure exists — `Size - SharedSize` — but `SharedSize` is only
+/// computed when a listing asks for it, and that computation is the expensive
+/// layer walk `/system/df` does. This connector already treats that endpoint as
+/// too costly to call at poll cadence; paying it on every table refresh instead
+/// would be worse. So the cheap upper bound is reported under a name that does
+/// not promise otherwise, and `pruneImages` reports the daemon's own count of
+/// what was actually reclaimed.
+fn attach_group_summary(rows: &mut [ResourceItem]) {
+    let mut totals: HashMap<String, GroupTotals> = HashMap::new();
+    for item in rows.iter() {
+        let entry = totals
+            .entry(field(item, "repository").to_owned())
+            .or_default();
+        let image_id = field(item, IMAGE_ID_FIELD).to_owned();
+        if entry.seen.insert(image_id) {
+            entry.bytes += item
+                .fields
+                .get("size")
+                .and_then(Value::as_i64)
+                .unwrap_or_default();
+            if field(item, "usedBy").is_empty() {
+                entry.unused += 1;
+            } else {
+                entry.used += 1;
+            }
+        }
+    }
+
+    for item in rows.iter_mut() {
+        let Some(totals) = totals.get(field(item, "repository")) else {
+            continue;
+        };
+        let usage = match (totals.used, totals.unused) {
+            (0, _) => StatusValue::new("Unused", StatusTone::Caution),
+            (_, 0) => StatusValue::new("In use", StatusTone::Positive),
+            _ => StatusValue::new("Some unused", StatusTone::Caution),
+        };
+        item.fields
+            .insert(GROUP_USAGE_FIELD.to_owned(), usage.into());
+        item.fields
+            .insert(GROUP_SIZE_FIELD.to_owned(), totals.bytes.into());
+        // Only ever needed to compute the two fields above.
+        item.fields.remove(IMAGE_ID_FIELD);
+    }
+}
+
+/// One repository's distinct images, while they are being counted.
+#[derive(Default)]
+struct GroupTotals {
+    seen: std::collections::HashSet<String>,
+    bytes: i64,
+    used: usize,
+    unused: usize,
 }
 
 /// The volume table.
@@ -622,6 +761,7 @@ pub fn owns_action(action_id: &str) -> bool {
         ACTION_DELETE_IMAGE
             | ACTION_CHECK_IMAGE_UPDATE
             | ACTION_PULL_IMAGE
+            | ACTION_PRUNE_IMAGES
             | ACTION_DELETE_VOLUME
             | ACTION_CREATE_VOLUME
             | ACTION_DELETE_NETWORK
@@ -658,6 +798,7 @@ pub async fn execute(
             .await
         }
         ACTION_PULL_IMAGE => pull_image(docker, required(action_id, params, "imageRef")?).await,
+        ACTION_PRUNE_IMAGES => prune_images(docker).await,
         ACTION_DELETE_VOLUME => {
             delete_volume(docker, required(action_id, params, RESOURCE_ID_PARAM)?).await
         }
@@ -787,6 +928,70 @@ async fn pull_image(docker: &Docker, reference: &str) -> Result<ActionResult, Co
     Ok(ActionResult::ok(format!("Pulled {repository}:{tag}.")))
 }
 
+/// Removes every image nothing is using, and says what that gave back.
+///
+/// `dangling=false` rather than the default. Docker's *default* prune removes
+/// only images with no tag at all, which on a homelab host is a handful of
+/// build leftovers; the button says "prune unused" and the table's own pills
+/// say which images are unused, so removing exactly those is the only
+/// behaviour that matches what the user is looking at.
+async fn prune_images(docker: &Docker) -> Result<ActionResult, ConnectorError> {
+    let options = PruneImagesOptionsBuilder::new()
+        .filters(&prune_filters())
+        .build();
+    match docker.prune_images(Some(options)).await {
+        Ok(response) => {
+            let removed = response.images_deleted.unwrap_or_default().len();
+            let reclaimed = response.space_reclaimed.unwrap_or_default();
+            Ok(ActionResult::ok(if removed == 0 {
+                "Nothing to prune — every image here is in use.".to_owned()
+            } else {
+                format!(
+                    "Pruned {removed} unused image layer(s), reclaiming {}.",
+                    human_bytes(reclaimed)
+                )
+            })
+            // The raw count for anything that wants to do arithmetic; the
+            // message is for reading, and the two must not be the same number
+            // in two formats with only one of them authoritative.
+            .with_payload(json!({ "removed": removed, "spaceReclaimedBytes": reclaimed })))
+        }
+        Err(error) => refusal_or(error, "prune", "unused images"),
+    }
+}
+
+/// The filter that makes prune mean what the button says.
+///
+/// Docker's *default* image prune removes only images with no tag at all —
+/// `dangling=true`. `dangling=false` is the documented spelling of "every image
+/// no container is using", which is exactly the set the table's own `Unused`
+/// pills mark. A button whose effect did not match the pills beside it would be
+/// the worst kind of destructive control: one you cannot predict by looking.
+fn prune_filters() -> HashMap<&'static str, Vec<&'static str>> {
+    HashMap::from([("dangling", vec!["false"])])
+}
+
+/// A byte count as a person would say it.
+///
+/// Only for the human half of an `ActionResult`; every number Loom *reports* —
+/// a data point, a `Bytes` column, this action's payload — stays a raw count,
+/// so the client formats it in the viewer's own locale. This exists because a
+/// message is prose, and "reclaiming 3892314112" is not a sentence.
+fn human_bytes(bytes: i64) -> String {
+    const UNITS: [&str; 5] = ["B", "KiB", "MiB", "GiB", "TiB"];
+    let mut value = bytes as f64;
+    let mut unit = 0;
+    while value.abs() >= 1024.0 && unit < UNITS.len() - 1 {
+        value /= 1024.0;
+        unit += 1;
+    }
+    if unit == 0 {
+        format!("{bytes} B")
+    } else {
+        format!("{value:.1} {}", UNITS[unit])
+    }
+}
+
 async fn delete_volume(docker: &Docker, name: &str) -> Result<ActionResult, ConnectorError> {
     // Again no `force`: forcing a volume out from under a running container
     // destroys data that container is still writing to.
@@ -875,6 +1080,7 @@ fn refusal_or(
 mod tests {
     use super::*;
     use bollard::models::{ContainerSummaryNetworkSettings, EndpointSettings, MountPoint};
+    use bollard::query_parameters::PruneImagesOptionsBuilder;
     use std::collections::HashMap;
 
     fn container(
@@ -1011,6 +1217,108 @@ mod tests {
         );
     }
 
+    /// Builds the rows one repository's images would produce, then summarizes.
+    fn summarized(rows: Vec<ResourceItem>) -> Vec<ResourceItem> {
+        let mut rows = rows;
+        attach_group_summary(&mut rows);
+        rows
+    }
+
+    fn image_row(repository: &str, tag: &str, id: &str, size: i64, used_by: &str) -> ResourceItem {
+        ResourceItem::new(format!("{repository}:{tag}"))
+            .with_field("repository", repository)
+            .with_field("tag", tag)
+            .with_field("size", size)
+            .with_field("usedBy", used_by)
+            .with_field("usage", row_usage(!used_by.is_empty()))
+            .with_field(IMAGE_ID_FIELD, id)
+    }
+
+    #[test]
+    fn a_group_total_counts_images_not_rows() {
+        // One 2 GB image carrying three tags. Summing the rows — the obvious
+        // client-side implementation — would report 6 GB of disk that is not
+        // there, which is why this is the connector's job.
+        let rows = summarized(vec![
+            image_row("nginx", "1.27", "sha256:aaa", 2_000_000_000, ""),
+            image_row("nginx", "latest", "sha256:aaa", 2_000_000_000, ""),
+            image_row("nginx", "stable", "sha256:aaa", 2_000_000_000, ""),
+        ]);
+        assert_eq!(rows[0].fields[GROUP_SIZE_FIELD], json!(2_000_000_000i64));
+        // And every row carries the same answer, so a client reads it off any
+        // one of them without knowing which.
+        assert!(rows
+            .iter()
+            .all(|row| row.fields[GROUP_SIZE_FIELD] == json!(2_000_000_000i64)));
+    }
+
+    #[test]
+    fn a_group_verdict_distinguishes_none_some_and_all() {
+        let label = |rows: &[ResourceItem]| rows[0].fields[GROUP_USAGE_FIELD]["label"].clone();
+        let tone = |rows: &[ResourceItem]| rows[0].fields[GROUP_USAGE_FIELD]["tone"].clone();
+
+        let none = summarized(vec![
+            image_row("app", "1", "sha256:a", 10, ""),
+            image_row("app", "2", "sha256:b", 10, ""),
+        ]);
+        assert_eq!(label(&none), json!("Unused"));
+        // Caution, not negative: unused images are reclaimable disk, not a
+        // fault, and a healthy host should not look broken.
+        assert_eq!(tone(&none), json!("caution"));
+
+        let all = summarized(vec![
+            image_row("app", "1", "sha256:a", 10, "web"),
+            image_row("app", "2", "sha256:b", 10, "api"),
+        ]);
+        assert_eq!(label(&all), json!("In use"));
+        assert_eq!(tone(&all), json!("positive"));
+
+        let some = summarized(vec![
+            image_row("app", "1", "sha256:a", 10, "web"),
+            image_row("app", "2", "sha256:b", 10, ""),
+        ]);
+        assert_eq!(label(&some), json!("Some unused"));
+
+        // Two tags of one *used* image are one used image, not two — the same
+        // distinct-image view the size total needs.
+        let one_image_two_tags = summarized(vec![
+            image_row("app", "1", "sha256:a", 10, "web"),
+            image_row("app", "latest", "sha256:a", 10, "web"),
+        ]);
+        assert_eq!(label(&one_image_two_tags), json!("In use"));
+    }
+
+    #[test]
+    fn the_scratch_image_id_never_reaches_a_client() {
+        let rows = summarized(vec![image_row("app", "1", "sha256:a", 10, "web")]);
+        assert!(!rows[0].fields.contains_key(IMAGE_ID_FIELD));
+    }
+
+    #[test]
+    fn prune_asks_for_unused_images_not_merely_dangling_ones() {
+        // Docker's default prune keeps every tagged image, however unused. The
+        // table marks unused images with a pill and the button says "prune
+        // unused"; this filter is what makes those agree.
+        let options = PruneImagesOptionsBuilder::new()
+            .filters(&prune_filters())
+            .build();
+        assert_eq!(
+            options.filters,
+            Some(HashMap::from([(
+                "dangling".to_owned(),
+                vec!["false".to_owned()]
+            )]))
+        );
+    }
+
+    #[test]
+    fn byte_counts_in_a_message_read_like_prose() {
+        assert_eq!(human_bytes(0), "0 B");
+        assert_eq!(human_bytes(512), "512 B");
+        assert_eq!(human_bytes(1024), "1.0 KiB");
+        assert_eq!(human_bytes(3_892_314_112), "3.6 GiB");
+    }
+
     #[test]
     fn short_ids_read_the_way_docker_prints_them() {
         assert_eq!(short_id("sha256:0123456789abcdef0123"), "0123456789ab");
@@ -1034,9 +1342,14 @@ mod tests {
                 );
                 assert!(owns_action(&action.id), "{} is not routed", action.id);
                 // Every property a client will render a field for needs a
-                // human title; the raw camelCase key is not a label.
-                let properties = action.params_schema["properties"].as_object().unwrap();
-                for (name, property) in properties {
+                // human title; the raw camelCase key is not a label. An action
+                // that takes nothing declares no properties at all, which is
+                // not the same as declaring an untitled one.
+                let properties = action.params_schema["properties"]
+                    .as_object()
+                    .cloned()
+                    .unwrap_or_default();
+                for (name, property) in &properties {
                     assert!(
                         property["title"].is_string(),
                         "{}.{name} has no title",
@@ -1046,6 +1359,23 @@ mod tests {
             }
         }
         assert_eq!(images_kind().group_by_key.as_deref(), Some("repository"));
+        // The group summary's keys are group-level fields, deliberately *not*
+        // columns: they belong on the heading, never in a row.
+        let images = images_kind();
+        let summary: Vec<&str> = images
+            .group_summary
+            .iter()
+            .map(|column| column.key.as_str())
+            .collect();
+        assert_eq!(summary, vec![GROUP_USAGE_FIELD, GROUP_SIZE_FIELD]);
+        for key in &summary {
+            assert!(
+                !images.columns.iter().any(|column| column.key == *key),
+                "{key} is both a column and a group summary"
+            );
+        }
+        // A grouped kind with no summary is still legal; the other two use it.
+        assert!(volumes_kind().group_summary.is_empty());
         assert_eq!(volumes_kind().group_by_key, None);
         assert_eq!(networks_kind().group_by_key, None);
     }

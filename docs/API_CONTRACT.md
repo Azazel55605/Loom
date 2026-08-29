@@ -829,6 +829,7 @@ the instances they may see are on `/connector-instances`, which asks only for
             { "capabilityKey": "list-images", "label": "Browse images", "requiredToggleKeys": ["containers", "images"] },
             { "capabilityKey": "pull-image", "label": "Pull images", "requiredToggleKeys": ["containers", "images", "post"] },
             { "capabilityKey": "delete-image", "label": "Delete images", "requiredToggleKeys": ["containers", "images", "post"] },
+            { "capabilityKey": "prune-images", "label": "Prune unused images", "requiredToggleKeys": ["containers", "images", "post"] },
             { "capabilityKey": "list-volumes", "label": "Browse volumes", "requiredToggleKeys": ["volumes"] },
             { "capabilityKey": "create-volume", "label": "Create volumes", "requiredToggleKeys": ["volumes", "post"] },
             { "capabilityKey": "delete-volume", "label": "Delete volumes", "requiredToggleKeys": ["volumes", "post"] },
@@ -888,7 +889,12 @@ naming the configured endpoint.
 
 The host view publishes
 `totalContainers`, `runningContainers`, `stoppedContainers`, `totalImages`,
-`diskUsageBytes`, and `dockerVersion`. Each container returned by the live
+`diskUsageBytes`, `imageDiskUsageBytes`, and `dockerVersion`.
+`imageDiskUsageBytes` is the image share of `diskUsageBytes` — reported
+separately because it is the part a user can act on, since images are what the
+Images table prunes and "102 GiB of Docker" does not say whether pruning would
+help. Both come from one `/system/df` read, so they cannot drift apart, and the
+image figure can never exceed the total it is part of. Each container returned by the live
 sub-target endpoint has target-scoped `status`, `cpuPercent`, `cpuHistory`,
 `memoryUsageBytes`, `memoryHistory`, `uptime`, and `logs`, plus start/stop/
 restart/pause/unpause actions. Stored configuration containing a stale
@@ -960,7 +966,7 @@ only its category toggle, and every write capability needs its category toggle
 | `allowUnpause` | `ALLOW_UNPAUSE` | on | `unpause-containers` |
 | `info` | `INFO` | off | `host-summary` |
 | `system` | `SYSTEM` | off | `host-summary` |
-| `images` | `IMAGES` | off | `list-images`, `list-updates`; with `post`, `pull-image`, `delete-image`, `apply-update` |
+| `images` | `IMAGES` | off | `list-images`, `list-updates`; with `post`, `pull-image`, `delete-image`, `prune-images`, `apply-update` |
 | `networks` | `NETWORKS` | off | `list-networks`; with `post`, `create-network`, `delete-network` |
 | `volumes` | `VOLUMES` | off | `list-volumes`; with `post`, `create-volume`, `delete-volume` |
 | `post` | `POST` | off | Every non-`GET` request outside the `ALLOW_*` lifecycle paths |
@@ -978,6 +984,7 @@ only its category toggle, and every write capability needs its category toggle
 | `list-images` | `containers`, `images` |
 | `pull-image` | `containers`, `images`, `post` |
 | `delete-image` | `containers`, `images`, `post` |
+| `prune-images` | `containers`, `images`, `post` |
 | `list-volumes` | `volumes` |
 | `create-volume` | `volumes`, `post` |
 | `delete-volume` | `volumes`, `post` |
@@ -1391,7 +1398,7 @@ not a smaller version of that question but a different one with no answer.
 
 | Kind | `groupByKey` | Columns | Row actions | Kind action |
 | --- | --- | --- | --- | --- |
-| `images` | `repository` | `repository`, `tag`, `imageId`, `size` (bytes), `created`, `usedBy` | `deleteImage`, `checkImageUpdate` | `pullImage` (`{ "imageRef": string }`) |
+| `images` | `repository` | `repository`, `tag`, `imageId`, `size` (bytes), `created`, `usedBy`, `usage` (status) | `deleteImage`, `checkImageUpdate` | `pullImage` (`{ "imageRef": string }`), `pruneImages` |
 | `volumes` | — | `name`, `driver`, `mountpoint`, `created`, `usedBy` | `deleteVolume` | `createVolume` (`{ "name": string, "driver"?: string }`, default `local`) |
 | `networks` | — | `name`, `driver`, `scope`, `subnet`, `created`, `usedBy` | `deleteNetwork` | `createNetwork` (`{ "name": string, "driver"?: string }`, default `bridge`) |
 
@@ -1414,6 +1421,30 @@ resolved image **id**, not by the reference a container was created from: a
 container created from `app:latest` goes on naming `app:latest` after the tag
 has moved, which would attribute it to whichever image holds that tag now rather
 than to the one it is running.
+
+The images table's `groupSummary` carries two group-level fields: `groupUsage`
+(a status pill reading `In use`, `Some unused` or `Unused`) and `groupSize`.
+Both are computed over the group's **distinct images**, not its rows.
+
+**`groupSize` is labelled "Combined size" and not "total", deliberately.**
+Docker's per-image `Size` counts every layer the image is built from, and images
+share layers — so summing even distinct images counts shared layers once per
+image. The result is an upper bound on disk, not disk: one real host reporting
+102 GiB of Docker disk in total showed 297 GB across its untagged images alone.
+The exact figure (`Size - SharedSize`) exists, but `SharedSize` is only computed
+when a listing asks for it, and that computation is the same expensive layer
+walk `/system/df` does — which this connector already treats as too costly to
+call at poll cadence. So the cheap upper bound is reported under a name that
+does not promise otherwise.
+
+`pruneImages` removes every image no container is using — `dangling=false`, not
+Docker's default `dangling=true`, which would keep every tagged image however
+unused. That is exactly the set the table's own `Unused` pills mark: a
+destructive button whose effect did not match the pills beside it would be one
+you cannot predict by looking. Its `ActionResult` message names the space
+reclaimed and its payload carries `{ "removed": number, "spaceReclaimedBytes":
+number }` — the daemon's own figure, and the one number here that is real disk
+rather than an upper bound.
 
 `checkImageUpdate` reuses the same anonymous registry digest check the
 [update management](#update-management) feature does, and returns its finding as
@@ -1556,6 +1587,13 @@ clients never disagree about what the number meant.
 | `bool` | boolean | A yes/no affordance, not the literal `true`. |
 | `timestamp` | string, ISO 8601 | Localized to the viewer's locale and timezone — a date, a time, or "3 days ago". |
 | `bytes` | number, **raw byte count** | Human-readable size (`1.4 GB`), never the raw integer. |
+| `status` | object `{ "label": string, "tone": "neutral" \| "positive" \| "caution" \| "negative" }` | A coloured pill. |
+
+A `status` cell carries its **own tone** rather than the client inferring one
+from the label. "Unused" is reclaimable disk for a Docker image and a failure
+for a backup job; a table of known words in the frontend would be a connector's
+vocabulary living in someone else's code. The tone names sentiment, not colour,
+so a client is free to render it in a high-contrast or colour-blind palette.
 
 These are deliberately not the [`DataPointValueType`](#datapointdescriptor)
 values. A data point needs `timeSeries` and has no use for a byte count; a table
@@ -1627,7 +1665,8 @@ Loom, so this is the same read-only tier as sub-targets.
       }
     ],
     "groupByKey": null,
-    "applicableTarget": "any"
+    "applicableTarget": "any",
+    "groupSummary": []
   }
 ]
 ```
@@ -1641,6 +1680,19 @@ Loom, so this is the same read-only tier as sub-targets.
 | `kindActions` | array | `ConnectorAction`s addressing the kind as a whole. | Always present; **may be empty**. |
 | `groupByKey` | string | A `columns[].key` whose value rows should be gathered under. | **`null`** for a flat table. |
 | `applicableTarget` | string | Where this kind means anything: `hostOnly`, `targetOnly`, or `any`. | Always present; defaults to `any`. |
+| `groupSummary` | array | `ColumnDescriptor`s describing each **group** as a whole, shown on the group heading and never as a row cell. | Always present; empty unless `groupByKey` is set. |
+
+#### `groupSummary`
+
+Each descriptor's `key` names a field that **every row of a group carries with
+the same value**, so a client reads it off any row of the group. Deliberately
+not client-side aggregation, which looks like the obvious generic answer and is
+wrong for the first real case: Docker's image table lists one row per *tag*, so
+three tags of one 2 GB image are three 2 GB rows, and a client summing them
+would report 6 GB of disk that does not exist. The same applies to a verdict —
+"some of these are unused" is not derivable from a column of per-row verdicts
+without knowing which rows are the same underlying thing. Only the connector
+knows that.
 
 #### `groupByKey`
 

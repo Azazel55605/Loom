@@ -44,10 +44,10 @@ use loom_connector_docker::{
     ACTION_CREATE_VOLUME, ACTION_DELETE_IMAGE, ACTION_DELETE_NETWORK, ACTION_DELETE_VOLUME,
     ACTION_PULL_IMAGE, ACTION_RESTART, ACTION_START, ACTION_STOP, DATA_POINT_CPU_HISTORY,
     DATA_POINT_CPU_PERCENT, DATA_POINT_DISK_USAGE_BYTES, DATA_POINT_DOCKER_VERSION,
-    DATA_POINT_LOGS, DATA_POINT_MEMORY_USAGE_BYTES, DATA_POINT_RUNNING_CONTAINERS,
-    DATA_POINT_STATUS, DATA_POINT_STOPPED_CONTAINERS, DATA_POINT_TOTAL_CONTAINERS,
-    DATA_POINT_TOTAL_IMAGES, DATA_POINT_UPTIME, DEFAULT_DOCKER_HOST, RESOURCE_KIND_IMAGES,
-    RESOURCE_KIND_NETWORKS, RESOURCE_KIND_VOLUMES,
+    DATA_POINT_IMAGE_DISK_USAGE_BYTES, DATA_POINT_LOGS, DATA_POINT_MEMORY_USAGE_BYTES,
+    DATA_POINT_RUNNING_CONTAINERS, DATA_POINT_STATUS, DATA_POINT_STOPPED_CONTAINERS,
+    DATA_POINT_TOTAL_CONTAINERS, DATA_POINT_TOTAL_IMAGES, DATA_POINT_UPTIME, DEFAULT_DOCKER_HOST,
+    RESOURCE_KIND_IMAGES, RESOURCE_KIND_NETWORKS, RESOURCE_KIND_VOLUMES,
 };
 use loom_core::connector::{Connector, ConnectorError, HealthState};
 use serde_json::json;
@@ -493,7 +493,7 @@ async fn one_host_instance_reports_the_daemon_and_lists_real_sub_targets() {
             .iter()
             .filter(|point| point.target_id.is_none())
             .count(),
-        6
+        7
     );
     assert_eq!(
         points
@@ -507,6 +507,25 @@ async fn one_host_instance_reports_the_daemon_and_lists_real_sub_targets() {
     assert!(
         matches!(status.health, HealthState::Healthy | HealthState::Degraded),
         "a reachable daemon may degrade if an optional metric times out: {status:?}"
+    );
+    // Image storage is a share of the same `/system/df` reading, so it can
+    // never exceed the total it is part of. Both come from one call; a
+    // regression that read them separately would show up here as drift.
+    let bytes = |id: &str| {
+        status
+            .data_point_value_for(None, id)
+            .and_then(serde_json::Value::as_i64)
+            .unwrap_or_default()
+    };
+    let images = bytes(DATA_POINT_IMAGE_DISK_USAGE_BYTES);
+    let total = bytes(DATA_POINT_DISK_USAGE_BYTES);
+    assert!(
+        images > 0,
+        "a host that has pulled the test image has images"
+    );
+    assert!(
+        images <= total,
+        "image storage {images} cannot exceed total Docker disk usage {total}"
     );
     assert!(status
         .data_point_value(DATA_POINT_TOTAL_CONTAINERS)

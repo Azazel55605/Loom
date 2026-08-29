@@ -1,6 +1,6 @@
 # 0024. Resource-kind presentation hints: `groupByKey` and `applicableTarget`
 
-- Status: accepted
+- Status: accepted; extended by [ADR 0026](./0026-group-summaries-and-status-cells.md)
 - Date: 2026-08-29
 - Supersedes: nothing
 - Amends: [0021](./0021-connector-resource-browser.md)

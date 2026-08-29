@@ -1,11 +1,12 @@
 import * as React from "react";
 import { useMutation, useQuery } from "@tanstack/react-query";
-import { AlertCircle, Check, ChevronDown, Loader2, X } from "lucide-react";
+import { AlertCircle, Check, ChevronDown, Loader2, Search, X } from "lucide-react";
 import { toast } from "sonner";
 
 import { Alert, AlertDescription } from "@loom/ui-kit/components/ui/alert";
 import { Badge } from "@loom/ui-kit/components/ui/badge";
 import { Button } from "@loom/ui-kit/components/ui/button";
+import { Input } from "@loom/ui-kit/components/ui/input";
 import { Skeleton } from "@loom/ui-kit/components/ui/skeleton";
 import {
   Table,
@@ -24,6 +25,8 @@ import type {
   ConnectorAction,
   ResourceItem,
   ResourceKindDescriptor,
+  StatusTone,
+  StatusValue,
 } from "@loom/ui-kit/lib/api";
 import { useApiClient } from "@loom/ui-kit/lib/api-context";
 import { describeConnectorError } from "@loom/ui-kit/lib/connector-error";
@@ -122,14 +125,25 @@ export function ResourceKindBrowser({
   const columns = descriptor.columns;
   const hasRowActions = descriptor.rowActions.length > 0;
   const columnCount = columns.length + (hasRowActions ? 1 : 0);
-  // Collapsed rather than expanded state, so a group that appears between two
-  // refreshes starts open like every other one — remembering which groups are
-  // *shut* survives a changing list, remembering which are open does not.
-  const [collapsed, setCollapsed] = React.useState<ReadonlySet<string>>(() => new Set());
-  const groups = React.useMemo(
-    () => groupRows(descriptor.groupByKey, items.data ?? []),
-    [descriptor.groupByKey, items.data],
+  const [query, setQuery] = React.useState("");
+  // **Expanded** state, so every group starts closed. A kind is grouped because
+  // its list is long — Docker's image table is hundreds of rows — and opening
+  // all of it by default hands the reader the exact wall of text the grouping
+  // was added to spare them. It also means a group that appears between two
+  // refreshes starts closed like the rest, rather than announcing itself.
+  const [expanded, setExpanded] = React.useState<ReadonlySet<string>>(() => new Set());
+
+  const visible = React.useMemo(
+    () => matching(items.data ?? [], columns, descriptor.groupByKey, query),
+    [items.data, columns, descriptor.groupByKey, query],
   );
+  const groups = React.useMemo(
+    () => groupRows(descriptor.groupByKey, visible),
+    [descriptor.groupByKey, visible],
+  );
+  // While searching, everything is open: a match hidden inside a closed group
+  // is indistinguishable from no match at all.
+  const searching = query.trim().length > 0;
 
   /** One row, identical whether it stands alone or under a group heading. */
   function renderRow(item: ResourceItem) {
@@ -181,6 +195,24 @@ export function ResourceKindBrowser({
 
   return (
     <div className={cn("space-y-3", className)}>
+      {/* Offered for every kind, not only long ones: a table you cannot search
+          is one you have to read, and which kinds are long is a property of
+          someone's host rather than of the connector. */}
+      <div className="relative">
+        <Search
+          className="pointer-events-none absolute left-2.5 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground"
+          aria-hidden="true"
+        />
+        <Input
+          type="search"
+          value={query}
+          onChange={(event) => setQuery(event.target.value)}
+          placeholder={`Search ${descriptor.label.toLowerCase()}…`}
+          aria-label={`Search ${descriptor.label}`}
+          className="pl-8"
+        />
+      </div>
+
       {descriptor.kindActions.length > 0 ? (
         <div className="flex flex-wrap gap-2">
           {descriptor.kindActions.map((action) => {
@@ -216,10 +248,14 @@ export function ResourceKindBrowser({
           <AlertCircle aria-hidden="true" />
           <AlertDescription>{describeConnectorError(items.error)}</AlertDescription>
         </Alert>
-      ) : items.data.length === 0 ? (
+      ) : visible.length === 0 ? (
         // A header row over nothing reads as broken. A sentence reads as an
         // answer, and for the `updates` table it is the answer people want.
-        <p className="text-sm text-muted-foreground">Nothing here.</p>
+        // "No match" and "nothing here" are different answers and get different
+        // sentences: one is about the search, the other about the service.
+        <p className="text-sm text-muted-foreground">
+          {searching ? `Nothing matches “${query.trim()}”.` : "Nothing here."}
+        </p>
       ) : (
         <div className="overflow-x-auto">
           <Table>
@@ -237,9 +273,13 @@ export function ResourceKindBrowser({
             </TableHeader>
             <TableBody>
               {groups === null
-                ? items.data.map(renderRow)
+                ? // `visible`, never `items.data`: an ungrouped table renders
+                  // its rows directly, and reaching past the filter here is how
+                  // a search box ends up looking like it works — the empty
+                  // result is filtered, every non-empty one is not.
+                  visible.map(renderRow)
                 : groups.map((group) => {
-                    const shut = collapsed.has(group.value);
+                    const open = searching || expanded.has(group.value);
                     return (
                       <React.Fragment key={group.value}>
                         {/* The same collapsible-group row the connectors
@@ -252,11 +292,11 @@ export function ResourceKindBrowser({
                               variant="ghost"
                               size="sm"
                               className="w-full justify-start gap-2"
-                              aria-expanded={!shut}
+                              aria-expanded={open}
                               onClick={() =>
-                                setCollapsed((current) => {
+                                setExpanded((current) => {
                                   const next = new Set(current);
-                                  if (shut) next.delete(group.value);
+                                  if (next.has(group.value)) next.delete(group.value);
                                   else next.add(group.value);
                                   return next;
                                 })
@@ -264,16 +304,28 @@ export function ResourceKindBrowser({
                             >
                               <ChevronDown
                                 aria-hidden="true"
-                                className={cn("transition-transform", shut && "-rotate-90")}
+                                className={cn("transition-transform", !open && "-rotate-90")}
                               />
                               <span className="font-semibold">{group.value}</span>
+                              {/* What the heading has to say to be worth
+                                  collapsing. Read off the group's first row —
+                                  every row carries the same value — rather than
+                                  aggregated here, because the rows do not carry
+                                  enough to aggregate correctly. */}
+                              {descriptor.groupSummary.map((column) => (
+                                <ResourceCell
+                                  key={column.key}
+                                  column={column}
+                                  value={group.items[0]?.fields[column.key]}
+                                />
+                              ))}
                               <Badge variant="secondary" className="ml-auto">
                                 {group.items.length}
                               </Badge>
                             </Button>
                           </TableCell>
                         </TableRow>
-                        {shut ? null : group.items.map(renderRow)}
+                        {open ? group.items.map(renderRow) : null}
                       </React.Fragment>
                     );
                   })}
@@ -397,6 +449,71 @@ function paramsFromRow(action: ConnectorAction, item: ResourceItem): Record<stri
   return supplied;
 }
 
+/**
+ * The rows a search leaves standing.
+ *
+ * Matches against what the reader can actually *see* — every declared column's
+ * rendered text, plus the grouping value, plus a status pill's label — and not
+ * against the raw `fields` object. Searching hidden data finds rows for reasons
+ * nothing on screen explains, and a row's id is frequently a digest nobody
+ * typed. Case-insensitive substring, on every term: "nginx 1.2" finds the row
+ * that contains both, in either order, which is how people type into a box.
+ */
+function matching(
+  items: ResourceItem[],
+  columns: ColumnDescriptor[],
+  groupByKey: string | null | undefined,
+  query: string,
+): ResourceItem[] {
+  const terms = query.trim().toLowerCase().split(/\s+/).filter(Boolean);
+  if (terms.length === 0) return items;
+
+  const keys = columns.map((column) => column.key);
+  if (groupByKey != null && !keys.includes(groupByKey)) keys.push(groupByKey);
+
+  return items.filter((item) => {
+    const haystack = keys
+      .map((key) => searchableText(item.fields[key]))
+      .join(" ")
+      .toLowerCase();
+    return terms.every((term) => haystack.includes(term));
+  });
+}
+
+/** One field's value as the text a reader would search for. */
+function searchableText(value: unknown): string {
+  if (value === undefined || value === null) return "";
+  if (typeof value === "string") return value;
+  if (typeof value === "number" || typeof value === "boolean") return String(value);
+  const status = asStatus(value);
+  return status === null ? "" : status.label;
+}
+
+/** A `status` cell's value, when it really is one. */
+function asStatus(value: unknown): StatusValue | null {
+  if (typeof value !== "object" || value === null) return null;
+  const record = value as Record<string, unknown>;
+  return typeof record.label === "string" && typeof record.tone === "string"
+    ? { label: record.label, tone: record.tone as StatusTone }
+    : null;
+}
+
+/**
+ * Which `Badge` variant carries a tone.
+ *
+ * Reuses the existing health variants rather than adding four visually
+ * identical ones, per the sourcing rule in `docs/UI_GUIDELINES.md`: the
+ * variants resolve to the `--status-*` tokens, which are the palette's
+ * good/warning/bad/neutral roles and not connector-health-specific colours.
+ * One palette, defined once.
+ */
+const TONE_VARIANT: Record<StatusTone, "healthy" | "degraded" | "down" | "unknown"> = {
+  positive: "healthy",
+  caution: "degraded",
+  negative: "down",
+  neutral: "unknown",
+};
+
 /** Rows under one heading. */
 type ResourceGroup = { value: string; items: ResourceItem[] };
 
@@ -485,6 +602,15 @@ function ResourceCell({ column, value }: { column: ColumnDescriptor; value: unkn
     case "number": {
       if (typeof value !== "number" || !Number.isFinite(value)) break;
       return <span className="tabular-nums">{value.toLocaleString()}</span>;
+    }
+    case "status": {
+      const status = asStatus(value);
+      if (status === null) break;
+      return (
+        <Badge variant={TONE_VARIANT[status.tone] ?? "unknown"} className="whitespace-nowrap">
+          {status.label}
+        </Badge>
+      );
     }
     case "text":
       break;

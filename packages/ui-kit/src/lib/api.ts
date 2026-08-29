@@ -206,7 +206,26 @@ export type DisplayWidgetType =
  * scaling and localizing are the client's business, so two clients never
  * disagree about what the number meant.
  */
-export type ColumnValueType = "text" | "number" | "bool" | "timestamp" | "bytes";
+export type ColumnValueType =
+  | "text"
+  | "number"
+  | "bool"
+  | "timestamp"
+  | "bytes"
+  | "status";
+
+/**
+ * How a `status` cell should read at a glance.
+ *
+ * About sentiment, not colour: the client picks colours that match its theme.
+ * The **connector** supplies the tone rather than the client inferring one from
+ * the label, because "unused" is reclaimable disk for an image and a failure
+ * for a backup job, and that vocabulary belongs to the connector.
+ */
+export type StatusTone = "neutral" | "positive" | "caution" | "negative";
+
+/** The value of a `status` cell: a label and how it should read. */
+export type StatusValue = { label: string; tone: StatusTone };
 
 /** One column of a browsable resource table. */
 export type ColumnDescriptor = {
@@ -254,6 +273,18 @@ export type ResourceKindDescriptor = {
   /** Whether this kind means anything at the host, at one sub-target, or
    *  both. */
   applicableTarget: ApplicableTarget;
+  /**
+   * Values describing each **group** as a whole, shown on the group heading and
+   * never as a row cell. Empty unless `groupByKey` is set.
+   *
+   * Each descriptor's `key` names a field every row of a group carries with the
+   * same value, so a client reads it off any row rather than aggregating.
+   * Deliberately not client-side aggregation: Docker lists one row per *tag*,
+   * so summing a size column across three tags of one image would report three
+   * times the disk that exists. Only the connector knows which rows share a
+   * thing.
+   */
+  groupSummary: ColumnDescriptor[];
 };
 
 /**

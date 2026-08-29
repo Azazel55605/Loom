@@ -87,6 +87,11 @@ pub const DATA_POINT_RUNNING_CONTAINERS: &str = "runningContainers";
 pub const DATA_POINT_STOPPED_CONTAINERS: &str = "stoppedContainers";
 pub const DATA_POINT_TOTAL_IMAGES: &str = "totalImages";
 pub const DATA_POINT_DISK_USAGE_BYTES: &str = "diskUsageBytes";
+/// The image half of [`DATA_POINT_DISK_USAGE_BYTES`], reported separately
+/// because it is the part a user can act on: images are what the Images table
+/// prunes, and "29 GB of Docker" does not tell anyone whether pruning would
+/// help.
+pub const DATA_POINT_IMAGE_DISK_USAGE_BYTES: &str = "imageDiskUsageBytes";
 pub const DATA_POINT_DOCKER_VERSION: &str = "dockerVersion";
 
 /// Action ids.
@@ -107,6 +112,7 @@ const CAPABILITY_HOST_SUMMARY: &str = "host-summary";
 const CAPABILITY_LIST_IMAGES: &str = "list-images";
 const CAPABILITY_PULL_IMAGE: &str = "pull-image";
 const CAPABILITY_DELETE_IMAGE: &str = "delete-image";
+const CAPABILITY_PRUNE_IMAGES: &str = "prune-images";
 const CAPABILITY_LIST_VOLUMES: &str = "list-volumes";
 const CAPABILITY_CREATE_VOLUME: &str = "create-volume";
 const CAPABILITY_DELETE_VOLUME: &str = "delete-volume";
@@ -376,6 +382,11 @@ pub fn setup_guide() -> SetupGuide {
                         "Delete images",
                         &["containers", "images", "post"],
                     ),
+                    capability_requirement(
+                        CAPABILITY_PRUNE_IMAGES,
+                        "Prune unused images",
+                        &["containers", "images", "post"],
+                    ),
                     capability_requirement(CAPABILITY_LIST_VOLUMES, "Browse volumes", &["volumes"]),
                     capability_requirement(
                         CAPABILITY_CREATE_VOLUME,
@@ -489,6 +500,7 @@ impl History {
 #[derive(Debug, Clone)]
 struct CachedHostDetails {
     disk_usage: i64,
+    image_disk_usage: i64,
     version: String,
     errors: Vec<String>,
     refreshed_at: Instant,
@@ -1105,6 +1117,7 @@ impl Connector for DockerConnector {
                     available_capability(CAPABILITY_LIST_IMAGES, "Browse images"),
                     available_capability(CAPABILITY_PULL_IMAGE, "Pull images"),
                     available_capability(CAPABILITY_DELETE_IMAGE, "Delete images"),
+                    available_capability(CAPABILITY_PRUNE_IMAGES, "Prune unused images"),
                     available_capability(CAPABILITY_LIST_VOLUMES, "Browse volumes"),
                     available_capability(CAPABILITY_CREATE_VOLUME, "Create volumes"),
                     available_capability(CAPABILITY_DELETE_VOLUME, "Delete volumes"),
@@ -1204,6 +1217,11 @@ impl Connector for DockerConnector {
                 // proxy's only method gate and it covers DELETE too.
                 write_capability(CAPABILITY_PULL_IMAGE, "Pull images", "IMAGES and POST"),
                 write_capability(CAPABILITY_DELETE_IMAGE, "Delete images", "IMAGES and POST"),
+                write_capability(
+                    CAPABILITY_PRUNE_IMAGES,
+                    "Prune unused images",
+                    "IMAGES and POST",
+                ),
                 proxy_read_capability(
                     CAPABILITY_LIST_VOLUMES,
                     "Browse volumes",
@@ -1548,6 +1566,10 @@ impl Connector for DockerConnector {
             WidgetBinding::display(DATA_POINT_STOPPED_CONTAINERS, DisplayWidgetType::StatTile),
             WidgetBinding::display(DATA_POINT_TOTAL_IMAGES, DisplayWidgetType::StatTile),
             WidgetBinding::display(DATA_POINT_DISK_USAGE_BYTES, DisplayWidgetType::StatTile),
+            WidgetBinding::display(
+                DATA_POINT_IMAGE_DISK_USAGE_BYTES,
+                DisplayWidgetType::StatTile,
+            ),
             WidgetBinding::display(DATA_POINT_DOCKER_VERSION, DisplayWidgetType::StatTile),
         ])
     }
@@ -1604,6 +1626,12 @@ fn host_data_points() -> Vec<DataPointDescriptor> {
         DataPointDescriptor::new(
             DATA_POINT_DISK_USAGE_BYTES,
             "Docker disk usage",
+            DataPointValueType::Number,
+        )
+        .with_unit("bytes"),
+        DataPointDescriptor::new(
+            DATA_POINT_IMAGE_DISK_USAGE_BYTES,
+            "Image storage",
             DataPointValueType::Number,
         )
         .with_unit("bytes"),
@@ -1754,6 +1782,10 @@ impl DockerConnector {
                 json!(info.images.unwrap_or_default()),
             ),
             (DATA_POINT_DISK_USAGE_BYTES, json!(slow_details.disk_usage)),
+            (
+                DATA_POINT_IMAGE_DISK_USAGE_BYTES,
+                json!(slow_details.image_disk_usage),
+            ),
             (DATA_POINT_DOCKER_VERSION, json!(slow_details.version)),
         ] {
             set_detail(&mut details, None, id, value);
@@ -1784,19 +1816,30 @@ impl DockerConnector {
 
         let (usage, version) = tokio::join!(self.docker.df(None), self.docker.version());
         let mut errors = Vec::new();
-        let disk_usage = match usage {
-            Ok(usage) => [
-                usage.image_usage.and_then(|value| value.total_size),
-                usage.container_usage.and_then(|value| value.total_size),
-                usage.volume_usage.and_then(|value| value.total_size),
-                usage.build_cache_usage.and_then(|value| value.total_size),
-            ]
-            .into_iter()
-            .flatten()
-            .sum::<i64>(),
+        // One `/system/df` read answers both numbers. Splitting the image share
+        // out costs nothing here and would cost a second call to that
+        // deliberately-rate-limited endpoint if it were read anywhere else.
+        let (disk_usage, image_disk_usage) = match usage {
+            Ok(usage) => {
+                let images = usage
+                    .image_usage
+                    .as_ref()
+                    .and_then(|value| value.total_size)
+                    .unwrap_or(0);
+                let total = [
+                    Some(images),
+                    usage.container_usage.and_then(|value| value.total_size),
+                    usage.volume_usage.and_then(|value| value.total_size),
+                    usage.build_cache_usage.and_then(|value| value.total_size),
+                ]
+                .into_iter()
+                .flatten()
+                .sum::<i64>();
+                (total, images)
+            }
             Err(error) => {
                 errors.push(optional_host_read_failure("Docker disk usage", &error));
-                0
+                (0, 0)
             }
         };
         let version = match version {
@@ -1808,6 +1851,7 @@ impl DockerConnector {
         };
         let refreshed = CachedHostDetails {
             disk_usage,
+            image_disk_usage,
             version,
             errors,
             refreshed_at: Instant::now(),
@@ -2235,6 +2279,10 @@ mod tests {
                     CAPABILITY_DELETE_IMAGE,
                     vec!["containers", "images", "post"]
                 ),
+                (
+                    CAPABILITY_PRUNE_IMAGES,
+                    vec!["containers", "images", "post"]
+                ),
                 (CAPABILITY_LIST_VOLUMES, vec!["volumes"]),
                 (CAPABILITY_CREATE_VOLUME, vec!["volumes", "post"]),
                 (CAPABILITY_DELETE_VOLUME, vec!["volumes", "post"]),
@@ -2270,6 +2318,7 @@ mod tests {
                 requirement.capability_key.as_str(),
                 CAPABILITY_PULL_IMAGE
                     | CAPABILITY_DELETE_IMAGE
+                    | CAPABILITY_PRUNE_IMAGES
                     | CAPABILITY_CREATE_VOLUME
                     | CAPABILITY_DELETE_VOLUME
                     | CAPABILITY_CREATE_NETWORK
@@ -2379,6 +2428,7 @@ mod tests {
             CAPABILITY_UNPAUSE,
             CAPABILITY_PULL_IMAGE,
             CAPABILITY_DELETE_IMAGE,
+            CAPABILITY_PRUNE_IMAGES,
             CAPABILITY_CREATE_VOLUME,
             CAPABILITY_DELETE_VOLUME,
             CAPABILITY_CREATE_NETWORK,
@@ -2645,7 +2695,7 @@ mod tests {
                 .iter()
                 .filter(|point| point.target_id.is_none())
                 .count(),
-            6
+            7
         );
         for target in ["web", "db"] {
             let targeted: Vec<_> = points
@@ -2654,7 +2704,7 @@ mod tests {
                 .collect();
             assert_eq!(targeted.len(), 8);
         }
-        assert_eq!(connector.default_layout_for(None).bindings.len(), 6);
+        assert_eq!(connector.default_layout_for(None).bindings.len(), 7);
         assert_eq!(connector.default_layout_for(Some("web")).bindings.len(), 7);
     }
 }

@@ -972,6 +972,65 @@ pub enum ColumnValueType {
     /// business, exactly as with [`DataPointDescriptor::unit`], so two clients
     /// never disagree about what the number meant.
     Bytes,
+    /// A short verdict about the row, shown as a coloured pill. The value is a
+    /// [`StatusValue`] object — a label and a tone — not a bare string.
+    ///
+    /// The **connector** supplies the tone, rather than the client inferring
+    /// one from the label. A client cannot know that "unused" is good news for
+    /// an image and bad news for a backup job, and a lookup table of known
+    /// words in the frontend would be a connector's vocabulary living in
+    /// someone else's code.
+    Status,
+}
+
+/// How a [`ColumnValueType::Status`] pill should read at a glance.
+///
+/// Deliberately about *sentiment*, not about colour: a client picks the colours
+/// that match its theme, including in a high-contrast or colour-blind palette
+/// where "green" and "red" are not the distinction being drawn. Naming the
+/// tones after literal colours would have hard-coded one palette into every
+/// connector.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum StatusTone {
+    /// A statement of fact with no judgement attached.
+    #[default]
+    Neutral,
+    /// Working as intended.
+    Positive,
+    /// Worth a look, but nothing is broken.
+    Caution,
+    /// Something is wrong, or is about to be.
+    Negative,
+}
+
+/// One [`ColumnValueType::Status`] cell.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct StatusValue {
+    /// The words in the pill. Short — this is a label, not a sentence.
+    pub label: String,
+    /// How it should read.
+    pub tone: StatusTone,
+}
+
+impl StatusValue {
+    /// A pill with a label and a tone.
+    pub fn new(label: impl Into<String>, tone: StatusTone) -> Self {
+        Self {
+            label: label.into(),
+            tone,
+        }
+    }
+}
+
+impl From<StatusValue> for Value {
+    fn from(status: StatusValue) -> Self {
+        // Infallible in practice: the shape is two owned, serializable fields.
+        // `Null` rather than a panic if that ever stops being true, because a
+        // blank cell is a better outcome than a downed poll.
+        serde_json::to_value(status).unwrap_or(Value::Null)
+    }
 }
 
 /// One column of a browsable resource table.
@@ -1128,6 +1187,24 @@ pub struct ResourceKindDescriptor {
     /// both.
     #[serde(default)]
     pub applicable_target: ApplicableTarget,
+    /// Extra values describing each **group** as a whole, shown on the group
+    /// heading and never as a row cell. Ignored when
+    /// [`group_by_key`](Self::group_by_key) is `None`.
+    ///
+    /// Each descriptor's `key` names a field that every row of a group carries
+    /// with the same value, so a client reads it from any row of the group
+    /// rather than computing it.
+    ///
+    /// **Deliberately not client-side aggregation.** "Sum the size column"
+    /// looks like the obvious generic answer and is wrong for the first real
+    /// case: Docker lists one row per *tag*, so three tags of one 2 GB image
+    /// are three rows of 2 GB, and a client summing them would report 6 GB of
+    /// disk that does not exist. Only the connector knows which rows share a
+    /// thing. The same applies to a verdict — "some of these are unused" is not
+    /// derivable from a column of per-row verdicts without knowing what the
+    /// rows mean.
+    #[serde(default)]
+    pub group_summary: Vec<ColumnDescriptor>,
 }
 
 impl ResourceKindDescriptor {
@@ -1145,6 +1222,7 @@ impl ResourceKindDescriptor {
             kind_actions: Vec::new(),
             group_by_key: None,
             applicable_target: ApplicableTarget::Any,
+            group_summary: Vec::new(),
         }
     }
 
@@ -1173,6 +1251,13 @@ impl ResourceKindDescriptor {
     #[must_use]
     pub fn applicable_to(mut self, target: ApplicableTarget) -> Self {
         self.applicable_target = target;
+        self
+    }
+
+    /// Declares the group-level values shown on each group heading.
+    #[must_use]
+    pub fn with_group_summary(mut self, columns: Vec<ColumnDescriptor>) -> Self {
+        self.group_summary = columns;
         self
     }
 }
@@ -1745,7 +1830,12 @@ mod tests {
         .with_row_actions(vec![ConnectorAction::simple("remove", "Remove")])
         .with_kind_actions(vec![ConnectorAction::simple("prune", "Prune")])
         .grouped_by("repository")
-        .applicable_to(ApplicableTarget::HostOnly);
+        .applicable_to(ApplicableTarget::HostOnly)
+        .with_group_summary(vec![ColumnDescriptor::new(
+            "totalSize",
+            "Total size",
+            ColumnValueType::Bytes,
+        )]);
 
         let value = serde_json::to_value(&kind).unwrap();
         assert_eq!(value["kind"], "images");
@@ -1755,6 +1845,7 @@ mod tests {
         assert_eq!(value["kindActions"][0]["id"], "prune");
         assert_eq!(value["groupByKey"], "repository");
         assert_eq!(value["applicableTarget"], "hostOnly");
+        assert_eq!(value["groupSummary"][0]["key"], "totalSize");
         assert_eq!(
             serde_json::from_value::<ResourceKindDescriptor>(value).unwrap(),
             kind
@@ -1778,6 +1869,27 @@ mod tests {
         );
     }
 
+    #[test]
+    fn a_status_cell_carries_its_own_tone() {
+        let item = ResourceItem::new("nginx:1.27")
+            .with_field("usage", StatusValue::new("In use", StatusTone::Positive));
+        assert_eq!(
+            serde_json::to_value(&item).unwrap()["fields"]["usage"],
+            json!({ "label": "In use", "tone": "positive" })
+        );
+        // The tone travels with the value rather than being inferred from the
+        // label, so two connectors can disagree about whether "unused" is good.
+        assert_eq!(
+            serde_json::to_value(ColumnValueType::Status).unwrap(),
+            json!("status")
+        );
+        assert_eq!(
+            serde_json::from_value::<StatusValue>(json!({ "label": "Gone" })).ok(),
+            None,
+            "a tone is required rather than silently neutral"
+        );
+    }
+
     /// The two hint fields are additive: a descriptor written before they
     /// existed still deserializes, and keeps the behaviour it had.
     #[test]
@@ -1792,6 +1904,7 @@ mod tests {
         let kind: ResourceKindDescriptor = serde_json::from_value(value).unwrap();
         assert_eq!(kind.group_by_key, None);
         assert_eq!(kind.applicable_target, ApplicableTarget::Any);
+        assert!(kind.group_summary.is_empty());
         assert_eq!(
             ResourceKindDescriptor::new("widgets", "Widgets", Vec::new()),
             kind
