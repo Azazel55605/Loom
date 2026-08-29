@@ -1,6 +1,6 @@
 # 0020 — Connector setup variants and capability checks
 
-- Status: accepted
+- Status: accepted; amended by [ADR 0025](./0025-capabilities-are-part-of-adding-a-feature.md)
 - Date: 2026-08-28
 
 ## Context

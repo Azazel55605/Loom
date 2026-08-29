@@ -799,7 +799,7 @@ the instances they may see are on `/connector-instances`, which asks only for
           "id": "proxy",
           "label": "Via socket proxy",
           "description": "Network-isolated LinuxServer socket-proxy setup with fine-grained read and lifecycle gates.",
-          "template": "services:\n  socket-proxy:\n    image: lscr.io/linuxserver/socket-proxy:latest\n    environment:\n      PING: \"{{PING}}\"\n      VERSION: \"{{VERSION}}\"\n      CONTAINERS: \"{{CONTAINERS}}\"\n      ALLOW_LOGS: \"{{ALLOW_LOGS}}\"\n      ALLOW_START: \"{{ALLOW_START}}\"\n      ALLOW_STOP: \"{{ALLOW_STOP}}\"\n      ALLOW_RESTARTS: \"{{ALLOW_RESTARTS}}\"\n      ALLOW_PAUSE: \"{{ALLOW_PAUSE}}\"\n      ALLOW_UNPAUSE: \"{{ALLOW_UNPAUSE}}\"\n      INFO: \"{{INFO}}\"\n      SYSTEM: \"{{SYSTEM}}\"\n      POST: \"{{POST}}\"\n      ALLOW_ARCHIVE: \"0\"\n      ALLOW_CHANGES: \"0\"\n      ALLOW_EXPORT: \"0\"\n      ALLOW_TOP: \"0\"\n    networks: [loom-docker-api]\n\ndockerHost: tcp://socket-proxy:2375",
+          "template": "services:\n  socket-proxy:\n    image: lscr.io/linuxserver/socket-proxy:latest\n    environment:\n      PING: \"{{PING}}\"\n      VERSION: \"{{VERSION}}\"\n      CONTAINERS: \"{{CONTAINERS}}\"\n      ALLOW_LOGS: \"{{ALLOW_LOGS}}\"\n      ALLOW_START: \"{{ALLOW_START}}\"\n      ALLOW_STOP: \"{{ALLOW_STOP}}\"\n      ALLOW_RESTARTS: \"{{ALLOW_RESTARTS}}\"\n      ALLOW_PAUSE: \"{{ALLOW_PAUSE}}\"\n      ALLOW_UNPAUSE: \"{{ALLOW_UNPAUSE}}\"\n      INFO: \"{{INFO}}\"\n      SYSTEM: \"{{SYSTEM}}\"\n      IMAGES: \"{{IMAGES}}\"\n      VOLUMES: \"{{VOLUMES}}\"\n      NETWORKS: \"{{NETWORKS}}\"\n      POST: \"{{POST}}\"\n      ALLOW_ARCHIVE: \"0\"\n      ALLOW_CHANGES: \"0\"\n      ALLOW_EXPORT: \"0\"\n      ALLOW_TOP: \"0\"\n    networks: [loom-docker-api]\n\ndockerHost: tcp://socket-proxy:2375",
           "toggles": [
             { "key": "ping", "envVar": "PING", "label": "Allow ping", "description": "Reachability check.", "default": true, "recommended": true },
             { "key": "version", "envVar": "VERSION", "label": "Allow version", "description": "Version check and host-summary version.", "default": true, "recommended": true },
@@ -812,7 +812,10 @@ the instances they may see are on `/connector-instances`, which asks only for
             { "key": "allowUnpause", "envVar": "ALLOW_UNPAUSE", "label": "Allow unpause", "description": "Resume action; works with POST disabled.", "default": true, "recommended": true },
             { "key": "info", "envVar": "INFO", "label": "Allow host information", "description": "Host container and image totals.", "default": false, "recommended": false },
             { "key": "system", "envVar": "SYSTEM", "label": "Allow disk-usage information", "description": "Docker disk usage from /system/df.", "default": false, "recommended": false },
-            { "key": "post", "envVar": "POST", "label": "Allow other write requests", "description": "Broad write gate; Loom does not need it for lifecycle actions.", "default": false, "recommended": false }
+            { "key": "images", "envVar": "IMAGES", "label": "Allow image access", "description": "Images table; with POST, pulling and deleting.", "default": false, "recommended": false },
+            { "key": "networks", "envVar": "NETWORKS", "label": "Allow network access", "description": "Networks table; with POST, creating and deleting.", "default": false, "recommended": false },
+            { "key": "volumes", "envVar": "VOLUMES", "label": "Allow volume access", "description": "Volumes table; with POST, creating and deleting.", "default": false, "recommended": false },
+            { "key": "post", "envVar": "POST", "label": "Allow other write requests", "description": "Gates every non-GET method, DELETE included; lifecycle actions do not need it, image/volume/network writes do.", "default": false, "recommended": false }
           ],
           "capabilityRequirements": [
             { "capabilityKey": "list-containers", "label": "List containers", "requiredToggleKeys": ["containers"] },
@@ -822,7 +825,18 @@ the instances they may see are on `/connector-instances`, which asks only for
             { "capabilityKey": "restart-containers", "label": "Restart containers", "requiredToggleKeys": ["containers", "allowRestarts"] },
             { "capabilityKey": "pause-containers", "label": "Pause containers", "requiredToggleKeys": ["containers", "allowPause"] },
             { "capabilityKey": "unpause-containers", "label": "Resume containers", "requiredToggleKeys": ["containers", "allowUnpause"] },
-            { "capabilityKey": "host-summary", "label": "View host summary", "requiredToggleKeys": ["info", "system", "version"] }
+            { "capabilityKey": "host-summary", "label": "View host summary", "requiredToggleKeys": ["info", "system", "version"] },
+            { "capabilityKey": "list-images", "label": "Browse images", "requiredToggleKeys": ["containers", "images"] },
+            { "capabilityKey": "pull-image", "label": "Pull images", "requiredToggleKeys": ["containers", "images", "post"] },
+            { "capabilityKey": "delete-image", "label": "Delete images", "requiredToggleKeys": ["containers", "images", "post"] },
+            { "capabilityKey": "list-volumes", "label": "Browse volumes", "requiredToggleKeys": ["volumes"] },
+            { "capabilityKey": "create-volume", "label": "Create volumes", "requiredToggleKeys": ["volumes", "post"] },
+            { "capabilityKey": "delete-volume", "label": "Delete volumes", "requiredToggleKeys": ["volumes", "post"] },
+            { "capabilityKey": "list-networks", "label": "Browse networks", "requiredToggleKeys": ["networks"] },
+            { "capabilityKey": "create-network", "label": "Create networks", "requiredToggleKeys": ["networks", "post"] },
+            { "capabilityKey": "delete-network", "label": "Delete networks", "requiredToggleKeys": ["networks", "post"] },
+            { "capabilityKey": "list-updates", "label": "Check for container updates", "requiredToggleKeys": ["containers", "images"] },
+            { "capabilityKey": "apply-update", "label": "Apply container updates", "requiredToggleKeys": ["containers", "images", "post"] }
           ]
         }
       ]
@@ -899,12 +913,96 @@ The Docker-compatible API gates and their current defaults are:
 
 `ALLOW_START`, `ALLOW_STOP`, `ALLOW_RESTARTS`, `ALLOW_PAUSE`, and
 `ALLOW_UNPAUSE` are checked before the broad `POST` rejection and therefore
-work with `POST=0`. Loom leaves `POST` disabled and enables only the individual
-lifecycle gates selected in the guide. `ALLOW_RESTARTS` also admits stop and
-kill in the current rules, which is why the guide labels it disruptive. Logs
-require both the base `CONTAINERS` section and `ALLOW_LOGS`. Loom does not call
-`/images`: image totals come from `/info` (`INFO`) and disk usage comes from
-`/system/df` (`SYSTEM`), so `IMAGES` remains disabled.
+work with `POST=0`. `ALLOW_RESTARTS` also admits stop and kill in the current
+rules, which is why the guide labels it disruptive. Logs require both the base
+`CONTAINERS` section and `ALLOW_LOGS`.
+
+##### `POST` gates every method that is not `GET`
+
+The HAProxy template contains exactly one method rule:
+
+```
+http-request deny unless METH_GET || { env(POST) -m bool }
+```
+
+It sits **after** the per-action container rules — which is why the `ALLOW_*`
+lifecycle gates work with `POST=0`, since an earlier `http-request allow`
+short-circuits — and **before** every category rule (`IMAGES`, `VOLUMES`,
+`NETWORKS`, `CONTAINERS`, …). So `POST` is not a POST-verb toggle: it is an
+**any-method-but-`GET`** master gate, and `DELETE` is covered by it even though
+`DELETE` is never named. There is no per-category write toggle and no `DELETE`
+toggle.
+
+Verified empirically against `lscr.io/linuxserver/socket-proxy:latest`:
+
+| Env | `GET /images/json` | `DELETE /images/…` | `POST /images/create` |
+| --- | --- | --- | --- |
+| `CONTAINERS=1 POST=1`, categories off | 403 | 403 | 403 |
+| `IMAGES=VOLUMES=NETWORKS=1 POST=0` | 200 | 403 | 403 |
+| `IMAGES=VOLUMES=NETWORKS=1 POST=1` | 200 | 404 (daemon) | 404 (daemon) |
+
+Volumes and networks behave identically. Hence **every read capability needs
+only its category toggle, and every write capability needs its category toggle
+*and* `POST`.**
+
+##### Toggles and the capabilities they unlock
+
+| Toggle | Env var | Default | Unlocks |
+| --- | --- | --- | --- |
+| `ping` | `PING` | on | Reachability check |
+| `version` | `VERSION` | on | `host-summary` (with `info`, `system`) |
+| `containers` | `CONTAINERS` | on | `list-containers`, and a prerequisite of everything container-scoped |
+| `allowLogs` | `ALLOW_LOGS` | on | `read-logs` |
+| `allowStart` | `ALLOW_START` | on | `start-containers` |
+| `allowStop` | `ALLOW_STOP` | on | `stop-containers` |
+| `allowRestarts` | `ALLOW_RESTARTS` | off | `restart-containers` (also admits stop and kill) |
+| `allowPause` | `ALLOW_PAUSE` | on | `pause-containers` |
+| `allowUnpause` | `ALLOW_UNPAUSE` | on | `unpause-containers` |
+| `info` | `INFO` | off | `host-summary` |
+| `system` | `SYSTEM` | off | `host-summary` |
+| `images` | `IMAGES` | off | `list-images`, `list-updates`; with `post`, `pull-image`, `delete-image`, `apply-update` |
+| `networks` | `NETWORKS` | off | `list-networks`; with `post`, `create-network`, `delete-network` |
+| `volumes` | `VOLUMES` | off | `list-volumes`; with `post`, `create-volume`, `delete-volume` |
+| `post` | `POST` | off | Every non-`GET` request outside the `ALLOW_*` lifecycle paths |
+
+| Capability | Required toggles |
+| --- | --- |
+| `list-containers` | `containers` |
+| `read-logs` | `containers`, `allowLogs` |
+| `start-containers` | `containers`, `allowStart` |
+| `stop-containers` | `containers`, `allowStop` |
+| `restart-containers` | `containers`, `allowRestarts` |
+| `pause-containers` | `containers`, `allowPause` |
+| `unpause-containers` | `containers`, `allowUnpause` |
+| `host-summary` | `info`, `system`, `version` |
+| `list-images` | `containers`, `images` |
+| `pull-image` | `containers`, `images`, `post` |
+| `delete-image` | `containers`, `images`, `post` |
+| `list-volumes` | `volumes` |
+| `create-volume` | `volumes`, `post` |
+| `delete-volume` | `volumes`, `post` |
+| `list-networks` | `networks` |
+| `create-network` | `networks`, `post` |
+| `delete-network` | `networks`, `post` |
+| `list-updates` | `containers`, `images` |
+| `apply-update` | `containers`, `images`, `post` |
+
+`list-images` requires `containers` as well because the Images table's
+"Used by" column is a container listing — with `IMAGES` but not `CONTAINERS`
+every image would claim nothing is using it. `list-updates` requires both
+because an update check inspects the container and then its local image before
+it asks any registry anything; `apply-update` adds `post` because it pulls
+(`POST /images/create`), removes the old container (`DELETE`) and creates the
+replacement (`POST`).
+
+`GET /connector-types/{id}/connection-test` **live-probes** every read
+capability — the container listing, the logs subpath, `/info`, `/system/df`,
+and the image, volume and network listings — and reports each as available or,
+on a `403`, unavailable with a note naming that capability's own toggles. Write
+capabilities are never exercised: the only way to prove a delete is permitted is
+to delete something, so they are reported unavailable with a note saying what to
+confirm. A raw `unix://` socket reports every capability available without
+probing, because it gates none of them.
 
 As verified on 2026-08-28, [CVE-2026-78122](https://nvd.nist.gov/vuln/detail/CVE-2026-78122)
 identifies Tecnativa `docker-socket-proxy` through 0.5.0, not LinuxServer's

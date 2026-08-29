@@ -211,7 +211,26 @@ async fn a_reachable_unix_socket_reports_full_setup_capabilities() {
     .expect("the already-reachable daemon must build");
     let result = connector.test_connection().await;
     assert!(result.reachable);
-    assert_eq!(result.capabilities.len(), 8);
+    // Every capability the proxy guide can gate, because the raw socket gates
+    // none of them. Compared against the guide's own declarations rather than
+    // a hardcoded count, so a capability added to one and not the other fails
+    // here instead of drifting.
+    let guide = loom_connector_docker::setup_guide();
+    let declared: Vec<&str> = guide.variants[1]
+        .capability_requirements
+        .iter()
+        .map(|requirement| requirement.capability_key.as_str())
+        .collect();
+    for key in &declared {
+        assert!(
+            result
+                .capabilities
+                .iter()
+                .any(|capability| capability.key == *key),
+            "the socket result never mentions {key}"
+        );
+    }
+    assert_eq!(result.capabilities.len(), declared.len());
     assert!(result
         .capabilities
         .iter()

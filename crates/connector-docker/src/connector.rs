@@ -9,7 +9,8 @@ use bollard::models::{
     ContainerCpuStats, ContainerInspectResponse, ContainerStatsResponse, ContainerSummary,
 };
 use bollard::query_parameters::{
-    ListContainersOptionsBuilder, LogsOptionsBuilder, StatsOptionsBuilder,
+    ListContainersOptionsBuilder, ListImagesOptionsBuilder, ListNetworksOptions,
+    ListVolumesOptions, LogsOptionsBuilder, StatsOptionsBuilder,
 };
 use bollard::Docker;
 use chrono::{DateTime, Utc};
@@ -103,6 +104,41 @@ const CAPABILITY_RESTART: &str = "restart-containers";
 const CAPABILITY_PAUSE: &str = "pause-containers";
 const CAPABILITY_UNPAUSE: &str = "unpause-containers";
 const CAPABILITY_HOST_SUMMARY: &str = "host-summary";
+const CAPABILITY_LIST_IMAGES: &str = "list-images";
+const CAPABILITY_PULL_IMAGE: &str = "pull-image";
+const CAPABILITY_DELETE_IMAGE: &str = "delete-image";
+const CAPABILITY_LIST_VOLUMES: &str = "list-volumes";
+const CAPABILITY_CREATE_VOLUME: &str = "create-volume";
+const CAPABILITY_DELETE_VOLUME: &str = "delete-volume";
+const CAPABILITY_LIST_NETWORKS: &str = "list-networks";
+const CAPABILITY_CREATE_NETWORK: &str = "create-network";
+const CAPABILITY_DELETE_NETWORK: &str = "delete-network";
+const CAPABILITY_LIST_UPDATES: &str = "list-updates";
+const CAPABILITY_APPLY_UPDATE: &str = "apply-update";
+
+// What LinuxServer's socket-proxy actually gates writes on.
+//
+// Its HAProxy rules contain exactly one method gate:
+//
+// ```text
+// http-request deny unless METH_GET || { env(POST) -m bool }
+// ```
+//
+// It sits **after** the per-action container rules (which is why `ALLOW_START`
+// and friends work with `POST=0` — an earlier `http-request allow`
+// short-circuits) and **before** every category rule (`IMAGES`, `VOLUMES`,
+// `NETWORKS`, `CONTAINERS`, …). So `POST` is not a POST-verb toggle at all: it
+// is an **any-method-but-GET** master gate, and `DELETE` is covered by it
+// despite never being named. There is no per-category write toggle and no
+// `DELETE` toggle to offer instead.
+//
+// Verified against `lscr.io/linuxserver/socket-proxy:latest`: with
+// `IMAGES=VOLUMES=NETWORKS=1` and `POST=0`, the three `GET` listings answer
+// `200` while every `DELETE` and `POST` on the same paths answers `403`;
+// adding `POST=1` turns those into the daemon's own `404`/`201`/`400`.
+//
+// Hence every write capability below requires its category toggle **and**
+// `post`, and every read capability requires only its category toggle.
 
 fn setup_toggle(
     key: &str,
@@ -156,7 +192,7 @@ pub fn setup_guide() -> SetupGuide {
                 label: "Via socket proxy".to_owned(),
                 description: "Uses LinuxServer's socket-proxy, whose current rules provide separate opt-in gates for logs, archive, export, process, and lifecycle endpoints. CVE-2026-78122 names Tecnativa docker-socket-proxy through 0.5.0; no published advisory against LinuxServer's image was found when this guide was verified, and its current image includes the finer-grained read gates. A Docker proxy remains highly privileged: keep it reachable only by Loom and review upstream release notes before updating."
                     .to_owned(),
-                template: "services:\n  socket-proxy:\n    image: lscr.io/linuxserver/socket-proxy:latest\n    environment:\n      PING: \"{{PING}}\"\n      VERSION: \"{{VERSION}}\"\n      CONTAINERS: \"{{CONTAINERS}}\"\n      ALLOW_LOGS: \"{{ALLOW_LOGS}}\"\n      ALLOW_START: \"{{ALLOW_START}}\"\n      ALLOW_STOP: \"{{ALLOW_STOP}}\"\n      ALLOW_RESTARTS: \"{{ALLOW_RESTARTS}}\"\n      ALLOW_PAUSE: \"{{ALLOW_PAUSE}}\"\n      ALLOW_UNPAUSE: \"{{ALLOW_UNPAUSE}}\"\n      INFO: \"{{INFO}}\"\n      SYSTEM: \"{{SYSTEM}}\"\n      POST: \"{{POST}}\"\n      # Loom does not use these sensitive read endpoints. Keep them denied.\n      ALLOW_ARCHIVE: \"0\"\n      ALLOW_CHANGES: \"0\"\n      ALLOW_EXPORT: \"0\"\n      ALLOW_TOP: \"0\"\n    volumes:\n      - /var/run/docker.sock:/var/run/docker.sock:ro\n    read_only: true\n    tmpfs:\n      - /run\n    networks:\n      - loom-docker-api\n\n  web-backend:\n    networks:\n      - loom-docker-api\n\nnetworks:\n  loom-docker-api:\n    internal: true\n\n# Enter this in Loom:\ndockerHost: tcp://socket-proxy:2375\n\n# Do not publish port 2375. If the proxy and Loom must be on different hosts,\n# expose it only through a VPN, firewall allowlist, or authenticated TLS tunnel.\n# Never expose this unauthenticated plain-HTTP proxy on 0.0.0.0."
+                template: "services:\n  socket-proxy:\n    image: lscr.io/linuxserver/socket-proxy:latest\n    environment:\n      PING: \"{{PING}}\"\n      VERSION: \"{{VERSION}}\"\n      CONTAINERS: \"{{CONTAINERS}}\"\n      ALLOW_LOGS: \"{{ALLOW_LOGS}}\"\n      ALLOW_START: \"{{ALLOW_START}}\"\n      ALLOW_STOP: \"{{ALLOW_STOP}}\"\n      ALLOW_RESTARTS: \"{{ALLOW_RESTARTS}}\"\n      ALLOW_PAUSE: \"{{ALLOW_PAUSE}}\"\n      ALLOW_UNPAUSE: \"{{ALLOW_UNPAUSE}}\"\n      INFO: \"{{INFO}}\"\n      SYSTEM: \"{{SYSTEM}}\"\n      IMAGES: \"{{IMAGES}}\"\n      VOLUMES: \"{{VOLUMES}}\"\n      NETWORKS: \"{{NETWORKS}}\"\n      # Deleting an image, volume or network, and pulling one, are not GET\n      # requests, and POST is this proxy's only method gate. The three vars\n      # above alone give read-only browsing.\n      POST: \"{{POST}}\"\n      # Loom does not use these sensitive read endpoints. Keep them denied.\n      ALLOW_ARCHIVE: \"0\"\n      ALLOW_CHANGES: \"0\"\n      ALLOW_EXPORT: \"0\"\n      ALLOW_TOP: \"0\"\n    volumes:\n      - /var/run/docker.sock:/var/run/docker.sock:ro\n    read_only: true\n    tmpfs:\n      - /run\n    networks:\n      - loom-docker-api\n\n  web-backend:\n    networks:\n      - loom-docker-api\n\nnetworks:\n  loom-docker-api:\n    internal: true\n\n# Enter this in Loom:\ndockerHost: tcp://socket-proxy:2375\n\n# Do not publish port 2375. If the proxy and Loom must be on different hosts,\n# expose it only through a VPN, firewall allowlist, or authenticated TLS tunnel.\n# Never expose this unauthenticated plain-HTTP proxy on 0.0.0.0."
                     .to_owned(),
                 toggles: vec![
                     setup_toggle(
@@ -248,10 +284,34 @@ pub fn setup_guide() -> SetupGuide {
                         false,
                     ),
                     setup_toggle(
+                        "images",
+                        "IMAGES",
+                        "Allow image access",
+                        "Enables Loom's Images table: browsing the daemon's images, and — with POST also on — pulling and deleting them. Also what per-container update checking reads to compare a running image against its registry. LinuxServer default: off.",
+                        false,
+                        false,
+                    ),
+                    setup_toggle(
+                        "networks",
+                        "NETWORKS",
+                        "Allow network access",
+                        "Enables Loom's Networks table: browsing the daemon's networks, and — with POST also on — creating and deleting them. LinuxServer default: off.",
+                        false,
+                        false,
+                    ),
+                    setup_toggle(
+                        "volumes",
+                        "VOLUMES",
+                        "Allow volume access",
+                        "Enables Loom's Volumes table: browsing the daemon's volumes, and — with POST also on — creating and deleting them. LinuxServer default: off.",
+                        false,
+                        false,
+                    ),
+                    setup_toggle(
                         "post",
                         "POST",
                         "Allow other write requests",
-                        "LinuxServer default: off. Loom's lifecycle actions use their narrower ALLOW_* gates even with POST=0, so leave this broad master write gate off unless another trusted client explicitly needs it.",
+                        "LinuxServer default: off. Despite its name this gates every method that is not GET, DELETE included, and it is the only such gate the proxy has. Loom's container lifecycle actions use their narrower ALLOW_* gates and work with POST=0; pulling and deleting images, and creating and deleting volumes and networks, cannot — they need this as well as their own category toggle above.",
                         false,
                         false,
                     ),
@@ -296,6 +356,67 @@ pub fn setup_guide() -> SetupGuide {
                         CAPABILITY_HOST_SUMMARY,
                         "View host summary",
                         &["info", "system", "version"],
+                    ),
+                    // `containers` as well as `images`: the images table's
+                    // "Used by" column is a container listing, so a proxy with
+                    // IMAGES but not CONTAINERS lists images that all claim
+                    // nothing is using them.
+                    capability_requirement(
+                        CAPABILITY_LIST_IMAGES,
+                        "Browse images",
+                        &["containers", "images"],
+                    ),
+                    capability_requirement(
+                        CAPABILITY_PULL_IMAGE,
+                        "Pull images",
+                        &["containers", "images", "post"],
+                    ),
+                    capability_requirement(
+                        CAPABILITY_DELETE_IMAGE,
+                        "Delete images",
+                        &["containers", "images", "post"],
+                    ),
+                    capability_requirement(CAPABILITY_LIST_VOLUMES, "Browse volumes", &["volumes"]),
+                    capability_requirement(
+                        CAPABILITY_CREATE_VOLUME,
+                        "Create volumes",
+                        &["volumes", "post"],
+                    ),
+                    capability_requirement(
+                        CAPABILITY_DELETE_VOLUME,
+                        "Delete volumes",
+                        &["volumes", "post"],
+                    ),
+                    capability_requirement(
+                        CAPABILITY_LIST_NETWORKS,
+                        "Browse networks",
+                        &["networks"],
+                    ),
+                    capability_requirement(
+                        CAPABILITY_CREATE_NETWORK,
+                        "Create networks",
+                        &["networks", "post"],
+                    ),
+                    capability_requirement(
+                        CAPABILITY_DELETE_NETWORK,
+                        "Delete networks",
+                        &["networks", "post"],
+                    ),
+                    // An update check inspects the container (CONTAINERS) and
+                    // its local image (IMAGES) before it asks a registry
+                    // anything. It writes nothing, so it needs no POST.
+                    capability_requirement(
+                        CAPABILITY_LIST_UPDATES,
+                        "Check for container updates",
+                        &["containers", "images"],
+                    ),
+                    // Applying one pulls (POST /images/create), removes the old
+                    // container (DELETE) and creates the replacement (POST) —
+                    // three non-GET requests across two categories.
+                    capability_requirement(
+                        CAPABILITY_APPLY_UPDATE,
+                        "Apply container updates",
+                        &["containers", "images", "post"],
                     ),
                 ],
             },
@@ -812,41 +933,48 @@ fn write_capability(key: &str, label: &str, relevant_env_vars: &str) -> Capabili
     )
 }
 
-fn combine_host_summary_probes(
-    info: Result<(), bollard::errors::Error>,
-    system: Result<(), bollard::errors::Error>,
+/// One capability that needs several reads to all succeed.
+///
+/// Borrows its probes rather than taking them, because `bollard::errors::Error`
+/// is not `Clone` and one probe can legitimately decide two capabilities — a
+/// container listing gates both "list containers" and, with the image listing,
+/// "check for updates".
+///
+/// A `403` from any of them is the proxy declining, which names the toggles to
+/// look at; anything else is reported as the transport failure it was, because
+/// "check your configuration" is unhelpful advice for a connection that broke.
+fn combine_read_probes(
+    key: &str,
+    label: &str,
+    relevant_env_vars: &str,
+    probes: &[&Result<(), bollard::errors::Error>],
 ) -> CapabilityStatus {
-    let denied = [&info, &system].iter().any(|result| {
+    if probes.iter().all(|probe| probe.is_ok()) {
+        return available_capability(key, label);
+    }
+    if probes.iter().any(|probe| {
         matches!(
-            result,
+            probe,
             Err(bollard::errors::Error::DockerResponseServerError {
                 status_code: 403,
                 ..
             })
         )
-    });
-    if info.is_ok() && system.is_ok() {
-        return available_capability(CAPABILITY_HOST_SUMMARY, "View host summary");
-    }
-    if denied {
+    }) {
         return unavailable_capability(
-            CAPABILITY_HOST_SUMMARY,
-            "View host summary",
-            "Proxy configuration does not permit this — check INFO and SYSTEM.",
+            key,
+            label,
+            format!("Proxy configuration does not permit this — check {relevant_env_vars}."),
         );
     }
 
-    let errors = [info.err(), system.err()]
-        .into_iter()
-        .flatten()
+    let errors = probes
+        .iter()
+        .filter_map(|probe| probe.as_ref().err())
         .map(|error| error.to_string())
         .collect::<Vec<_>>()
         .join("; ");
-    unavailable_capability(
-        CAPABILITY_HOST_SUMMARY,
-        "View host summary",
-        format!("Read probe failed: {errors}"),
-    )
+    unavailable_capability(key, label, format!("Read probe failed: {errors}"))
 }
 
 impl DockerConnector {
@@ -974,6 +1102,17 @@ impl Connector for DockerConnector {
                     available_capability(CAPABILITY_PAUSE, "Pause containers"),
                     available_capability(CAPABILITY_UNPAUSE, "Resume containers"),
                     available_capability(CAPABILITY_HOST_SUMMARY, "View host summary"),
+                    available_capability(CAPABILITY_LIST_IMAGES, "Browse images"),
+                    available_capability(CAPABILITY_PULL_IMAGE, "Pull images"),
+                    available_capability(CAPABILITY_DELETE_IMAGE, "Delete images"),
+                    available_capability(CAPABILITY_LIST_VOLUMES, "Browse volumes"),
+                    available_capability(CAPABILITY_CREATE_VOLUME, "Create volumes"),
+                    available_capability(CAPABILITY_DELETE_VOLUME, "Delete volumes"),
+                    available_capability(CAPABILITY_LIST_NETWORKS, "Browse networks"),
+                    available_capability(CAPABILITY_CREATE_NETWORK, "Create networks"),
+                    available_capability(CAPABILITY_DELETE_NETWORK, "Delete networks"),
+                    available_capability(CAPABILITY_LIST_UPDATES, "Check for container updates"),
+                    available_capability(CAPABILITY_APPLY_UPDATE, "Apply container updates"),
                 ],
                 message: Some(
                     "The raw Docker socket is reachable and grants unrestricted Docker API access."
@@ -983,15 +1122,33 @@ impl Connector for DockerConnector {
         }
 
         let list_options = ListContainersOptionsBuilder::new().all(true).build();
-        let (containers, logs, info, system) = tokio::join!(
+        let image_options = ListImagesOptionsBuilder::new().all(false).build();
+        let (containers, logs, info, system, images, volumes, networks) = tokio::join!(
             self.docker.list_containers(Some(list_options)),
             self.probe_logs_route(),
             self.docker.info(),
             self.docker.df(None),
+            // The same three listings the resource browser makes, so what the
+            // test reports and what the tables will do cannot disagree.
+            self.docker.list_images(Some(image_options)),
+            self.docker.list_volumes(None::<ListVolumesOptions>),
+            self.docker.list_networks(None::<ListNetworksOptions>),
         );
         let containers = containers.map(|_| ());
         let info = info.map(|_| ());
         let system = system.map(|_| ());
+        let images = images.map(|_| ());
+        let volumes = volumes.map(|_| ());
+        let networks = networks.map(|_| ());
+        // Update checking reads a container and its local image before it asks
+        // a registry anything, so it is available exactly when both of those
+        // probes were — no extra request to decide it.
+        let updates = combine_read_probes(
+            CAPABILITY_LIST_UPDATES,
+            "Check for container updates",
+            "CONTAINERS and IMAGES",
+            &[&containers, &images],
+        );
 
         ConnectionTestResult {
             reachable: true,
@@ -1033,7 +1190,50 @@ impl Connector for DockerConnector {
                     "Resume containers",
                     "CONTAINERS and ALLOW_UNPAUSE",
                 ),
-                combine_host_summary_probes(info, system),
+                combine_read_probes(
+                    CAPABILITY_HOST_SUMMARY,
+                    "View host summary",
+                    "INFO and SYSTEM",
+                    &[&info, &system],
+                ),
+                proxy_read_capability(CAPABILITY_LIST_IMAGES, "Browse images", "IMAGES", images),
+                // Writes stay declarative, per the rule the lifecycle actions
+                // already follow: the only way to prove a delete is permitted
+                // is to delete something. The note names both gates, because
+                // the category toggle on its own is not enough — POST is this
+                // proxy's only method gate and it covers DELETE too.
+                write_capability(CAPABILITY_PULL_IMAGE, "Pull images", "IMAGES and POST"),
+                write_capability(CAPABILITY_DELETE_IMAGE, "Delete images", "IMAGES and POST"),
+                proxy_read_capability(
+                    CAPABILITY_LIST_VOLUMES,
+                    "Browse volumes",
+                    "VOLUMES",
+                    volumes,
+                ),
+                write_capability(CAPABILITY_CREATE_VOLUME, "Create volumes", "VOLUMES and POST"),
+                write_capability(CAPABILITY_DELETE_VOLUME, "Delete volumes", "VOLUMES and POST"),
+                proxy_read_capability(
+                    CAPABILITY_LIST_NETWORKS,
+                    "Browse networks",
+                    "NETWORKS",
+                    networks,
+                ),
+                write_capability(
+                    CAPABILITY_CREATE_NETWORK,
+                    "Create networks",
+                    "NETWORKS and POST",
+                ),
+                write_capability(
+                    CAPABILITY_DELETE_NETWORK,
+                    "Delete networks",
+                    "NETWORKS and POST",
+                ),
+                updates,
+                write_capability(
+                    CAPABILITY_APPLY_UPDATE,
+                    "Apply container updates",
+                    "CONTAINERS, IMAGES and POST",
+                ),
             ],
             message: Some(
                 "Docker is reachable through TCP. Read capabilities were probed; write capabilities were not exercised."
@@ -1764,6 +1964,35 @@ mod tests {
         logs: bool,
         info: bool,
         system: bool,
+        images: bool,
+        volumes: bool,
+        networks: bool,
+    }
+
+    /// A proxy configured the way the guide's defaults leave it: containers and
+    /// their logs, nothing from the host inventory.
+    fn containers_only() -> MockProxyPermissions {
+        MockProxyPermissions {
+            containers: true,
+            logs: true,
+            info: false,
+            system: false,
+            images: false,
+            volumes: false,
+            networks: false,
+        }
+    }
+
+    fn everything() -> MockProxyPermissions {
+        MockProxyPermissions {
+            containers: true,
+            logs: true,
+            info: true,
+            system: true,
+            images: true,
+            volumes: true,
+            networks: true,
+        }
     }
 
     async fn mock_proxy(permissions: MockProxyPermissions) -> String {
@@ -1813,6 +2042,24 @@ mod tests {
                     } else if path.ends_with("/system/df") {
                         if permissions.system {
                             ("200 OK", "{}")
+                        } else {
+                            ("403 Forbidden", r#"{"message":"forbidden"}"#)
+                        }
+                    } else if path.contains("/images/json") {
+                        if permissions.images {
+                            ("200 OK", "[]")
+                        } else {
+                            ("403 Forbidden", r#"{"message":"forbidden"}"#)
+                        }
+                    } else if path.contains("/volumes") {
+                        if permissions.volumes {
+                            ("200 OK", r#"{"Volumes":[]}"#)
+                        } else {
+                            ("403 Forbidden", r#"{"message":"forbidden"}"#)
+                        }
+                    } else if path.contains("/networks") {
+                        if permissions.networks {
+                            ("200 OK", "[]")
                         } else {
                             ("403 Forbidden", r#"{"message":"forbidden"}"#)
                         }
@@ -1926,10 +2173,27 @@ mod tests {
                 "ALLOW_UNPAUSE",
                 "INFO",
                 "SYSTEM",
+                "IMAGES",
+                "NETWORKS",
+                "VOLUMES",
                 "POST",
             ]
         );
-        assert!(!env_vars.contains(&"IMAGES"), "Loom never calls /images");
+        // Every toggle the guide offers has to appear in the compose snippet it
+        // renders, or someone follows the instructions and gets a proxy that
+        // denies the feature they just switched on. This is the assertion that
+        // would have caught the images/volumes/networks gap when the resource
+        // kinds were added — see `docs/adr/0025-capabilities-are-part-of-adding-a-feature.md`.
+        for toggle in &proxy.toggles {
+            assert!(
+                proxy.template.contains(&format!(
+                    "{}: \"{{{{{}}}}}\"",
+                    toggle.env_var, toggle.env_var
+                )),
+                "{} is a toggle but is not in the rendered compose file",
+                toggle.env_var
+            );
+        }
         assert!(proxy
             .template
             .contains("lscr.io/linuxserver/socket-proxy:latest"));
@@ -1965,32 +2229,175 @@ mod tests {
                 (CAPABILITY_PAUSE, vec!["containers", "allowPause"]),
                 (CAPABILITY_UNPAUSE, vec!["containers", "allowUnpause"]),
                 (CAPABILITY_HOST_SUMMARY, vec!["info", "system", "version"]),
+                (CAPABILITY_LIST_IMAGES, vec!["containers", "images"]),
+                (CAPABILITY_PULL_IMAGE, vec!["containers", "images", "post"]),
+                (
+                    CAPABILITY_DELETE_IMAGE,
+                    vec!["containers", "images", "post"]
+                ),
+                (CAPABILITY_LIST_VOLUMES, vec!["volumes"]),
+                (CAPABILITY_CREATE_VOLUME, vec!["volumes", "post"]),
+                (CAPABILITY_DELETE_VOLUME, vec!["volumes", "post"]),
+                (CAPABILITY_LIST_NETWORKS, vec!["networks"]),
+                (CAPABILITY_CREATE_NETWORK, vec!["networks", "post"]),
+                (CAPABILITY_DELETE_NETWORK, vec!["networks", "post"]),
+                (CAPABILITY_LIST_UPDATES, vec!["containers", "images"]),
+                (
+                    CAPABILITY_APPLY_UPDATE,
+                    vec!["containers", "images", "post"]
+                ),
             ]
         );
+
+        // Every requirement names toggles that exist, and every write
+        // requirement includes `post`. The second is the empirical finding:
+        // LinuxServer's only method gate is `deny unless METH_GET || POST`, so
+        // a category toggle alone never permits a delete, a create or a pull.
+        let toggle_keys = proxy
+            .toggles
+            .iter()
+            .map(|toggle| toggle.key.as_str())
+            .collect::<Vec<_>>();
+        for requirement in &proxy.capability_requirements {
+            for key in &requirement.required_toggle_keys {
+                assert!(
+                    toggle_keys.contains(&key.as_str()),
+                    "{} requires `{key}`, which is not a toggle",
+                    requirement.capability_key
+                );
+            }
+            let is_write = matches!(
+                requirement.capability_key.as_str(),
+                CAPABILITY_PULL_IMAGE
+                    | CAPABILITY_DELETE_IMAGE
+                    | CAPABILITY_CREATE_VOLUME
+                    | CAPABILITY_DELETE_VOLUME
+                    | CAPABILITY_CREATE_NETWORK
+                    | CAPABILITY_DELETE_NETWORK
+                    | CAPABILITY_APPLY_UPDATE
+            );
+            assert_eq!(
+                is_write,
+                requirement
+                    .required_toggle_keys
+                    .iter()
+                    .any(|key| key == "post"),
+                "{} disagrees with the verified POST gate",
+                requirement.capability_key
+            );
+        }
+    }
+
+    /// Every action and resource kind this connector publishes has to be
+    /// reachable through the proxy variant, which means every one of them needs
+    /// a capability requirement. Nothing enforced this before, which is exactly
+    /// how the images/volumes/networks kinds shipped with none.
+    #[tokio::test]
+    async fn every_declared_resource_kind_has_a_capability_requirement() {
+        let connector = detached("tcp://docker-proxy.example:2375", &["web"]);
+        let guide = setup_guide();
+        let proxy = &guide.variants[1];
+        let declared = proxy
+            .capability_requirements
+            .iter()
+            .map(|requirement| requirement.capability_key.as_str())
+            .collect::<Vec<_>>();
+
+        // The mapping is deliberately written out rather than derived: a kind
+        // added without a thought about the proxy should fail to compile here,
+        // not silently inherit a neighbour's capability.
+        let expected = [
+            (RESOURCE_KIND_UPDATES, CAPABILITY_LIST_UPDATES),
+            (
+                crate::resources::RESOURCE_KIND_IMAGES,
+                CAPABILITY_LIST_IMAGES,
+            ),
+            (
+                crate::resources::RESOURCE_KIND_VOLUMES,
+                CAPABILITY_LIST_VOLUMES,
+            ),
+            (
+                crate::resources::RESOURCE_KIND_NETWORKS,
+                CAPABILITY_LIST_NETWORKS,
+            ),
+        ];
+        for kind in connector.resource_kinds() {
+            let capability = expected
+                .iter()
+                .find(|(name, _)| *name == kind.kind)
+                .unwrap_or_else(|| panic!("resource kind `{}` has no capability", kind.kind))
+                .1;
+            assert!(
+                declared.contains(&capability),
+                "`{}` maps to {capability}, which the proxy variant does not declare",
+                kind.kind
+            );
+        }
+    }
+
+    /// Looks capabilities up by key rather than by position: the list grows
+    /// every time a feature is added, and an index-based assertion silently
+    /// starts checking a different capability when it does.
+    fn capability<'a>(result: &'a ConnectionTestResult, key: &str) -> &'a CapabilityStatus {
+        result
+            .capabilities
+            .iter()
+            .find(|capability| capability.key == key)
+            .unwrap_or_else(|| panic!("the test result never mentions {key}"))
     }
 
     #[tokio::test]
     async fn tcp_connection_test_live_probes_reads_but_never_claims_writes() {
-        let host = mock_proxy(MockProxyPermissions {
-            containers: true,
-            logs: true,
-            info: true,
-            system: true,
-        })
-        .await;
+        let host = mock_proxy(everything()).await;
         let result = detached(&host, &[]).test_connection().await;
         assert!(result.reachable);
-        assert_eq!(result.capabilities.len(), 8);
-        assert!(result.capabilities[0].available);
-        assert!(result.capabilities[1].available);
-        assert!(result.capabilities[2..7]
-            .iter()
-            .all(|capability| !capability.available));
-        assert!(result.capabilities[7].available);
-        assert!(result.capabilities[2..7].iter().all(|capability| capability
-            .note
-            .as_deref()
-            .is_some_and(|note| note.contains("without performing an action"))));
+
+        // Everything that can be proved by reading, was.
+        for key in [
+            CAPABILITY_LIST_CONTAINERS,
+            CAPABILITY_READ_LOGS,
+            CAPABILITY_HOST_SUMMARY,
+            CAPABILITY_LIST_IMAGES,
+            CAPABILITY_LIST_VOLUMES,
+            CAPABILITY_LIST_NETWORKS,
+            CAPABILITY_LIST_UPDATES,
+        ] {
+            assert!(
+                capability(&result, key).available,
+                "{key} should be probed available"
+            );
+        }
+
+        // Everything that would take an action to prove, stays unproven — a
+        // permitted-looking button that turns out to be denied is worse than
+        // one the test declined to promise.
+        for key in [
+            CAPABILITY_START,
+            CAPABILITY_STOP,
+            CAPABILITY_RESTART,
+            CAPABILITY_PAUSE,
+            CAPABILITY_UNPAUSE,
+            CAPABILITY_PULL_IMAGE,
+            CAPABILITY_DELETE_IMAGE,
+            CAPABILITY_CREATE_VOLUME,
+            CAPABILITY_DELETE_VOLUME,
+            CAPABILITY_CREATE_NETWORK,
+            CAPABILITY_DELETE_NETWORK,
+            CAPABILITY_APPLY_UPDATE,
+        ] {
+            let status = capability(&result, key);
+            assert!(!status.available, "{key} must not be claimed");
+            assert!(status
+                .note
+                .as_deref()
+                .is_some_and(|note| note.contains("without performing an action")));
+        }
+
+        // Every declarative requirement has a live row to match against.
+        let guide = setup_guide();
+        for requirement in &guide.variants[1].capability_requirements {
+            capability(&result, &requirement.capability_key);
+        }
     }
 
     #[tokio::test]
@@ -2000,25 +2407,71 @@ mod tests {
             logs: false,
             info: true,
             system: false,
+            images: false,
+            volumes: false,
+            networks: false,
         })
         .await;
         let result = detached(&host, &[]).test_connection().await;
         assert!(result.reachable, "PING and VERSION remain available");
-        assert!(!result.capabilities[0].available);
-        assert!(!result.capabilities[1].available);
-        assert!(!result.capabilities[7].available);
-        assert!(result.capabilities[0]
+
+        // Each denied read names the toggle that would fix it, and names its
+        // own — "check CONTAINERS" is useless advice for a denied volume list.
+        for (key, expected_note) in [
+            (CAPABILITY_LIST_CONTAINERS, "CONTAINERS"),
+            (CAPABILITY_READ_LOGS, "ALLOW_LOGS"),
+            (CAPABILITY_HOST_SUMMARY, "INFO and SYSTEM"),
+            (CAPABILITY_LIST_IMAGES, "IMAGES"),
+            (CAPABILITY_LIST_VOLUMES, "VOLUMES"),
+            (CAPABILITY_LIST_NETWORKS, "NETWORKS"),
+            (CAPABILITY_LIST_UPDATES, "CONTAINERS and IMAGES"),
+        ] {
+            let status = capability(&result, key);
+            assert!(!status.available, "{key} should be denied");
+            assert!(
+                status
+                    .note
+                    .as_deref()
+                    .is_some_and(|note| note.contains(expected_note)),
+                "{key} should point at {expected_note}, said {:?}",
+                status.note
+            );
+        }
+    }
+
+    /// The guide's own defaults — containers and logs, no host inventory —
+    /// are the configuration most people will actually have, and the three new
+    /// tables must say plainly which toggle they are waiting on.
+    #[tokio::test]
+    async fn a_containers_only_proxy_reports_the_inventory_tables_as_unavailable() {
+        let host = mock_proxy(containers_only()).await;
+        let result = detached(&host, &[]).test_connection().await;
+        assert!(result.reachable);
+        assert!(capability(&result, CAPABILITY_LIST_CONTAINERS).available);
+        assert!(capability(&result, CAPABILITY_READ_LOGS).available);
+
+        for (key, toggle) in [
+            (CAPABILITY_LIST_IMAGES, "IMAGES"),
+            (CAPABILITY_LIST_VOLUMES, "VOLUMES"),
+            (CAPABILITY_LIST_NETWORKS, "NETWORKS"),
+        ] {
+            let status = capability(&result, key);
+            assert!(!status.available, "{key} needs {toggle}, which is off");
+            assert_eq!(
+                status.note.as_deref(),
+                Some(
+                    format!("Proxy configuration does not permit this — check {toggle}.").as_str()
+                )
+            );
+        }
+
+        // Update checking is denied by the image half alone, and says so.
+        let updates = capability(&result, CAPABILITY_LIST_UPDATES);
+        assert!(!updates.available);
+        assert!(updates
             .note
             .as_deref()
-            .is_some_and(|note| note.contains("CONTAINERS")));
-        assert!(result.capabilities[1]
-            .note
-            .as_deref()
-            .is_some_and(|note| note.contains("ALLOW_LOGS")));
-        assert!(result.capabilities[7]
-            .note
-            .as_deref()
-            .is_some_and(|note| note.contains("INFO and SYSTEM")));
+            .is_some_and(|note| note.contains("CONTAINERS and IMAGES")));
     }
 
     #[test]
