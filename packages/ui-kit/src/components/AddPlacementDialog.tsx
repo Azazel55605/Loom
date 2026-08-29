@@ -22,15 +22,20 @@ import {
 } from "@loom/ui-kit/components/ui/select";
 import { Skeleton } from "@loom/ui-kit/components/ui/skeleton";
 import { PlacementBindingEditor } from "@loom/ui-kit/components/PlacementBindingEditor";
-import { SearchablePickerList } from "@loom/ui-kit/components/SearchablePickerList";
+import {
+  SearchablePickerList,
+  type SearchablePickerOption,
+} from "@loom/ui-kit/components/SearchablePickerList";
 import { SegmentedControl } from "@loom/ui-kit/components/SegmentedControl";
 import type {
   DashboardPlacement,
   DashboardPlacementGroup,
+  SubTarget,
   WidgetBinding,
 } from "@loom/ui-kit/lib/api";
 import { useApiClient } from "@loom/ui-kit/lib/api-context";
 import { describeConnectorError } from "@loom/ui-kit/lib/connector-error";
+import { describeTargetKind } from "@loom/ui-kit/lib/target-label";
 
 type PlacementMode = "server" | "target";
 
@@ -260,7 +265,7 @@ export function AddPlacementDialog({
                     value={mode}
                     options={[
                       { value: "server", label: "Server info" },
-                      { value: "target", label: "Single container" },
+                      { value: "target", label: "Container / Stack" },
                     ]}
                     onChange={(next) => {
                       setMode(next);
@@ -274,14 +279,14 @@ export function AddPlacementDialog({
               {mode === "target" && detail.data.supportsSubTargets ? (
                 <div className="flex min-h-0 flex-col gap-3">
                   <div>
-                    <h3 className="text-sm font-medium">Container</h3>
+                    <h3 className="text-sm font-medium">Container or stack</h3>
                     <p className="text-xs text-muted-foreground">
-                      Choose one container on {detail.data.metadata.name}. Its recommended
-                      container widgets will be added automatically.
+                      Choose one view inside {detail.data.metadata.name}. Its recommended
+                      widgets will be added automatically.
                     </p>
                   </div>
                   {subTargets.isPending ? (
-                    <div className="flex flex-col gap-2" aria-label="Loading containers">
+                    <div className="flex flex-col gap-2" aria-label="Loading views">
                       <Skeleton className="h-9 w-full" />
                       <Skeleton className="h-9 w-full" />
                       <Skeleton className="h-9 w-3/4" />
@@ -289,16 +294,20 @@ export function AddPlacementDialog({
                   ) : subTargets.isError ? (
                     <Alert variant="destructive">
                       <AlertCircle aria-hidden="true" />
-                      <AlertTitle>Could not load containers</AlertTitle>
+                      <AlertTitle>Could not load views</AlertTitle>
                       <AlertDescription>
                         {describeConnectorError(subTargets.error)}
                       </AlertDescription>
                     </Alert>
                   ) : (
                     <SearchablePickerList
-                      options={subTargets.data}
-                      searchLabel="Search containers"
-                      emptyMessage="No containers found"
+                      // Badged by the connector's own word for what each entry
+                      // is, so a mixed list reads as one. Search still matches
+                      // `label` alone: the badge is a property of the row, not
+                      // another thing to type at.
+                      options={pickerOptions(subTargets.data)}
+                      searchLabel="Search containers and stacks"
+                      emptyMessage="No containers or stacks found"
                       selectedId={targetId}
                       disabled={create.isPending}
                       onSelect={(next) => {
@@ -367,4 +376,19 @@ export function AddPlacementDialog({
       </DialogContent>
     </Dialog>
   );
+}
+
+/**
+ * One sub-target per picker row, tagged with what sort of thing it is.
+ *
+ * A `kind` this client has never seen still gets a badge, title-cased — the
+ * vocabulary belongs to the connector, and dropping an unrecognised word would
+ * make a mixed list read as though the entries were interchangeable.
+ */
+function pickerOptions(targets: SubTarget[]): SearchablePickerOption[] {
+  return targets.map((target) => ({
+    id: target.id,
+    label: target.label,
+    badge: describeTargetKind(target.kind) ?? undefined,
+  }));
 }

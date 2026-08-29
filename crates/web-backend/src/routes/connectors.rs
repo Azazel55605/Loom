@@ -501,7 +501,10 @@ const RECENTLY_UPDATED_LIMIT: i64 = 25;
 /// nothing still gets this one if it supports update checking, and a connector
 /// that declares a kind by the same name would shadow nothing — the ids are
 /// distinct by construction because this one is not a Docker word.
-fn platform_resource_kinds(connector: &dyn Connector) -> Vec<ResourceKindDescriptor> {
+fn platform_resource_kinds(
+    connector: &dyn Connector,
+    target_id: Option<&str>,
+) -> Vec<ResourceKindDescriptor> {
     if !connector.supports_update_checking() {
         return Vec::new();
     }
@@ -536,7 +539,7 @@ fn platform_resource_kinds(connector: &dyn Connector) -> Vec<ResourceKindDescrip
         // actually run. A connector that offers no such action gets a
         // history table with no buttons, which is still worth reading.
         connector
-            .resource_kinds()
+            .resource_kinds(target_id)
             .into_iter()
             .flat_map(|kind| kind.row_actions)
             .find(|action| action.id == APPLY_UPDATE_ACTION)
@@ -623,13 +626,18 @@ pub async fn list_resource_kinds(
     _caller: RequirePermission<ConnectorsView>,
     State(state): State<AppState>,
     Path(id): Path<String>,
+    Query(query): Query<ResourceListQuery>,
 ) -> Response {
     let connector = match live_connector(&state, &id, "resource kinds").await {
         Ok(connector) => connector,
         Err(response) => return *response,
     };
-    let mut kinds = connector.resource_kinds();
-    kinds.extend(platform_resource_kinds(connector.as_ref()));
+    // Which view is being looked at, so a connector can publish a kind that
+    // only one sort of target has — Docker's stack members, which a container
+    // does not have and `ApplicableTarget` therefore cannot express.
+    let target_id = query.target();
+    let mut kinds = connector.resource_kinds(target_id);
+    kinds.extend(platform_resource_kinds(connector.as_ref(), target_id));
     Json(kinds).into_response()
 }
 
@@ -641,6 +649,21 @@ pub struct ResourceListQuery {
     /// the connector. Absent means the instance as a whole.
     #[serde(default)]
     target_id: Option<String>,
+}
+
+impl ResourceListQuery {
+    /// The target, with blank and absent treated alike.
+    ///
+    /// `?targetId=` with nothing after it is what an empty form field sends,
+    /// and it means the same thing as omitting the parameter. Passing `Some("")`
+    /// to a connector would make it a third case every implementation would
+    /// have to think about.
+    fn target(&self) -> Option<&str> {
+        self.target_id
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+    }
 }
 
 /// `GET /connector-instances/{id}/resources/{kind}`
@@ -673,8 +696,14 @@ pub async fn list_resources(
         };
     }
 
+    let target_id = query.target();
+
+    // Validated against the kinds *this target* has, not against the instance's
+    // whole vocabulary: a kind only a stack publishes is as much "no such kind"
+    // for a container as one nothing publishes at all, and answering otherwise
+    // would send the connector a listing it has no descriptor for.
     if !connector
-        .resource_kinds()
+        .resource_kinds(target_id)
         .iter()
         .any(|descriptor| descriptor.kind == kind)
     {
@@ -683,12 +712,6 @@ pub async fn list_resources(
             format!("this connector instance has no resource kind named `{kind}`"),
         );
     }
-
-    let target_id = query
-        .target_id
-        .as_deref()
-        .map(str::trim)
-        .filter(|value| !value.is_empty());
 
     match connector.list_resource_items(&kind, target_id).await {
         Ok(items) => Json(items).into_response(),
@@ -1147,7 +1170,7 @@ pub(crate) async fn invoke_action(
     // told with a 404. In that case the call goes through and the connector
     // gets to state its real problem.
     let advertises_nothing =
-        connector.actions().await.is_empty() && connector.resource_kinds().is_empty();
+        connector.actions().await.is_empty() && connector.resource_kinds(None).is_empty();
     if descriptor.is_none() && !advertises_nothing {
         return Err(ActionFailure::UnknownAction(action_id.to_owned()));
     }
@@ -1582,7 +1605,7 @@ async fn resolve_action(
     }
 
     connector
-        .resource_kinds()
+        .resource_kinds(target_id)
         .into_iter()
         .flat_map(|kind| kind.row_actions.into_iter().chain(kind.kind_actions))
         .find(|action| action.id == action_id)

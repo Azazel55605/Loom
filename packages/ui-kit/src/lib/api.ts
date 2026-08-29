@@ -737,6 +737,17 @@ export type UpdateDashboardPlacementRequest = {
 export type SubTarget = {
   id: string;
   label: string;
+  /**
+   * What *sort* of thing this target is, in the connector's own vocabulary —
+   * Docker uses `"container"` and `"stack"`; `"target"` when a connector does
+   * not distinguish.
+   *
+   * Deliberately a free-form string, like connector type ids and action ids:
+   * the vocabulary belongs to the connector. Group or icon by it if useful, and
+   * **treat an unrecognised value as an ordinary target** — a connector
+   * inventing a word must not make its targets disappear from an older client.
+   */
+  kind: string;
 };
 
 /** `POST /connector-instances` body. */
@@ -1363,11 +1374,20 @@ function getSubTargets(
 function getResourceKinds(
   runtime: ApiRuntime,
   id: string,
+  targetId?: string | null,
   signal?: AbortSignal,
 ): Promise<ResourceKindDescriptor[]> {
+  // Which view is being looked at. Not the same question as `?targetId=` on a
+  // *listing*, which scopes rows: this decides whether a kind is published at
+  // all, so a kind only one sort of target has is absent elsewhere rather than
+  // an empty tab that will never fill.
+  const query =
+    targetId === undefined || targetId === null
+      ? ""
+      : `?targetId=${encodeURIComponent(targetId)}`;
   return authorizedRequest<ResourceKindDescriptor[]>(
     runtime,
-    `/connector-instances/${encodeURIComponent(id)}/resource-kinds`,
+    `/connector-instances/${encodeURIComponent(id)}/resource-kinds${query}`,
     { signal },
   );
 }
@@ -2136,7 +2156,8 @@ export function createApiClient(options: {
     getConnectorInstance: (id: string, signal?: AbortSignal) =>
       getConnectorInstance(runtime, id, signal),
     getSubTargets: (id: string, signal?: AbortSignal) => getSubTargets(runtime, id, signal),
-    getResourceKinds: (id: string, signal?: AbortSignal) => getResourceKinds(runtime, id, signal),
+    getResourceKinds: (id: string, targetId?: string | null, signal?: AbortSignal) =>
+      getResourceKinds(runtime, id, targetId, signal),
     getResourceItems: (
       id: string,
       kind: string,

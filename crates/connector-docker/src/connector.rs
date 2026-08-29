@@ -1,6 +1,6 @@
 //! One Docker connection with host-level and per-container views.
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -61,6 +61,35 @@ pub const ACTION_APPLY_UPDATE: &str = "applyUpdate";
 /// Resource kind listing containers with an update waiting.
 pub const RESOURCE_KIND_UPDATES: &str = "updates";
 
+/// Recent log activity across every container on the host, as one table.
+pub const RESOURCE_KIND_LOGS: &str = "logs";
+
+/// The containers making up one stack, as a table. Only ever published for a
+/// stack target — see [`DockerConnector::resource_kinds`].
+pub const RESOURCE_KIND_STACK_MEMBERS: &str = "stackMembers";
+
+/// Marks a sub-target id as naming a Compose project rather than a container.
+///
+/// **A colon is the whole trick.** Docker container names are restricted to
+/// `[a-zA-Z0-9][a-zA-Z0-9_.-]*`, so no container can ever be called
+/// `stack:anything`, and no existing target id changes meaning. That is what
+/// makes this addition non-breaking: a saved placement pointing at `web` still
+/// points at the container `web`, and always will.
+pub const STACK_TARGET_PREFIX: &str = "stack:";
+
+/// [`SubTarget::kind`] for one container.
+pub const SUB_TARGET_KIND_CONTAINER: &str = "container";
+/// [`SubTarget::kind`] for a Compose project.
+pub const SUB_TARGET_KIND_STACK: &str = "stack";
+
+/// The label Docker Compose writes on every container it creates, and the only
+/// thing that makes a stack a stack.
+///
+/// Not a Loom concept: a stack is not something this connector maintains, it is
+/// something Compose already recorded and this connector reads. A project that
+/// stops being deployed stops appearing, with no state to clean up.
+const COMPOSE_PROJECT_LABEL: &str = "com.docker.compose.project";
+
 /// The kind-level action that applies every waiting update in turn.
 pub const ACTION_UPDATE_ALL: &str = "updateAll";
 
@@ -93,6 +122,21 @@ pub const DATA_POINT_DISK_USAGE_BYTES: &str = "diskUsageBytes";
 /// help.
 pub const DATA_POINT_IMAGE_DISK_USAGE_BYTES: &str = "imageDiskUsageBytes";
 pub const DATA_POINT_DOCKER_VERSION: &str = "dockerVersion";
+
+/// Stack data point ids.
+///
+/// A stack reuses `cpuPercent`, `cpuHistory`, `memoryUsageBytes` and
+/// `memoryHistory` — same meaning, summed over members — and adds these four.
+pub const DATA_POINT_MEMBER_COUNT: &str = "memberCount";
+pub const DATA_POINT_RUNNING_COUNT: &str = "runningCount";
+pub const DATA_POINT_STOPPED_COUNT: &str = "stoppedCount";
+/// `"Running"`, `"Stopped"` or `"Partial"`.
+///
+/// A plain `String` data point, exactly like a container's own `status`. It is
+/// **not** connector health: [`ConnectorStatus::health`] says whether Loom can
+/// reach the Docker daemon, and a deliberately stopped stack is not a Docker
+/// host that is down. See `docs/adr/0027-docker-stacks.md`.
+pub const DATA_POINT_OVERALL_STATUS: &str = "overallStatus";
 
 /// Action ids.
 pub const ACTION_START: &str = "start";
@@ -435,6 +479,39 @@ pub fn setup_guide() -> SetupGuide {
     }
 }
 
+/// Which of the three things a `target_id` can name.
+///
+/// One helper rather than `starts_with` scattered through every method that
+/// branches on a target, so "what are the kinds of target?" has one answer and
+/// adding a fourth would be one edit.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DockerTarget<'a> {
+    /// The daemon itself.
+    Host,
+    /// One container, named exactly as Docker names it.
+    Container(&'a str),
+    /// One Compose project, by project name (the `stack:` prefix removed).
+    Stack(&'a str),
+}
+
+fn docker_target(target_id: Option<&str>) -> DockerTarget<'_> {
+    match target_id {
+        None => DockerTarget::Host,
+        Some(id) => match id.strip_prefix(STACK_TARGET_PREFIX) {
+            // `stack:` with nothing after it names no project, and treating it
+            // as a container is the honest reading: it is a target id that does
+            // not resolve, and Docker will say so.
+            Some(project) if !project.is_empty() => DockerTarget::Stack(project),
+            _ => DockerTarget::Container(id),
+        },
+    }
+}
+
+/// The sub-target id for one Compose project.
+fn stack_target_id(project: &str) -> String {
+    format!("{STACK_TARGET_PREFIX}{project}")
+}
+
 /// How many samples each history data point keeps.
 ///
 /// Fifty, matching `DebugConnector`. At the default poll interval that is a
@@ -497,6 +574,22 @@ impl History {
     }
 }
 
+/// One container's last poll, as the stack views need it.
+#[derive(Debug, Clone, Default, PartialEq)]
+struct MemberReading {
+    /// Docker's own state word — `running`, `exited`, `paused`, …
+    status: String,
+    cpu_percent: f64,
+    memory_bytes: f64,
+}
+
+impl MemberReading {
+    /// Whether this member counts towards a stack's running total.
+    fn is_running(&self) -> bool {
+        self.status == "running"
+    }
+}
+
 #[derive(Debug, Clone)]
 struct CachedHostDetails {
     disk_usage: i64,
@@ -526,6 +619,20 @@ pub struct DockerConnector {
     /// synchronous in the shared trait, so live target discovery refreshes
     /// this cache before descriptors are read.
     known_targets: Arc<Mutex<Vec<SubTarget>>>,
+    /// Compose project name to its member container names, from the same
+    /// enumeration that fills `known_targets`.
+    ///
+    /// `BTreeMap` and sorted members, so a stack's descriptor order and its
+    /// members table do not reshuffle between polls the way a `HashMap`'s
+    /// iteration would.
+    stacks: Arc<Mutex<BTreeMap<String, Vec<String>>>>,
+    /// What the last poll read for each container.
+    ///
+    /// The stack views are built entirely from this: an aggregate is the sum of
+    /// readings the poll already took, and the members table is those readings
+    /// listed. Neither costs a Docker call of its own, which is the point —
+    /// a stack is a different *view* of the poll, not more polling.
+    member_readings: Arc<Mutex<HashMap<String, MemberReading>>>,
     /// Cached because Docker's disk-usage endpoint is far more expensive than
     /// the five-second health cadence and can overwhelm a remote socket proxy.
     host_details: Arc<Mutex<Option<CachedHostDetails>>>,
@@ -566,6 +673,8 @@ impl DockerConnector {
             control,
             history: Arc::new(Mutex::new(HashMap::new())),
             known_targets: Arc::new(Mutex::new(Vec::new())),
+            stacks: Arc::new(Mutex::new(BTreeMap::new())),
+            member_readings: Arc::new(Mutex::new(HashMap::new())),
             host_details: Arc::new(Mutex::new(None)),
             update_cache: Arc::new(Mutex::new(UpdateCache::new())),
             registry: HttpRegistry::new()
@@ -625,6 +734,222 @@ impl DockerConnector {
         // `HashMap`'s order varies per process.
         rows.sort_by(|left, right| left.0.cmp(&right.0));
         rows
+    }
+
+    /// One stack's members, from the last poll's readings.
+    ///
+    /// **No Docker call.** These are the numbers the poll already took; a table
+    /// that re-measured them would disagree with the tile above it as well as
+    /// costing a round trip per row.
+    ///
+    /// A member the last poll has not reached yet — one added between polls —
+    /// still gets a row, with `unknown` and zeroes, because the container
+    /// exists and omitting it would be a shorter stack than the real one.
+    fn list_stack_members(&self, project: &str) -> Vec<ResourceItem> {
+        let readings = self
+            .member_readings
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        self.stack_members(project)
+            .into_iter()
+            .map(|name| {
+                let reading = readings.get(&name).cloned().unwrap_or_default();
+                ResourceItem::new(name.clone())
+                    .with_field("targetId", name)
+                    .with_field(
+                        "status",
+                        if reading.status.is_empty() {
+                            "unknown".to_owned()
+                        } else {
+                            reading.status
+                        },
+                    )
+                    .with_field("cpuPercent", reading.cpu_percent)
+                    .with_field("memoryUsageBytes", reading.memory_bytes)
+            })
+            .collect()
+    }
+
+    /// Sums this poll's container readings into one set of details per stack.
+    ///
+    /// **No Docker call happens here.** Every number comes from `readings`,
+    /// which the poll above has just collected, and the histories are the same
+    /// ring buffers the containers use, keyed by the stack's own target id —
+    /// which cannot collide with a container's, because container names cannot
+    /// contain a colon.
+    fn aggregate_stacks(
+        &self,
+        readings: &HashMap<String, MemberReading>,
+        status: &mut ConnectorStatus,
+    ) {
+        let now = Utc::now();
+        for (project, members) in self.known_stacks() {
+            let target_id = stack_target_id(&project);
+            let present: Vec<&MemberReading> = members
+                .iter()
+                .filter_map(|name| readings.get(name))
+                .collect();
+
+            let running = present
+                .iter()
+                .filter(|reading| reading.is_running())
+                .count();
+            // `members`, not `present`: a member the poll could not read is
+            // still a member, and reporting a smaller stack than the one that
+            // exists would be the wrong kind of wrong.
+            let total = members.len();
+            let cpu: f64 = present.iter().map(|reading| reading.cpu_percent).sum();
+            let memory: f64 = present.iter().map(|reading| reading.memory_bytes).sum();
+
+            let (cpu_history, memory_history) = {
+                let mut histories = self
+                    .history
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner());
+                let history = histories.entry(target_id.clone()).or_default();
+                // Recorded only while something is running, matching the
+                // per-container rule: a stopped stack leaves a gap in its chart
+                // rather than a flat zero that looks like a measurement.
+                if running > 0 {
+                    history.record(cpu, memory, now);
+                }
+                (
+                    serde_json::to_value(&history.cpu).unwrap_or(Value::Null),
+                    serde_json::to_value(&history.memory).unwrap_or(Value::Null),
+                )
+            };
+
+            for (id, value) in [
+                (
+                    DATA_POINT_OVERALL_STATUS,
+                    json!(overall_status(running, total)),
+                ),
+                (DATA_POINT_MEMBER_COUNT, json!(total)),
+                (DATA_POINT_RUNNING_COUNT, json!(running)),
+                (
+                    DATA_POINT_STOPPED_COUNT,
+                    json!(total.saturating_sub(running)),
+                ),
+                (DATA_POINT_CPU_PERCENT, json!(cpu)),
+                (DATA_POINT_CPU_HISTORY, cpu_history),
+                (DATA_POINT_MEMORY_USAGE_BYTES, json!(memory)),
+                (DATA_POINT_MEMORY_HISTORY, memory_history),
+            ] {
+                set_detail(&mut status.details, Some(&target_id), id, value);
+            }
+        }
+    }
+
+    /// Runs one lifecycle operation across every container in a stack.
+    ///
+    /// Sequential, like `updateAll` and for the same reason: starting six
+    /// containers at once on a home server is not what somebody running
+    /// `docker compose up` would get, and stopping them at once takes down
+    /// things that depend on each other simultaneously.
+    ///
+    /// A member that fails does not stop the rest. The point of "stop this
+    /// stack" is to get through the list, and the result names **which**
+    /// container refused and what Docker said about it — "the stack action
+    /// failed" is not something anybody can act on.
+    async fn run_stack_lifecycle(
+        &self,
+        action_id: &str,
+        project: &str,
+    ) -> Result<ActionResult, ConnectorError> {
+        let members = self.stack_members(project);
+        if members.is_empty() {
+            return Ok(ActionResult::failed(format!(
+                "no containers are labelled as part of the stack `{project}` right now"
+            )));
+        }
+
+        let mut succeeded = Vec::new();
+        let mut failed = Vec::new();
+        for member in members {
+            match self.run_lifecycle(action_id, &member).await {
+                Ok(result) if result.success => succeeded.push(member),
+                Ok(result) => failed.push(format!("{member} ({})", result.message)),
+                // A member Loom could not reach at all is reported beside the
+                // ones that refused, rather than aborting: the other containers
+                // have already moved, and hiding that would be worse.
+                Err(error) => failed.push(format!("{member} ({error})")),
+            }
+        }
+
+        let message = match (succeeded.len(), failed.len()) {
+            (count, 0) => format!("{project}: {action_id} succeeded on {count} container(s)."),
+            (0, _) => format!(
+                "{project}: {action_id} failed on every container: {}.",
+                failed.join("; ")
+            ),
+            (count, _) => format!(
+                "{project}: {action_id} succeeded on {count} container(s) ({}). Failed: {}.",
+                succeeded.join(", "),
+                failed.join("; ")
+            ),
+        };
+        Ok(ActionResult {
+            success: failed.is_empty(),
+            message,
+            payload: Some(json!({ "succeeded": succeeded, "failed": failed })),
+        })
+    }
+
+    /// One row per container: what it is doing, and the last thing it said.
+    ///
+    /// Reads every container's log concurrently, at the same bounded fan-out a
+    /// status poll uses. Sequentially, a host with thirty containers would make
+    /// the reader wait for thirty round trips to see one table.
+    ///
+    /// A container that cannot be read still gets a row. "This one's log driver
+    /// does not support reading back" is a useful thing for a log table to say,
+    /// and dropping the row would make the container look as though it did not
+    /// exist.
+    async fn list_log_rows(&self) -> Result<Vec<ResourceItem>, ConnectorError> {
+        let options = ListContainersOptionsBuilder::new().all(true).build();
+        let containers = self
+            .docker
+            .list_containers(Some(options))
+            .await
+            .map_err(|error| {
+                ConnectorError::unreachable(format!(
+                    "listing containers on {} failed: {error}",
+                    self.config.docker_host
+                ))
+            })?;
+
+        let named: Vec<(String, String)> = containers
+            .into_iter()
+            .filter_map(|container| {
+                let state = container
+                    .state
+                    .map_or_else(|| "unknown".to_owned(), |state| state.to_string());
+                crate::resources::container_name(&container).map(|name| (name, state))
+            })
+            .collect();
+
+        let mut rows: Vec<ResourceItem> =
+            stream::iter(named.into_iter().map(|(name, state)| async move {
+                // One line, with Docker's own timestamps asked for — see
+                // `log_line_instant` for what happens when they are not there.
+                let tail = self.fetch_log_tail(&name, 1, true).await;
+                let fetched_at = Utc::now();
+                let (instant, line) = log_line_instant(&tail, fetched_at);
+                ResourceItem::new(name.clone())
+                    .with_field("targetId", name)
+                    .with_field("status", state)
+                    .with_field("latestLogLine", line)
+                    .with_field("lastLogTimestamp", instant.to_rfc3339())
+            }))
+            .buffer_unordered(CONTAINER_POLL_CONCURRENCY)
+            .collect()
+            .await;
+
+        // Sorted by name, so the table does not reshuffle between refreshes:
+        // `buffer_unordered` yields in completion order, which is whichever
+        // container's log came back first.
+        rows.sort_by(|left, right| left.id.cmp(&right.id));
+        Ok(rows)
     }
 
     /// Applies every waiting update, one container at a time.
@@ -721,11 +1046,26 @@ impl DockerConnector {
     /// declared value type is `String`, and a second wire shape for one type is
     /// how a renderer and a connector quietly disagree.
     async fn tail_logs(&self, container_name: &str) -> String {
+        self.fetch_log_tail(container_name, LOG_TAIL_LINES, false)
+            .await
+    }
+
+    /// The shared log read: `tail` lines, stdout and stderr, newline-joined.
+    ///
+    /// One helper rather than two call sites building the same bollard options,
+    /// because the two readers want the same bytes for different reasons — the
+    /// per-container `logs` data point wants the last twenty lines to fill a
+    /// pane, and the host-wide `logs` table wants the last one to fill a cell.
+    /// `timestamps` is the only thing they differ on, and it is a parameter
+    /// precisely so the data point's long-standing output does not change shape
+    /// because a table wanted a date.
+    async fn fetch_log_tail(&self, container_name: &str, tail: usize, timestamps: bool) -> String {
         let options = LogsOptionsBuilder::new()
             .stdout(true)
             .stderr(true)
             .follow(false)
-            .tail(&LOG_TAIL_LINES.to_string())
+            .timestamps(timestamps)
+            .tail(&tail.to_string())
             .build();
 
         let mut stream = self.docker.logs(container_name, Some(options));
@@ -800,16 +1140,76 @@ impl DockerConnector {
                     self.config.docker_host
                 ))
             })?;
-        let targets: Vec<SubTarget> = containers
-            .into_iter()
-            .filter_map(sub_target_from_summary)
-            .collect();
+        let (targets, stacks) = enumerate_targets(containers);
         *self
             .known_targets
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner()) = targets.clone();
+        *self
+            .stacks
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = stacks;
         Ok(targets)
     }
+
+    /// The current Compose projects and their members.
+    fn known_stacks(&self) -> BTreeMap<String, Vec<String>> {
+        self.stacks
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone()
+    }
+
+    /// The members of one project, as the last enumeration saw them.
+    fn stack_members(&self, project: &str) -> Vec<String> {
+        self.stacks
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .get(project)
+            .cloned()
+            .unwrap_or_default()
+    }
+}
+
+/// Splits one container listing into sub-targets and Compose projects.
+///
+/// Pure, so the stack-identification rule — which is the whole feature — is
+/// testable without a daemon.
+///
+/// Containers keep exactly the ids and labels they have always had. Stacks are
+/// **added** alongside them rather than replacing them: a stack is another way
+/// to look at the same containers, and a user who placed one container on a
+/// dashboard did not ask for that to become a stack tile.
+fn enumerate_targets(
+    containers: Vec<ContainerSummary>,
+) -> (Vec<SubTarget>, BTreeMap<String, Vec<String>>) {
+    let mut targets = Vec::new();
+    let mut stacks: BTreeMap<String, Vec<String>> = BTreeMap::new();
+
+    for container in containers {
+        let project = container
+            .labels
+            .as_ref()
+            .and_then(|labels| labels.get(COMPOSE_PROJECT_LABEL))
+            .map(|project| project.trim().to_owned())
+            .filter(|project| !project.is_empty());
+        let Some(target) = sub_target_from_summary(container) else {
+            continue;
+        };
+        if let Some(project) = project {
+            stacks.entry(project).or_default().push(target.id.clone());
+        }
+        targets.push(target);
+    }
+
+    for (project, members) in &mut stacks {
+        members.sort();
+        targets.push(
+            SubTarget::new(stack_target_id(project), format!("{project} (stack)"))
+                .of_kind(SUB_TARGET_KIND_STACK),
+        );
+    }
+    (targets, stacks)
 }
 
 fn sub_target_from_summary(container: ContainerSummary) -> Option<SubTarget> {
@@ -823,7 +1223,95 @@ fn sub_target_from_summary(container: ContainerSummary) -> Option<SubTarget> {
         .image
         .filter(|image| !image.is_empty() && image != &id)
         .map_or_else(|| id.clone(), |image| format!("{id} ({image})"));
-    Some(SubTarget { id, label })
+    Some(SubTarget::new(id, label).of_kind(SUB_TARGET_KIND_CONTAINER))
+}
+
+/// The breakdown of one stack, as a browsable table.
+///
+/// Browse-only: no row or kind actions in this pass. Every member is also an
+/// ordinary sub-target with its own detail view and its own controls, so a
+/// second set of buttons here would be a second place to keep them working.
+fn stack_members_kind() -> ResourceKindDescriptor {
+    ResourceKindDescriptor::new(
+        RESOURCE_KIND_STACK_MEMBERS,
+        "Members",
+        vec![
+            // `targetId` by the platform's convention, so a client that grows a
+            // reason to act on a row already knows which sub-target it means.
+            ColumnDescriptor::new("targetId", "Container", ColumnValueType::Text),
+            ColumnDescriptor::new("status", "Status", ColumnValueType::Text),
+            ColumnDescriptor::new("cpuPercent", "CPU %", ColumnValueType::Number),
+            ColumnDescriptor::new("memoryUsageBytes", "Memory", ColumnValueType::Bytes),
+        ],
+    )
+    .applicable_to(ApplicableTarget::TargetOnly)
+}
+
+/// Reads one container's poll output back into the fields a stack sums.
+fn member_reading(values: &Map<String, Value>) -> MemberReading {
+    MemberReading {
+        status: values
+            .get(DATA_POINT_STATUS)
+            .and_then(Value::as_str)
+            .unwrap_or("unknown")
+            .to_owned(),
+        cpu_percent: values
+            .get(DATA_POINT_CPU_PERCENT)
+            .and_then(Value::as_f64)
+            .unwrap_or_default(),
+        memory_bytes: values
+            .get(DATA_POINT_MEMORY_USAGE_BYTES)
+            .and_then(Value::as_f64)
+            .unwrap_or_default(),
+    }
+}
+
+/// A stack's one-word verdict.
+///
+/// A stack with no members at all reads `"Stopped"` rather than `"Partial"`:
+/// nothing in it is running, which is what the word means, and `0 of 0` is not
+/// a partial anything.
+fn overall_status(running: usize, total: usize) -> &'static str {
+    match (running, total) {
+        (0, _) => "Stopped",
+        (running, total) if running == total => "Running",
+        _ => "Partial",
+    }
+}
+
+/// Splits Docker's `timestamps=true` prefix off a log line.
+///
+/// # Which behaviour this implements
+///
+/// **Both, in that order.** The request asks for timestamps, so Docker prefixes
+/// each line with its own RFC 3339 record of when the container emitted it —
+/// that is the accurate answer and is used whenever it parses. When it does not
+/// (a driver that does not record times, a container that has said nothing at
+/// all, or a read that failed and left an explanation in place of a line), the
+/// fallback is the connector's fetch time, which is at least true about *when
+/// the reading was taken*.
+///
+/// The two are deliberately not distinguished in the column, because a
+/// `Timestamp` cell has nowhere to put the distinction and a second "is this
+/// exact?" column would cost more attention than it is worth. The fallback is
+/// never *older* than the real answer, so a stale-looking row is never a lie in
+/// the direction that matters.
+fn log_line_instant(tail: &str, fetched_at: DateTime<Utc>) -> (DateTime<Utc>, String) {
+    let line = tail.lines().last().unwrap_or("").trim_end();
+    if line.is_empty() {
+        return (fetched_at, String::new());
+    }
+
+    match line.split_once(' ') {
+        Some((prefix, rest)) => match DateTime::parse_from_rfc3339(prefix) {
+            Ok(instant) => (instant.with_timezone(&Utc), rest.trim_end().to_owned()),
+            // Not a timestamp: keep the whole line rather than eating its first
+            // word, which is what a naive split would do to `logs unavailable:
+            // ...` and to any driver that ignores the flag.
+            Err(_) => (fetched_at, line.to_owned()),
+        },
+        None => (fetched_at, line.to_owned()),
+    }
 }
 
 /// The human half of a failed inspect, for the `error` detail on a poll.
@@ -1048,11 +1536,19 @@ impl Connector for DockerConnector {
             }
         };
 
+        // Only the containers are polled. A stack is not a thing Docker can be
+        // asked about — it is a label shared by containers already in this
+        // list — so it is summed from their readings below, at no extra call.
+        let containers: Vec<SubTarget> = targets
+            .into_iter()
+            .filter(|target| matches!(docker_target(Some(&target.id)), DockerTarget::Container(_)))
+            .collect();
+
         // Known trade-off: every poll fetches full detail for every container,
         // even when no active placement displays it. That is reasonable for a
         // typical homelab count; target-aware polling can be revisited if this
         // becomes a demonstrated cost.
-        let target_values = stream::iter(targets.into_iter().map(|target| async move {
+        let target_values = stream::iter(containers.into_iter().map(|target| async move {
             let values = match self.docker.inspect_container(&target.id, None).await {
                 Ok(inspect) => self.status_from(&target.id, inspect).await.1,
                 Err(error) => {
@@ -1065,17 +1561,28 @@ impl Connector for DockerConnector {
         .collect::<Vec<_>>()
         .await;
 
+        let mut readings: HashMap<String, MemberReading> = HashMap::new();
         for (target_id, values) in target_values {
             // Instance health describes the daemon connection, not the
             // least-healthy container. A deliberately stopped container is a
             // valid sub-target state; its target-scoped `status` detail tells
             // the placement without making the whole Docker host appear Down.
+            //
+            // A *stack's* state follows exactly the same rule, for the same
+            // reason: a stopped stack is a stack somebody stopped.
             if let Value::Object(values) = values {
+                readings.insert(target_id.clone(), member_reading(&values));
                 for (id, value) in values {
                     set_detail(&mut status.details, Some(&target_id), &id, value);
                 }
             }
         }
+
+        self.aggregate_stacks(&readings, &mut status);
+        *self
+            .member_readings
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = readings;
 
         status.last_checked = Utc::now();
         Ok(status)
@@ -1271,7 +1778,10 @@ impl Connector for DockerConnector {
         };
         targets
             .into_iter()
-            .flat_map(|target| container_actions(&target.id))
+            .flat_map(|target| match docker_target(Some(&target.id)) {
+                DockerTarget::Stack(_) => stack_actions(&target.id),
+                _ => container_actions(&target.id),
+            })
             .collect()
     }
 
@@ -1298,6 +1808,20 @@ impl Connector for DockerConnector {
                 &params,
             )
             .await;
+        }
+
+        // A stack answers the three lifecycle ids by running them across its
+        // members. Everything else — `applyUpdate`, `pause`, `unpause` — is a
+        // per-container operation with no defensible whole-stack meaning, and
+        // is refused for a stack rather than quietly applied to an arbitrary
+        // member.
+        if let DockerTarget::Stack(project) = docker_target(target_id) {
+            return match action_id {
+                ACTION_START | ACTION_STOP | ACTION_RESTART => {
+                    self.run_stack_lifecycle(action_id, project).await
+                }
+                other => Err(ConnectorError::invalid_action(other)),
+            };
         }
 
         let Some(target_id) = target_id else {
@@ -1374,7 +1898,15 @@ impl Connector for DockerConnector {
     /// filled in: the descriptor says what the action needs, and the caller
     /// fills it from the row it is acting on. The kind action applies every
     /// waiting update in turn.
-    fn resource_kinds(&self) -> Vec<ResourceKindDescriptor> {
+    fn resource_kinds(&self, target_id: Option<&str>) -> Vec<ResourceKindDescriptor> {
+        // The one target-conditional kind, and the reason this method takes a
+        // target at all. A stack has members; a container is not a smaller
+        // stack, it has none — and `ApplicableTarget::TargetOnly` cannot say
+        // that, because a container is a target too.
+        if let DockerTarget::Stack(_) = docker_target(target_id) {
+            return vec![stack_members_kind()];
+        }
+
         let mut kinds = vec![ResourceKindDescriptor::new(
             RESOURCE_KIND_UPDATES,
             "Updates available",
@@ -1410,6 +1942,28 @@ impl Connector for DockerConnector {
         // per-container version, and a client can now leave the tab out of a
         // container's own view instead of showing one that will never fill.
         .applicable_to(ApplicableTarget::HostOnly)];
+        // Browse-only, on purpose: no row actions and no kind actions. Opening
+        // one container's *full* log is something the per-container detail view
+        // already does, and a second way to do it here would be a second thing
+        // to keep working. This table answers a different question — "what is
+        // everything on this host saying right now?" — which no per-container
+        // view can answer at all.
+        kinds.push(
+            ResourceKindDescriptor::new(
+                RESOURCE_KIND_LOGS,
+                "Logs",
+                vec![
+                    // Keyed `targetId` by the platform's convention, so a client
+                    // that wants to act on the row knows which sub-target it is
+                    // about without the row id having to be one.
+                    ColumnDescriptor::new("targetId", "Container", ColumnValueType::Text),
+                    ColumnDescriptor::new("status", "Status", ColumnValueType::Text),
+                    ColumnDescriptor::new("latestLogLine", "Latest line", ColumnValueType::Text),
+                    ColumnDescriptor::new("lastLogTimestamp", "At", ColumnValueType::Timestamp),
+                ],
+            )
+            .applicable_to(ApplicableTarget::HostOnly),
+        );
         kinds.extend(crate::resources::resource_kinds());
         kinds
     }
@@ -1417,7 +1971,7 @@ impl Connector for DockerConnector {
     async fn list_resource_items(
         &self,
         kind: &str,
-        _target_id: Option<&str>,
+        target_id: Option<&str>,
     ) -> Result<Vec<ResourceItem>, ConnectorError> {
         // The three inventory tables all want the same container listing for
         // their "used by" column, so it is read once here and handed down.
@@ -1435,6 +1989,21 @@ impl Connector for DockerConnector {
                 return crate::resources::list_networks(&self.docker, &usage).await;
             }
             _ => {}
+        }
+
+        if kind == RESOURCE_KIND_STACK_MEMBERS {
+            let DockerTarget::Stack(project) = docker_target(target_id) else {
+                // The backend validates the kind against this target's own
+                // descriptors, so this is unreachable through the API. Answered
+                // rather than asserted because a connector is a library and a
+                // direct caller deserves an answer, not a panic.
+                return Ok(Vec::new());
+            };
+            return Ok(self.list_stack_members(project));
+        }
+
+        if kind == RESOURCE_KIND_LOGS {
+            return self.list_log_rows().await;
         }
 
         if kind != RESOURCE_KIND_UPDATES {
@@ -1505,11 +2074,14 @@ impl Connector for DockerConnector {
             .clone();
         host_data_points()
             .into_iter()
-            .chain(
-                targets
-                    .into_iter()
-                    .flat_map(|target| container_data_points(&target.id)),
-            )
+            .chain(targets.into_iter().flat_map(|target| {
+                match docker_target(Some(&target.id)) {
+                    DockerTarget::Stack(_) => stack_data_points(&target.id),
+                    // A stack id cannot be a container id, so this arm is
+                    // exactly the containers.
+                    _ => container_data_points(&target.id),
+                }
+            }))
             .collect()
     }
 
@@ -1575,9 +2147,33 @@ impl Connector for DockerConnector {
     }
 
     fn default_layout_for(&self, target_id: Option<&str>) -> WidgetLayout {
-        let Some(_target_id) = target_id else {
-            return self.default_layout();
-        };
+        match docker_target(target_id) {
+            DockerTarget::Host => return self.default_layout(),
+            DockerTarget::Stack(_) => {
+                return WidgetLayout::new(vec![
+                    WidgetBinding::display(DATA_POINT_OVERALL_STATUS, DisplayWidgetType::StatusDot),
+                    WidgetBinding::display(DATA_POINT_MEMBER_COUNT, DisplayWidgetType::StatTile),
+                    WidgetBinding::display(DATA_POINT_RUNNING_COUNT, DisplayWidgetType::StatTile),
+                    WidgetBinding::display(DATA_POINT_STOPPED_COUNT, DisplayWidgetType::StatTile),
+                    WidgetBinding::display(
+                        DATA_POINT_CPU_HISTORY,
+                        DisplayWidgetType::MetricChart {
+                            chart_type: ChartType::Line,
+                        },
+                    ),
+                    WidgetBinding::display(
+                        DATA_POINT_MEMORY_USAGE_BYTES,
+                        DisplayWidgetType::StatTile,
+                    ),
+                    WidgetBinding::action(ACTION_START, ActionWidgetType::Button),
+                    WidgetBinding::action(ACTION_STOP, ActionWidgetType::Button),
+                    WidgetBinding::action(ACTION_RESTART, ActionWidgetType::Button),
+                    // No log pane: a stack has no single log, and the members
+                    // table is where you pick whose log to read.
+                ]);
+            }
+            DockerTarget::Container(_) => {}
+        }
 
         WidgetLayout::new(vec![
             WidgetBinding::display(DATA_POINT_STATUS, DisplayWidgetType::StatusDot),
@@ -1713,6 +2309,92 @@ fn apply_update_action() -> ConnectorAction {
         is_disruptive: true,
         snapshot_data_point_ids: vec![DATA_POINT_IMAGE_REF.to_owned()],
     }
+}
+
+/// What a stack reports.
+///
+/// The four counts and verdict are its own; CPU and memory reuse the container
+/// ids deliberately, because they mean the same thing — a widget bound to
+/// `cpuPercent` draws a percentage whether the target is one container or ten,
+/// and inventing `stackCpuPercent` would make every renderer learn a second
+/// name for one reading.
+fn stack_data_points(target_id: &str) -> Vec<DataPointDescriptor> {
+    vec![
+        DataPointDescriptor::new(
+            DATA_POINT_OVERALL_STATUS,
+            "State",
+            DataPointValueType::String,
+        )
+        .for_target(target_id),
+        DataPointDescriptor::new(
+            DATA_POINT_MEMBER_COUNT,
+            "Containers",
+            DataPointValueType::Number,
+        )
+        .for_target(target_id),
+        DataPointDescriptor::new(
+            DATA_POINT_RUNNING_COUNT,
+            "Running",
+            DataPointValueType::Number,
+        )
+        .for_target(target_id),
+        DataPointDescriptor::new(
+            DATA_POINT_STOPPED_COUNT,
+            "Stopped",
+            DataPointValueType::Number,
+        )
+        .for_target(target_id),
+        DataPointDescriptor::new(DATA_POINT_CPU_PERCENT, "CPU", DataPointValueType::Number)
+            .with_unit("%")
+            .for_target(target_id),
+        DataPointDescriptor::new(
+            DATA_POINT_CPU_HISTORY,
+            "CPU history",
+            DataPointValueType::TimeSeries,
+        )
+        .with_unit("%")
+        .for_target(target_id),
+        DataPointDescriptor::new(
+            DATA_POINT_MEMORY_USAGE_BYTES,
+            "Memory",
+            DataPointValueType::Number,
+        )
+        .with_unit("bytes")
+        .for_target(target_id),
+        DataPointDescriptor::new(
+            DATA_POINT_MEMORY_HISTORY,
+            "Memory history",
+            DataPointValueType::TimeSeries,
+        )
+        .with_unit("bytes")
+        .for_target(target_id),
+    ]
+}
+
+/// A stack's lifecycle controls.
+///
+/// The same three ids a container offers, with the same disruptiveness: `start`
+/// and `stop` move to a stable state, `restart` is the temporary disappearance
+/// the operation overlay exists to explain. Reusing the ids means a client
+/// needs no stack-specific button and the action log reads the same for both.
+///
+/// `pause`/`unpause` are deliberately absent. They are per-process controls
+/// whose meaning across a set of containers with dependencies between them is
+/// not obviously "all of them", and offering a control nobody can predict is
+/// worse than not offering it.
+fn stack_actions(target_id: &str) -> Vec<ConnectorAction> {
+    vec![
+        ConnectorAction::simple(ACTION_START, "Start")
+            .with_description("Start every container in this stack.")
+            .for_target(target_id),
+        ConnectorAction::simple(ACTION_STOP, "Stop")
+            .with_description("Stop every container in this stack, giving each time to shut down.")
+            .for_target(target_id),
+        ConnectorAction::simple(ACTION_RESTART, "Restart")
+            .with_description("Stop and start every container in this stack.")
+            .disruptive()
+            .for_target(target_id),
+    ]
 }
 
 fn container_actions(target_id: &str) -> Vec<ConnectorAction> {
@@ -1999,6 +2681,7 @@ fn unavailable_host_details(reason: &str) -> Value {
 mod tests {
     use super::*;
     use crate::config::DockerConnectorConfig;
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::TcpListener;
 
@@ -2123,25 +2806,36 @@ mod tests {
 
     /// Builds a descriptive connector without touching Docker.
     fn detached(docker_host: &str, targets: &[&str]) -> DockerConnector {
+        detached_with_stacks(docker_host, targets, BTreeMap::new())
+    }
+
+    /// The same, with a known set of Compose projects already enumerated.
+    fn detached_with_stacks(
+        docker_host: &str,
+        targets: &[&str],
+        stacks: BTreeMap<String, Vec<String>>,
+    ) -> DockerConnector {
         let config = DockerConnectorConfig {
             docker_host: docker_host.to_owned(),
             ..DockerConnectorConfig::default()
         };
         let docker = config.connect().expect("building a client does no I/O");
+        let known: Vec<SubTarget> = targets
+            .iter()
+            .map(|id| SubTarget::new(*id, *id).of_kind(SUB_TARGET_KIND_CONTAINER))
+            .chain(stacks.keys().map(|project| {
+                SubTarget::new(stack_target_id(project), format!("{project} (stack)"))
+                    .of_kind(SUB_TARGET_KIND_STACK)
+            }))
+            .collect();
         DockerConnector {
             docker: docker.clone(),
             control: docker,
             config,
             history: Arc::new(Mutex::new(HashMap::new())),
-            known_targets: Arc::new(Mutex::new(
-                targets
-                    .iter()
-                    .map(|id| SubTarget {
-                        id: (*id).to_owned(),
-                        label: (*id).to_owned(),
-                    })
-                    .collect(),
-            )),
+            known_targets: Arc::new(Mutex::new(known)),
+            stacks: Arc::new(Mutex::new(stacks)),
+            member_readings: Arc::new(Mutex::new(HashMap::new())),
             host_details: Arc::new(Mutex::new(None)),
             update_cache: Arc::new(Mutex::new(UpdateCache::new())),
             registry: None,
@@ -2357,6 +3051,11 @@ mod tests {
         // not silently inherit a neighbour's capability.
         let expected = [
             (RESOURCE_KIND_UPDATES, CAPABILITY_LIST_UPDATES),
+            // The host-wide log table is the container log endpoint, read once
+            // per container — the same gate, and so the same capability. It
+            // needs no new one, which is the answer this test exists to force
+            // somebody to work out rather than skip.
+            (RESOURCE_KIND_LOGS, CAPABILITY_READ_LOGS),
             (
                 crate::resources::RESOURCE_KIND_IMAGES,
                 CAPABILITY_LIST_IMAGES,
@@ -2370,7 +3069,7 @@ mod tests {
                 CAPABILITY_LIST_NETWORKS,
             ),
         ];
-        for kind in connector.resource_kinds() {
+        for kind in connector.resource_kinds(None) {
             let capability = expected
                 .iter()
                 .find(|(name, _)| *name == kind.kind)
@@ -2570,11 +3269,570 @@ mod tests {
         );
     }
 
+    fn labelled(name: &str, project: Option<&str>) -> ContainerSummary {
+        ContainerSummary {
+            id: Some(format!("id-of-{name}")),
+            names: Some(vec![format!("/{name}")]),
+            image: Some("example/app:1.0".to_owned()),
+            labels: project.map(|project| {
+                HashMap::from([(COMPOSE_PROJECT_LABEL.to_owned(), project.to_owned())])
+            }),
+            ..Default::default()
+        }
+    }
+
+    /// A Docker stand-in that answers a poll and counts what was asked of it.
+    ///
+    /// Returns one container, optionally carrying a Compose project label, so
+    /// the same poll can be run against a host that has a stack and a host that
+    /// does not and the two request counts compared.
+    async fn counting_proxy(project: Option<&str>) -> (String, Arc<AtomicUsize>) {
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind counting proxy");
+        let address = listener.local_addr().expect("mock address");
+        let requests = Arc::new(AtomicUsize::new(0));
+        let counter = Arc::clone(&requests);
+        let labels = project.map_or_else(
+            || "{}".to_owned(),
+            |project| format!(r#"{{"{COMPOSE_PROJECT_LABEL}":"{project}"}}"#),
+        );
+
+        tokio::spawn(async move {
+            loop {
+                let Ok((mut socket, _)) = listener.accept().await else {
+                    break;
+                };
+                let counter = Arc::clone(&counter);
+                let labels = labels.clone();
+                tokio::spawn(async move {
+                    let mut request = vec![0; 8192];
+                    let Ok(read) = socket.read(&mut request).await else {
+                        return;
+                    };
+                    counter.fetch_add(1, Ordering::SeqCst);
+                    let request = String::from_utf8_lossy(&request[..read]);
+                    let path = request
+                        .lines()
+                        .next()
+                        .and_then(|line| line.split_whitespace().nth(1))
+                        .unwrap_or("/")
+                        .to_owned();
+
+                    let container = format!(
+                        r#"{{"Id":"abc123","Names":["/shop-web-1"],"Image":"example/app:1.0","State":"running","Labels":{labels}}}"#
+                    );
+                    let body = if path.contains("/containers/json") {
+                        format!("[{container}]")
+                    } else if path.contains("/containers/") && path.ends_with("/json") {
+                        r#"{"Id":"abc123","Name":"/shop-web-1","State":{"Status":"running"},"Config":{"Image":"example/app:1.0"}}"#.to_owned()
+                    } else {
+                        "{}".to_owned()
+                    };
+                    let response = format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                        body.len()
+                    );
+                    let _ = socket.write_all(response.as_bytes()).await;
+                });
+            }
+        });
+
+        (format!("tcp://{address}"), requests)
+    }
+
+    /// The claim Part 4 rests on, measured rather than asserted in prose: a
+    /// stack's aggregates and its members table are a *view* of the poll, so
+    /// identifying one costs the daemon nothing.
+    #[tokio::test]
+    async fn identifying_a_stack_costs_no_extra_docker_requests() {
+        let (plain_host, plain_requests) = counting_proxy(None).await;
+        let plain = DockerConnector::prepare(DockerConnectorConfig {
+            docker_host: plain_host,
+            ..DockerConnectorConfig::default()
+        })
+        .expect("building a client does no I/O");
+        let _ = plain.status().await;
+        let without_stack = plain_requests.load(Ordering::SeqCst);
+
+        let (stack_host, stack_requests) = counting_proxy(Some("shop")).await;
+        let stacked = DockerConnector::prepare(DockerConnectorConfig {
+            docker_host: stack_host,
+            ..DockerConnectorConfig::default()
+        })
+        .expect("building a client does no I/O");
+        let status = stacked.status().await.expect("the mock answers a poll");
+        let with_stack = stack_requests.load(Ordering::SeqCst);
+
+        // The stack was really identified — otherwise this would prove nothing.
+        assert_eq!(
+            status.data_point_value_for(Some("stack:shop"), DATA_POINT_MEMBER_COUNT),
+            Some(&json!(1))
+        );
+        assert_eq!(
+            with_stack,
+            without_stack,
+            "a stack added {} request(s) to the poll; it must add none",
+            with_stack.saturating_sub(without_stack)
+        );
+
+        // And browsing the members adds none either: it is the poll's own
+        // readings, listed.
+        let before = stack_requests.load(Ordering::SeqCst);
+        let rows = stacked
+            .list_resource_items(RESOURCE_KIND_STACK_MEMBERS, Some("stack:shop"))
+            .await
+            .expect("browsing members");
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].fields["status"], json!("running"));
+        assert_eq!(stack_requests.load(Ordering::SeqCst), before);
+    }
+
+    #[test]
+    fn a_target_id_says_which_of_the_three_things_it_names() {
+        assert_eq!(docker_target(None), DockerTarget::Host);
+        assert_eq!(docker_target(Some("web")), DockerTarget::Container("web"));
+        assert_eq!(
+            docker_target(Some("stack:shop")),
+            DockerTarget::Stack("shop")
+        );
+        // A container cannot be called `stack:…` — Docker's own name rules
+        // forbid the colon — which is the whole reason this prefix is safe.
+        assert_eq!(
+            docker_target(Some("my-stack")),
+            DockerTarget::Container("my-stack")
+        );
+        // `stack:` naming no project resolves to nothing rather than to every
+        // project, and is answered as the unresolvable target it is.
+        assert_eq!(
+            docker_target(Some("stack:")),
+            DockerTarget::Container("stack:")
+        );
+    }
+
+    #[test]
+    fn stacks_are_added_beside_containers_and_never_replace_them() {
+        let (targets, stacks) = enumerate_targets(vec![
+            labelled("shop-web-1", Some("shop")),
+            labelled("shop-db-1", Some("shop")),
+            labelled("standalone", None),
+        ]);
+
+        // Every container is still its own target, with the id and kind it has
+        // always had. A saved placement pointing at `shop-web-1` is untouched.
+        let containers: Vec<(&str, &str)> = targets
+            .iter()
+            .filter(|target| target.kind == SUB_TARGET_KIND_CONTAINER)
+            .map(|target| (target.id.as_str(), target.kind.as_str()))
+            .collect();
+        assert_eq!(
+            containers,
+            vec![
+                ("shop-web-1", SUB_TARGET_KIND_CONTAINER),
+                ("shop-db-1", SUB_TARGET_KIND_CONTAINER),
+                ("standalone", SUB_TARGET_KIND_CONTAINER),
+            ]
+        );
+
+        let stack_targets: Vec<(&str, &str, &str)> = targets
+            .iter()
+            .filter(|target| target.kind == SUB_TARGET_KIND_STACK)
+            .map(|target| {
+                (
+                    target.id.as_str(),
+                    target.label.as_str(),
+                    target.kind.as_str(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            stack_targets,
+            vec![("stack:shop", "shop (stack)", SUB_TARGET_KIND_STACK)]
+        );
+        // An unlabelled container belongs to no stack rather than to a stack of
+        // its own: Compose wrote the label or it did not.
+        assert_eq!(
+            stacks,
+            BTreeMap::from([(
+                "shop".to_owned(),
+                vec!["shop-db-1".to_owned(), "shop-web-1".to_owned()]
+            )])
+        );
+    }
+
+    #[test]
+    fn a_blank_compose_label_is_not_a_stack() {
+        let (targets, stacks) = enumerate_targets(vec![labelled("odd", Some("   "))]);
+        assert!(stacks.is_empty());
+        assert!(targets
+            .iter()
+            .all(|target| target.kind == SUB_TARGET_KIND_CONTAINER));
+    }
+
+    #[test]
+    fn a_stacks_verdict_reads_the_way_a_person_would_say_it() {
+        assert_eq!(overall_status(2, 2), "Running");
+        assert_eq!(overall_status(1, 2), "Partial");
+        assert_eq!(overall_status(0, 2), "Stopped");
+        // Nothing running is "Stopped", including when there is nothing at all
+        // — `0 of 0` is not a partial anything.
+        assert_eq!(overall_status(0, 0), "Stopped");
+    }
+
+    #[tokio::test]
+    async fn stack_descriptors_exist_only_for_identified_stacks() {
+        let connector = detached_with_stacks(
+            "tcp://docker-proxy.example:2375",
+            &["shop-web-1", "shop-db-1"],
+            BTreeMap::from([(
+                "shop".to_owned(),
+                vec!["shop-db-1".to_owned(), "shop-web-1".to_owned()],
+            )]),
+        );
+
+        let points = connector.data_points();
+        let for_stack: Vec<&str> = points
+            .iter()
+            .filter(|point| point.target_id.as_deref() == Some("stack:shop"))
+            .map(|point| point.id.as_str())
+            .collect();
+        assert_eq!(
+            for_stack,
+            vec![
+                DATA_POINT_OVERALL_STATUS,
+                DATA_POINT_MEMBER_COUNT,
+                DATA_POINT_RUNNING_COUNT,
+                DATA_POINT_STOPPED_COUNT,
+                DATA_POINT_CPU_PERCENT,
+                DATA_POINT_CPU_HISTORY,
+                DATA_POINT_MEMORY_USAGE_BYTES,
+                DATA_POINT_MEMORY_HISTORY,
+            ]
+        );
+        // The containers keep exactly the descriptors they had, and none of the
+        // stack-only ones leaked onto them.
+        for member in ["shop-web-1", "shop-db-1"] {
+            let ids: Vec<&str> = points
+                .iter()
+                .filter(|point| point.target_id.as_deref() == Some(member))
+                .map(|point| point.id.as_str())
+                .collect();
+            assert!(ids.contains(&DATA_POINT_STATUS));
+            assert!(!ids.contains(&DATA_POINT_MEMBER_COUNT));
+        }
+
+        // A host with no stacks publishes no stack anything.
+        let plain = detached("tcp://docker-proxy.example:2375", &["web"]);
+        assert!(plain
+            .data_points()
+            .iter()
+            .all(|point| point.id != DATA_POINT_MEMBER_COUNT));
+    }
+
+    #[tokio::test]
+    async fn a_stack_offers_three_lifecycle_actions_and_no_others() {
+        let connector = detached_with_stacks(
+            "tcp://docker-proxy.example:2375",
+            &["shop-web-1"],
+            BTreeMap::from([("shop".to_owned(), vec!["shop-web-1".to_owned()])]),
+        );
+        let actions = stack_actions("stack:shop");
+        assert_eq!(
+            actions
+                .iter()
+                .map(|action| (action.id.as_str(), action.is_disruptive))
+                .collect::<Vec<_>>(),
+            vec![
+                (ACTION_START, false),
+                (ACTION_STOP, false),
+                (ACTION_RESTART, true),
+            ]
+        );
+        assert!(actions
+            .iter()
+            .all(|action| action.target_id.as_deref() == Some("stack:shop")));
+
+        // `pause`, `unpause` and `applyUpdate` are per-container operations
+        // with no defensible whole-stack meaning, and are refused rather than
+        // applied to an arbitrary member.
+        for refused in [ACTION_PAUSE, ACTION_UNPAUSE, ACTION_APPLY_UPDATE] {
+            let error = connector
+                .execute_action(refused, Some("stack:shop"), json!({}))
+                .await
+                .expect_err("a stack has no such action");
+            assert!(matches!(error, ConnectorError::InvalidAction { .. }));
+        }
+    }
+
+    #[tokio::test]
+    async fn a_stack_action_names_the_members_that_failed() {
+        // Points at a dead endpoint, so every member's lifecycle call fails —
+        // which is the partial-failure reporting path, at its extreme.
+        let connector = detached_with_stacks(
+            "tcp://127.0.0.1:1",
+            &["shop-web-1", "shop-db-1"],
+            BTreeMap::from([(
+                "shop".to_owned(),
+                vec!["shop-db-1".to_owned(), "shop-web-1".to_owned()],
+            )]),
+        );
+        let result = connector
+            .execute_action(ACTION_STOP, Some("stack:shop"), json!({}))
+            .await
+            .expect("a member failure is a result, not an error");
+        assert!(!result.success);
+        // Both members are named. A caller told only "the stack action failed"
+        // cannot tell whether one container or all of them are wrong.
+        assert!(result.message.contains("shop-db-1"), "{}", result.message);
+        assert!(result.message.contains("shop-web-1"), "{}", result.message);
+        let failed = result.payload.as_ref().unwrap()["failed"]
+            .as_array()
+            .unwrap()
+            .len();
+        assert_eq!(failed, 2);
+
+        // A project with nothing labelled into it says so rather than
+        // reporting a vacuous success.
+        let empty = connector
+            .execute_action(ACTION_START, Some("stack:absent"), json!({}))
+            .await
+            .expect("an unknown project is an answer");
+        assert!(!empty.success);
+        assert!(empty.message.contains("absent"));
+    }
+
+    #[tokio::test]
+    async fn the_members_table_exists_only_for_a_stack_target() {
+        let connector = detached_with_stacks(
+            "tcp://docker-proxy.example:2375",
+            &["shop-web-1"],
+            BTreeMap::from([("shop".to_owned(), vec!["shop-web-1".to_owned()])]),
+        );
+
+        let names = |target: Option<&str>| {
+            connector
+                .resource_kinds(target)
+                .into_iter()
+                .map(|kind| kind.kind)
+                .collect::<Vec<_>>()
+        };
+        // This is what the new parameter buys: absent, not merely empty.
+        assert!(!names(None).contains(&RESOURCE_KIND_STACK_MEMBERS.to_owned()));
+        assert!(!names(Some("shop-web-1")).contains(&RESOURCE_KIND_STACK_MEMBERS.to_owned()));
+        assert_eq!(
+            names(Some("stack:shop")),
+            vec![RESOURCE_KIND_STACK_MEMBERS.to_owned()]
+        );
+
+        // And the host's own kinds are not offered inside a stack, which has
+        // no images, volumes or networks of its own.
+        assert!(!names(Some("stack:shop")).contains(&RESOURCE_KIND_LOGS.to_owned()));
+
+        let kind = &connector.resource_kinds(Some("stack:shop"))[0];
+        assert_eq!(kind.applicable_target, ApplicableTarget::TargetOnly);
+        assert!(kind.row_actions.is_empty());
+        assert!(kind.kind_actions.is_empty());
+        assert_eq!(
+            kind.columns
+                .iter()
+                .map(|column| (column.key.as_str(), column.value_type))
+                .collect::<Vec<_>>(),
+            vec![
+                ("targetId", ColumnValueType::Text),
+                ("status", ColumnValueType::Text),
+                ("cpuPercent", ColumnValueType::Number),
+                ("memoryUsageBytes", ColumnValueType::Bytes),
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn stack_aggregates_and_member_rows_come_from_the_polls_own_readings() {
+        let connector = detached_with_stacks(
+            "tcp://docker-proxy.example:2375",
+            &["shop-web-1", "shop-db-1"],
+            BTreeMap::from([(
+                "shop".to_owned(),
+                vec!["shop-db-1".to_owned(), "shop-web-1".to_owned()],
+            )]),
+        );
+
+        let readings = HashMap::from([
+            (
+                "shop-web-1".to_owned(),
+                MemberReading {
+                    status: "running".to_owned(),
+                    cpu_percent: 12.5,
+                    memory_bytes: 1_000.0,
+                },
+            ),
+            (
+                "shop-db-1".to_owned(),
+                MemberReading {
+                    status: "exited".to_owned(),
+                    cpu_percent: 0.0,
+                    memory_bytes: 0.0,
+                },
+            ),
+        ]);
+
+        let mut status = ConnectorStatus::new(HealthState::Healthy, json!({}));
+        connector.aggregate_stacks(&readings, &mut status);
+        *connector
+            .member_readings
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = readings;
+
+        let read = |id: &str| status.data_point_value_for(Some("stack:shop"), id).cloned();
+        assert_eq!(read(DATA_POINT_OVERALL_STATUS), Some(json!("Partial")));
+        assert_eq!(read(DATA_POINT_MEMBER_COUNT), Some(json!(2)));
+        assert_eq!(read(DATA_POINT_RUNNING_COUNT), Some(json!(1)));
+        assert_eq!(read(DATA_POINT_STOPPED_COUNT), Some(json!(1)));
+        assert_eq!(read(DATA_POINT_CPU_PERCENT), Some(json!(12.5)));
+        assert_eq!(read(DATA_POINT_MEMORY_USAGE_BYTES), Some(json!(1_000.0)));
+        // One sample recorded, because something is running.
+        assert_eq!(
+            read(DATA_POINT_CPU_HISTORY).and_then(|value| value.as_array().map(std::vec::Vec::len)),
+            Some(1)
+        );
+
+        // The members table is the same readings, listed — no second source.
+        let rows = connector.list_stack_members("shop");
+        assert_eq!(
+            rows.iter().map(|row| row.id.as_str()).collect::<Vec<_>>(),
+            vec!["shop-db-1", "shop-web-1"]
+        );
+        assert_eq!(rows[1].fields["status"], json!("running"));
+        assert_eq!(rows[1].fields["cpuPercent"], json!(12.5));
+        assert_eq!(rows[1].fields["memoryUsageBytes"], json!(1_000.0));
+        assert_eq!(rows[0].fields["status"], json!("exited"));
+
+        // A stack whose members are all stopped records no history sample —
+        // the same rule a stopped container follows, so a chart shows a gap
+        // rather than a flat zero that looks like a measurement.
+        let stopped = detached_with_stacks(
+            "tcp://docker-proxy.example:2375",
+            &["idle-1"],
+            BTreeMap::from([("idle".to_owned(), vec!["idle-1".to_owned()])]),
+        );
+        let mut status = ConnectorStatus::new(HealthState::Healthy, json!({}));
+        stopped.aggregate_stacks(
+            &HashMap::from([(
+                "idle-1".to_owned(),
+                MemberReading {
+                    status: "exited".to_owned(),
+                    ..MemberReading::default()
+                },
+            )]),
+            &mut status,
+        );
+        assert_eq!(
+            status
+                .data_point_value_for(Some("stack:idle"), DATA_POINT_CPU_HISTORY)
+                .and_then(|value| value.as_array().map(std::vec::Vec::len)),
+            Some(0)
+        );
+        assert_eq!(
+            status.data_point_value_for(Some("stack:idle"), DATA_POINT_OVERALL_STATUS),
+            Some(&json!("Stopped"))
+        );
+    }
+
+    #[tokio::test]
+    async fn a_stack_gets_its_own_default_layout() {
+        let connector = detached_with_stacks(
+            "tcp://docker-proxy.example:2375",
+            &["shop-web-1"],
+            BTreeMap::from([("shop".to_owned(), vec!["shop-web-1".to_owned()])]),
+        );
+        let stack = connector.default_layout_for(Some("stack:shop"));
+        assert_eq!(stack.bindings.len(), 9);
+        // A container's layout is untouched by any of this.
+        assert_eq!(
+            connector.default_layout_for(Some("shop-web-1")).bindings,
+            detached("tcp://docker-proxy.example:2375", &["web"])
+                .default_layout_for(Some("web"))
+                .bindings
+        );
+    }
+
+    #[test]
+    fn a_log_line_prefers_dockers_own_timestamp_and_falls_back_to_the_read() {
+        let fetched: DateTime<Utc> = "2026-08-29T18:00:00Z".parse().unwrap();
+
+        // Docker's `timestamps=true` prefix: used, and stripped from the text.
+        let (instant, line) = log_line_instant(
+            "2026-08-29T17:59:12.123456789Z server listening on :8080",
+            fetched,
+        );
+        assert_eq!(instant.to_rfc3339(), "2026-08-29T17:59:12.123456789+00:00");
+        assert_eq!(line, "server listening on :8080");
+
+        // A driver that ignored the flag keeps its whole line — splitting on
+        // the first space would otherwise eat a word.
+        let (instant, line) = log_line_instant("ready to accept connections", fetched);
+        assert_eq!(instant, fetched);
+        assert_eq!(line, "ready to accept connections");
+
+        // The failure explanation `fetch_log_tail` leaves in place is a line,
+        // not a timestamped record, and must survive intact.
+        let (instant, line) = log_line_instant("logs unavailable: no such container", fetched);
+        assert_eq!(instant, fetched);
+        assert_eq!(line, "logs unavailable: no such container");
+
+        // A container that has said nothing has said nothing.
+        let (instant, line) = log_line_instant("", fetched);
+        assert_eq!(instant, fetched);
+        assert_eq!(line, "");
+
+        // Only the *last* line matters: the cell holds one.
+        let (_, line) = log_line_instant(
+            "2026-08-29T17:00:00Z first\n2026-08-29T17:01:00Z second",
+            fetched,
+        );
+        assert_eq!(line, "second");
+
+        // A single word is a line, not a timestamp with nothing after it.
+        let (instant, line) = log_line_instant("starting", fetched);
+        assert_eq!(instant, fetched);
+        assert_eq!(line, "starting");
+    }
+
+    #[tokio::test]
+    async fn the_logs_table_is_browse_only_and_host_scoped() {
+        let connector = detached("tcp://docker-proxy.example:2375", &["web"]);
+        let kinds = connector.resource_kinds(None);
+        let logs = kinds
+            .iter()
+            .find(|kind| kind.kind == RESOURCE_KIND_LOGS)
+            .expect("the connector declares a logs table");
+
+        assert_eq!(logs.applicable_target, ApplicableTarget::HostOnly);
+        assert_eq!(
+            logs.columns
+                .iter()
+                .map(|column| (column.key.as_str(), column.value_type))
+                .collect::<Vec<_>>(),
+            vec![
+                ("targetId", ColumnValueType::Text),
+                ("status", ColumnValueType::Text),
+                ("latestLogLine", ColumnValueType::Text),
+                ("lastLogTimestamp", ColumnValueType::Timestamp),
+            ]
+        );
+        // Browse-only: opening one container's full log is the per-container
+        // detail view's job, and a second route to it here would be a second
+        // thing to keep working.
+        assert!(logs.row_actions.is_empty());
+        assert!(logs.kind_actions.is_empty());
+        assert_eq!(logs.group_by_key, None);
+    }
+
     #[tokio::test]
     async fn the_updates_table_lists_what_the_last_check_found() {
         let connector = detached("tcp://docker-proxy.example:2375", &["web", "db"]);
 
-        let kinds = connector.resource_kinds();
+        let kinds = connector.resource_kinds(None);
         // The updates table plus the three host-inventory tables.
         assert_eq!(
             kinds
@@ -2583,6 +3841,7 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec![
                 RESOURCE_KIND_UPDATES,
+                RESOURCE_KIND_LOGS,
                 crate::resources::RESOURCE_KIND_IMAGES,
                 crate::resources::RESOURCE_KIND_VOLUMES,
                 crate::resources::RESOURCE_KIND_NETWORKS,

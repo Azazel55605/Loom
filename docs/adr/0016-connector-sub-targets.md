@@ -1,6 +1,6 @@
 # 0016 — Connector sub-targets
 
-- Status: accepted
+- Status: accepted; extended by [ADR 0027](./0027-docker-stacks.md)
 - Date: 2026-08-27
 - Supersedes: [0019 — Docker host and container views share one connector type](./0019-docker-connector-merge.md)
 

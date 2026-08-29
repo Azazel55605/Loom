@@ -1,6 +1,6 @@
 import * as React from "react";
 import { useMutation, useQuery } from "@tanstack/react-query";
-import { AlertCircle, Check, ChevronDown, Loader2, Search, X } from "lucide-react";
+import { AlertCircle, Check, ChevronDown, Loader2, Maximize2, Search, X } from "lucide-react";
 import { toast } from "sonner";
 
 import { Alert, AlertDescription } from "@loom/ui-kit/components/ui/alert";
@@ -36,6 +36,26 @@ import { formatByteReading } from "@loom/ui-kit/widgets/types";
 /** The params key a row action names its row with, per the API contract. */
 const RESOURCE_ID_PARAM = "resourceId";
 
+/**
+ * The one kind this component renders differently, and deliberately the only
+ * one.
+ *
+ * A log line is not a table cell. Truncated to a column width in the body font
+ * it is unreadable, and every other rendering this component does is
+ * type-driven precisely so no connector needs frontend code. This is the
+ * exception, and it is named here rather than spread through the render so that
+ * "how many special cases are there?" has an answer you can grep for.
+ *
+ * The honest generic alternative — a `ColumnValueType::LogLine`, or a
+ * `rowOpensTarget` flag on the descriptor — was not taken because one case is
+ * not a pattern. If a second connector wants a monospace cell or a clickable
+ * row, *that* is the moment to promote this into the descriptor, with two real
+ * uses to design against instead of one and a guess.
+ */
+const LOGS_KIND = "logs";
+/** The column carrying the log text, within `LOGS_KIND`. */
+const LOG_LINE_COLUMN = "latestLogLine";
+
 /** The column key a row names its sub-target with, per the API contract. */
 const TARGET_ID_FIELD = "targetId";
 
@@ -61,6 +81,7 @@ export function ResourceKindBrowser({
   descriptor,
   disabled = false,
   disabledReason,
+  onOpenTarget,
   className,
 }: {
   instanceId: string;
@@ -71,6 +92,14 @@ export function ResourceKindBrowser({
    *  connector. Visibility only — the backend re-checks every request. */
   disabled?: boolean;
   disabledReason?: string | null;
+  /**
+   * Opens one sub-target's own detail view. Supplied by a caller that has
+   * somewhere to open it; omitted where there is nowhere to go, and the rows
+   * are then simply not clickable rather than clickable and inert.
+   *
+   * Only the `logs` kind uses it — see `LOGS_KIND` below.
+   */
+  onOpenTarget?: (targetId: string) => void;
   className?: string;
 }) {
   const api = useApiClient();
@@ -124,7 +153,8 @@ export function ResourceKindBrowser({
 
   const columns = descriptor.columns;
   const hasRowActions = descriptor.rowActions.length > 0;
-  const columnCount = columns.length + (hasRowActions ? 1 : 0);
+  const columnCount =
+    columns.length + (hasRowActions ? 1 : 0) + (descriptor.kind === LOGS_KIND ? 1 : 0);
   const [query, setQuery] = React.useState("");
   // **Expanded** state, so every group starts closed. A kind is grouped because
   // its list is long — Docker's image table is hundreds of rows — and opening
@@ -145,15 +175,81 @@ export function ResourceKindBrowser({
   // is indistinguishable from no match at all.
   const searching = query.trim().length > 0;
 
+  // A log row opens that container's own detail view, which is the same place
+  // `LogPreview`'s expand icon goes from a dashboard tile — one behaviour, two
+  // entry points, rather than a second way to read a log.
+  const isLogs = descriptor.kind === LOGS_KIND;
+  const openTarget =
+    isLogs && onOpenTarget !== undefined
+      ? (item: ResourceItem) => {
+          const target = item.fields[TARGET_ID_FIELD];
+          if (typeof target === "string" && target.length > 0) onOpenTarget(target);
+        }
+      : null;
+
   /** One row, identical whether it stands alone or under a group heading. */
   function renderRow(item: ResourceItem) {
+    const open = openTarget === null ? undefined : () => openTarget(item);
     return (
-      <TableRow key={item.id}>
-        {columns.map((column) => (
-          <TableCell key={column.key} className="align-top">
-            <ResourceCell column={column} value={item.fields[column.key]} />
+      <TableRow
+        key={item.id}
+        // A row that does something is a button, and has to say so to a
+        // keyboard and to a screen reader — a click handler on a `<tr>` alone
+        // is a control only a mouse can find.
+        role={open === undefined ? undefined : "button"}
+        tabIndex={open === undefined ? undefined : 0}
+        aria-label={open === undefined ? undefined : `Open ${item.id} and show its log`}
+        className={open === undefined ? undefined : "cursor-pointer"}
+        onClick={open}
+        onKeyDown={
+          open === undefined
+            ? undefined
+            : (event) => {
+                if (event.key === "Enter" || event.key === " ") {
+                  event.preventDefault();
+                  open();
+                }
+              }
+        }
+      >
+        {columns.map((column) => {
+          const isLogLine = isLogs && column.key === LOG_LINE_COLUMN;
+          return (
+            <TableCell
+              key={column.key}
+              // `w-full max-w-0` on the log cell: it absorbs whatever width is
+              // left and lets its own `truncate` work, which is what stops a
+              // 300-character line from squeezing the container name into
+              // "loom-web -backend- 1". Every other column then sizes to its
+              // content, which is what a name and a timestamp want.
+              className={cn("align-top", isLogLine && "w-full max-w-0")}
+            >
+              {isLogLine ? (
+                <LogLineCell value={item.fields[column.key]} />
+              ) : isLogs ? (
+                // A container name is one word and reads as one; the generic
+                // `break-all` fallback exists for digests, which these are not.
+                <span className="whitespace-nowrap">
+                  <ResourceCell column={column} value={item.fields[column.key]} />
+                </span>
+              ) : (
+                <ResourceCell column={column} value={item.fields[column.key]} />
+              )}
+            </TableCell>
+          );
+        })}
+        {open !== undefined && !hasRowActions ? (
+          // Mirrors `LogPreview`'s own affordance so the gesture is recognisable
+          // from the dashboard. `aria-hidden` and no tab stop: the row already
+          // carries the label and the focus, and a second identical control
+          // would make every log line two stops on the way to the next one.
+          <TableCell className="w-8 text-right align-top">
+            <Maximize2
+              aria-hidden="true"
+              className="ml-auto h-3.5 w-3.5 text-muted-foreground"
+            />
           </TableCell>
-        ))}
+        ) : null}
         {hasRowActions ? (
           <TableCell className="text-right align-top">
             <div className="flex justify-end gap-1">
@@ -264,6 +360,11 @@ export function ResourceKindBrowser({
                 {columns.map((column) => (
                   <TableHead key={column.key}>{column.label}</TableHead>
                 ))}
+                {openTarget !== null && !hasRowActions ? (
+                  <TableHead className="w-8">
+                    <span className="sr-only">Open</span>
+                  </TableHead>
+                ) : null}
                 {hasRowActions ? (
                   <TableHead className="text-right">
                     <span className="sr-only">Actions</span>
@@ -623,6 +724,29 @@ function ResourceCell({ column, value }: { column: ColumnDescriptor; value: unkn
     <span className="break-all" title={typeof value === "string" ? value : undefined}>
       {typeof value === "string" ? value : JSON.stringify(value)}
     </span>
+  );
+}
+
+/**
+ * One log line, in `LogPreview`'s own font and treatment.
+ *
+ * Monospace and truncated with the full text in the title, exactly as the
+ * dashboard's preview renders it — a log line read in the body font, wrapped
+ * across three rows, is a different and worse thing than the same line on a
+ * tile.
+ */
+function LogLineCell({ value }: { value: unknown }) {
+  const text = typeof value === "string" ? value.trim() : "";
+  if (text.length === 0) {
+    return <span className="text-xs text-muted-foreground">Nothing reported yet.</span>;
+  }
+  return (
+    <p
+      className="truncate font-mono text-xs leading-relaxed text-muted-foreground"
+      title={text}
+    >
+      {text}
+    </p>
   );
 }
 

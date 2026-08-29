@@ -1,6 +1,6 @@
 import * as React from "react";
 import { useMutation, useQuery } from "@tanstack/react-query";
-import { AlertCircle } from "lucide-react";
+import { AlertCircle, Layers } from "lucide-react";
 import { toast } from "sonner";
 
 import { Alert, AlertDescription } from "@loom/ui-kit/components/ui/alert";
@@ -30,6 +30,7 @@ import type {
   PendingOperation,
 } from "@loom/ui-kit/lib/api";
 import { appliesToTarget } from "@loom/ui-kit/lib/api";
+import { describeTarget } from "@loom/ui-kit/lib/target-label";
 import { connectorAvailability } from "@loom/ui-kit/lib/connector-availability";
 import { useApiClient, useConnectorStatusSocket } from "@loom/ui-kit/lib/api-context";
 import { useAuth } from "@loom/ui-kit/lib/auth-context";
@@ -80,6 +81,8 @@ export function ConnectorDetailModal({
   const instance = placement.connector;
   const [live, setLive] = React.useState<LiveReading | null>(null);
   const canControl = hasPermission(user?.permissions ?? [], PERMISSION_KEYS.connectorsControl);
+  // Client-side from the id, like the tile's — see `describeTarget`.
+  const target = describeTarget(placement.targetId);
 
   const detail = useQuery({
     queryKey: ["connector-instance", instance.id],
@@ -91,8 +94,11 @@ export function ConnectorDetailModal({
   // to a closed dialog, and a dashboard of twenty tiles would otherwise ask
   // twenty connectors what they can browse before anyone had looked at one.
   const resourceKinds = useQuery({
-    queryKey: ["connector-resource-kinds", instance.id],
-    queryFn: ({ signal }) => api.getResourceKinds(instance.id, signal),
+    // Keyed by target as well as instance: what a connector publishes can
+    // depend on which view is open — a Docker stack has a Members table its
+    // containers do not — so two targets of one instance are two answers.
+    queryKey: ["connector-resource-kinds", instance.id, placement.targetId],
+    queryFn: ({ signal }) => api.getResourceKinds(instance.id, placement.targetId, signal),
     enabled: open,
   });
 
@@ -193,6 +199,17 @@ export function ConnectorDetailModal({
     appliesToTarget(kind, placement.targetId),
   );
 
+  // A container the reader picked out of the host's log table, if any. The
+  // nested modal below is that container's own detail view — the same component
+  // a dashboard tile opens, so there is one detail view rather than two.
+  //
+  // This cannot recurse: the only kind with clickable rows is `logs`, which is
+  // `hostOnly`, so a modal opened for a target has no log table to click in.
+  const [logTarget, setLogTarget] = React.useState<string | null>(null);
+  React.useEffect(() => {
+    if (!open) setLogTarget(null);
+  }, [open]);
+
   const boundActions = new Set(
     placement.widgetBindings.flatMap((binding) => "action" in binding ? [binding.action.actionId] : []),
   );
@@ -202,14 +219,20 @@ export function ConnectorDetailModal({
       <DialogContent className="h-[calc(100dvh-1rem)] w-[calc(100vw-1rem)] max-w-5xl grid-rows-[auto_minmax(0,1fr)] overflow-hidden p-0 sm:h-auto sm:max-h-[90dvh] sm:w-[calc(100vw-3rem)]">
         <DialogHeader className="border-b px-5 py-4 pr-12 text-left">
           <div className="flex flex-wrap items-center gap-2">
-            <ConnectorIcon
-              typeIcon={instance.metadata.icon}
-              iconOverride={instance.iconOverride}
-              size={22}
-            />
+            {/* The same icon rule the tile follows, so opening a stack does not
+                change what it looks like. */}
+            {target?.isStack === true ? (
+              <Layers className="shrink-0 text-muted-foreground" size={22} aria-hidden="true" />
+            ) : (
+              <ConnectorIcon
+                typeIcon={instance.metadata.icon}
+                iconOverride={instance.iconOverride}
+                size={22}
+              />
+            )}
             <DialogTitle>
               {instance.name}
-              {placement.targetId === null ? null : ` · ${placement.targetId}`}
+              {target === null ? null : ` · ${target.text}`}
             </DialogTitle>
             <ConnectorStatusBadge availability={availability} />
           </div>
@@ -267,6 +290,7 @@ export function ConnectorDetailModal({
                           instanceId={instance.id}
                           targetId={placement.targetId}
                           descriptor={kind}
+                          onOpenTarget={setLogTarget}
                           // The same rule the widgets follow: a viewer without
                           // `connectors.control`, or a connector that cannot be
                           // reached, gets buttons that say why before the click.
@@ -297,9 +321,63 @@ export function ConnectorDetailModal({
           )}
         </div>
       </DialogContent>
+      {logTarget === null ? null : (
+        <ConnectorDetailModal
+          placement={targetPlacement(placement, logTarget)}
+          open
+          onOpenChange={(next) => {
+            if (!next) setLogTarget(null);
+          }}
+          focus="logs"
+        />
+      )}
     </Dialog>
   );
 }
+
+/**
+ * A stand-in placement for one sub-target, so its detail view can be opened
+ * from somewhere that is not a dashboard.
+ *
+ * **Not a real placement, and not saved.** The rows of a host's log table are
+ * containers, and most of them are on nobody's dashboard — waiting for one to
+ * be placed before its log could be read would make the table a list of things
+ * you mostly cannot open.
+ *
+ * The one binding is the log pane, because "open this row" means "show me this
+ * container's log" and nothing else was asked for. Everything else the
+ * container can do still appears: `ConnectorDetailModal` builds its identity,
+ * status and action list from the connector's own descriptors filtered by
+ * `targetId`, so the container's start/stop/restart controls arrive under
+ * "Other actions" without this having to guess at a layout. Guessing at one is
+ * what `default_layout_for` exists for, and it lives in the connector — the
+ * backend does not publish a per-target layout, and inventing an approximation
+ * here would be a second, worse copy of it.
+ */
+function targetPlacement(host: DashboardPlacement, targetId: string): DashboardPlacement {
+  return {
+    ...host,
+    // A distinct id so React does not reconcile the nested modal's subtree with
+    // the host's, and so any keyed cache below it stays separate.
+    id: `${host.id}:${targetId}`,
+    targetId,
+    widgetBindings: [
+      { display: { dataPointId: LOG_DATA_POINT_ID, widgetType: "logStream", config: {} } },
+    ],
+  };
+}
+
+/**
+ * The data point a container's log lives under.
+ *
+ * A connector-level id in shared UI, which is the kind of thing this codebase
+ * otherwise avoids — but the same one `logs` resource kind is already the
+ * documented special case here, and the binding has to name *something*. It is
+ * `logs` for every connector that publishes a log today, and a connector that
+ * used another id would simply render an unresolved binding rather than
+ * anything broken.
+ */
+const LOG_DATA_POINT_ID = "logs";
 
 function ConnectorDetailSkeleton() {
   return <div className="space-y-5"><div className="grid gap-3 sm:grid-cols-2"><Skeleton className="h-8" /><Skeleton className="h-8" /></div><Skeleton className="h-48 w-full" /><Skeleton className="h-24 w-full" /></div>;

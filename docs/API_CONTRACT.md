@@ -1236,10 +1236,28 @@ addressable-view enumeration; it does not fetch status, stats, or logs.
 
 ```json
 [
-  { "id": "web", "label": "web (example/image:latest)" },
-  { "id": "database", "label": "database (example/database:latest)" }
+  { "id": "web", "label": "web (example/image:latest)", "kind": "container" },
+  { "id": "database", "label": "database (example/database:latest)", "kind": "container" },
+  { "id": "stack:shop", "label": "shop (stack)", "kind": "stack" }
 ]
 ```
+
+| Field | JSON type | Meaning | Nullability |
+| --- | --- | --- | --- |
+| `id` | string | Stable id used by descriptors, placements, status details, and actions. | Always present. |
+| `label` | string | Human-facing name shown when choosing a target. | Always present. |
+| `kind` | string | What *sort* of thing this target is, in the connector's own vocabulary. | Always present; `"target"` when the connector does not distinguish. |
+
+**`kind` is deliberately free-form, not an enum.** A closed set would have to
+name every kind of thing every connector will ever address, and the first
+connector wanting a "pool", a "share" or a "zone" would either wait for a Core
+release or misuse the nearest existing word. It is the same choice already made
+for connector type ids, action ids and data point ids: the vocabulary belongs to
+the connector, and Loom carries it without interpreting it. Clients may group or
+icon by it and **must** tolerate an unrecognised value by treating the target as
+an ordinary one. Nothing in Loom branches on it — a connector that behaves
+differently per kind does so from its own `target_id`, which is what it actually
+receives.
 
 Sub-targets are not discovery proposals and do not create connector instances.
 They are views inside the already-configured connection. `discover()` retains
@@ -1458,6 +1476,113 @@ every browse. If it turns out to matter, the honest way to add it is from the
 connector's already-cached reading of that endpoint, with its age shown, rather
 than by making this listing slow.
 
+## Docker stacks
+
+Containers sharing a `com.docker.compose.project` label are additionally
+addressable as one **stack**. A stack is not something Loom maintains — it is
+something Compose already recorded and this connector reads, so a project that
+stops being deployed stops appearing, with no state to clean up.
+
+- **Target id: `stack:{project}`.** A colon is the whole trick: Docker container
+  names are restricted to `[a-zA-Z0-9][a-zA-Z0-9_.-]*`, so no container can ever
+  be called `stack:anything` and **no existing target id changes meaning**. A
+  saved placement pointing at `web` still points at the container `web`.
+- **`kind: "stack"`**, beside the containers' unchanged `kind: "container"`.
+  Stacks are *added* to the sub-target list, never substituted for their
+  members: a stack is another way to look at the same containers, and someone
+  who placed one container on a dashboard did not ask for that to become a
+  stack tile.
+
+### Stack data points
+
+| Id | Type | Meaning |
+| --- | --- | --- |
+| `overallStatus` | string | `Running` (every member running), `Stopped` (none), `Partial` (some). |
+| `memberCount` | number | Containers labelled into the project. |
+| `runningCount` / `stoppedCount` | number | The split. |
+| `cpuPercent` / `cpuHistory` | number / time series | Summed over members. |
+| `memoryUsageBytes` / `memoryHistory` | number / bytes time series | Summed over members. |
+
+CPU and memory reuse the **container ids on purpose**: they mean the same thing,
+so a widget bound to `cpuPercent` draws a percentage whether the target is one
+container or ten, and a `stackCpuPercent` would make every renderer learn a
+second name for one reading.
+
+**`overallStatus` is a data point, not health.** It is a plain string exactly
+like a container's own `status`. `ConnectorStatus.health` says whether Loom can
+reach the Docker daemon; a deliberately stopped stack is not a Docker host that
+is down, and collapsing the two would make an ordinary maintenance window look
+like an outage. See
+[`adr/0027-docker-stacks.md`](adr/0027-docker-stacks.md).
+
+**No extra Docker calls.** The aggregates are summed from readings the poll has
+already taken for each container, and the members table lists those same
+readings. Measured, not assumed: a poll of a host whose containers carry a
+Compose label makes exactly the same number of daemon requests as a poll of the
+same host without one.
+
+### Stack actions and resource kind
+
+`start`, `stop` (neither disruptive) and `restart` (disruptive) — the same ids a
+container offers, with the same meanings, so a client needs no stack-specific
+button and the action log reads the same for both. Each runs across the members
+**sequentially**, for the reason `updateAll` does: starting six containers at
+once on a home server is not what `docker compose up` would give you, and
+stopping them at once takes down interdependent things simultaneously. A member
+that fails does not stop the rest, and the result names **which** container
+refused and what Docker said — "the stack action failed" is not actionable.
+
+`pause`, `unpause` and `applyUpdate` are refused for a stack rather than applied
+to an arbitrary member: they are per-container operations with no defensible
+whole-stack meaning.
+
+`stackMembers` (`applicableTarget: "targetOnly"`) is published **only** for a
+stack target, and is the kind that motivated the `?targetId=` parameter above.
+Columns: `targetId`, `status`, `cpuPercent` (number), `memoryUsageBytes`
+(bytes). Browse-only — every member is also an ordinary sub-target with its own
+detail view and controls, so a second set of buttons here would be a second
+place to keep them working.
+
+## Docker host log table
+
+One more host-scoped kind, `logs` (`applicableTarget: "hostOnly"`, ungrouped),
+answering a question no per-container view can: *what is everything on this host
+saying right now?*
+
+| Column | Type | Meaning |
+| --- | --- | --- |
+| `targetId` | text | Container name — the platform's convention for "which sub-target this row is about". |
+| `status` | text | The daemon's own container state (`running`, `exited`, …). |
+| `latestLogLine` | text | The most recent line, with Docker's timestamp prefix stripped. |
+| `lastLogTimestamp` | timestamp | When that line was written — best effort, see below. |
+
+**Browse-only: no row actions and no kind actions.** Opening one container's
+full log is the per-container detail view's job, and a second route to it here
+would be a second thing to keep working. The rows are read concurrently, at the
+same bounded fan-out a status poll uses, and returned sorted by container name
+so the table does not reshuffle between refreshes.
+
+A container whose log cannot be read still gets a row, carrying the daemon's
+explanation as its line — "this one's log driver does not support reading back"
+is a useful thing for a log table to say, and dropping the row would make the
+container look as though it did not exist.
+
+**`lastLogTimestamp` is Docker's own timestamp when there is one, and the
+connector's fetch time when there is not.** The request asks for
+`timestamps=true`, so Docker prefixes each line with when the container emitted
+it; that is used whenever it parses. When it does not — a driver that records no
+times, a container that has said nothing, or a failed read whose explanation
+stands in place of a line — the fallback is when the reading was taken, which is
+at least true about something. The two are not distinguished in the column: a
+`timestamp` cell has nowhere to put the distinction, a second "is this exact?"
+column would cost more attention than it is worth, and the fallback is never
+*older* than the real answer, so a stale-looking row is never a lie in the
+direction that matters.
+
+This kind needs no new capability. It is the container log endpoint read once
+per container, so it is gated by `read-logs` (`containers` + `allowLogs`) like
+the per-container `logs` data point.
+
 **Delete is offered on every row, including ones Docker will refuse** — a volume
 a container has mounted, and the built-in `bridge`, `host` and `none` networks.
 Docker's refusal is passed through verbatim as the action's `message` with
@@ -1628,6 +1753,20 @@ orthogonal to `resourceId`.
 Requires a global `connectors.view` grant. Returns the live connector's
 descriptors. Browsing what a service holds is looking at it, not administering
 Loom, so this is the same read-only tier as sub-targets.
+
+`?targetId=` optionally names which view is being looked at, and is passed
+through to the connector unchanged; omitting it (or sending it empty, which is
+what a blank form field does) means the instance as a whole. It exists so a kind
+can be **absent** rather than merely empty: `applicableTarget` already says
+*where* a kind belongs, and that is enough while every target of a connector is
+the same sort of thing. It stops being enough when they are not — Docker's
+stacks and its containers are both sub-targets, and "the containers in this
+stack" is a table one of them has and the other does not, which `targetOnly`
+cannot express because a container is a target too.
+
+A listing (`/resources/{kind}`) is validated against **that target's** kinds for
+the same reason: a kind only a stack publishes is as much "no such kind" for a
+container as one nothing publishes at all.
 
 ```json
 [

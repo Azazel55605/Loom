@@ -201,7 +201,7 @@ fn join(names: Option<&Vec<String>>) -> String {
 
 /// A container's display name, the same one [`crate::connector`] uses as a
 /// sub-target id.
-fn container_name(container: &ContainerSummary) -> Option<String> {
+pub fn container_name(container: &ContainerSummary) -> Option<String> {
     container
         .names
         .as_ref()

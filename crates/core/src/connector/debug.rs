@@ -1031,10 +1031,7 @@ impl Connector for DebugConnector {
         self.gate().await?;
         Ok(FIXTURE_TARGETS
             .into_iter()
-            .map(|id| SubTarget {
-                id: id.to_owned(),
-                label: id.to_owned(),
-            })
+            .map(|id| SubTarget::new(id, id))
             .collect())
     }
 
@@ -1050,7 +1047,11 @@ impl Connector for DebugConnector {
     /// [`Connector::data_points`], and what a connector *can* browse does not
     /// stop being true because the service is unreachable. The listing is where
     /// the failure shows up.
-    fn resource_kinds(&self) -> Vec<ResourceKindDescriptor> {
+    ///
+    /// Unconditional in `target_id` too. This connector's fixture targets are
+    /// all the same sort of thing, so it has nothing to vary — which is the
+    /// ordinary case, and the one the argument must stay cheap for.
+    fn resource_kinds(&self, _target_id: Option<&str>) -> Vec<ResourceKindDescriptor> {
         let recycle = ConnectorAction {
             id: ACTION_RECYCLE.to_owned(),
             target_id: None,
@@ -1839,7 +1840,7 @@ mod tests {
     #[tokio::test]
     async fn resource_kinds_describe_two_browsable_tables() {
         let connector = DebugConnector::default();
-        let kinds = connector.resource_kinds();
+        let kinds = connector.resource_kinds(None);
 
         let ids: Vec<&str> = kinds.iter().map(|kind| kind.kind.as_str()).collect();
         assert_eq!(ids, vec![RESOURCE_KIND_WIDGETS, RESOURCE_KIND_GADGETS]);
@@ -1915,7 +1916,7 @@ mod tests {
         // can browse stays true while its service is unreachable.
         assert_eq!(
             DebugConnector::failing(ConnectorError::unreachable("simulated"))
-                .resource_kinds()
+                .resource_kinds(None)
                 .len(),
             2
         );
@@ -1940,7 +1941,7 @@ mod tests {
 
         // Every row fills every declared column, or a table renderer would be
         // built against holes the fixture invented rather than against data.
-        let kinds = connector.resource_kinds();
+        let kinds = connector.resource_kinds(None);
         for kind in &kinds {
             let rows = connector
                 .list_resource_items(&kind.kind, None)
@@ -2429,16 +2430,19 @@ mod tests {
         assert_eq!(
             connector.list_sub_targets().await.unwrap(),
             vec![
-                SubTarget {
-                    id: "fixture-a".to_owned(),
-                    label: "fixture-a".to_owned(),
-                },
-                SubTarget {
-                    id: "fixture-b".to_owned(),
-                    label: "fixture-b".to_owned(),
-                },
+                SubTarget::new("fixture-a", "fixture-a"),
+                SubTarget::new("fixture-b", "fixture-b"),
             ]
         );
+        // A connector with nothing to distinguish leaves every target the
+        // default kind, which is what `SubTarget::new` gives it.
+        assert!(connector
+            .list_sub_targets()
+            .await
+            .unwrap()
+            .iter()
+            .all(|target| target.kind == crate::connector::SUB_TARGET_KIND_DEFAULT));
+
         let host = connector.default_layout_for(None);
         let fixture_a = connector.default_layout_for(Some("fixture-a"));
         let fixture_b = connector.default_layout_for(Some("fixture-b"));

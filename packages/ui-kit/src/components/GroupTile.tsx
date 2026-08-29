@@ -36,6 +36,7 @@ import type { DashboardPlacement, DashboardPlacementGroup } from "@loom/ui-kit/l
 import { useApiClient } from "@loom/ui-kit/lib/api-context";
 import { describeConnectorError } from "@loom/ui-kit/lib/connector-error";
 import { cn } from "@loom/ui-kit/lib/utils";
+import { describeTarget } from "@loom/ui-kit/lib/target-label";
 
 /**
  * A visual placement group. The outer card is one grid item; member placements
@@ -158,11 +159,15 @@ export function GroupTile({
               <CardTitle className="truncate text-sm">{group.name}</CardTitle>
               <p className="truncate text-xs text-muted-foreground">
                 {group.members
-                  .map((member) =>
-                    member.targetId === null
+                  .map((member) => {
+                    // The same reading a standalone tile gives, so one
+                    // placement does not read two ways depending on whether
+                    // somebody grouped it.
+                    const target = describeTarget(member.targetId);
+                    return target === null
                       ? member.connector.name
-                      : `${member.connector.name} · ${member.targetId}`,
-                  )
+                      : `${member.connector.name} · ${target.text}`;
+                  })
                   .join(" · ")}
               </p>
             </div>

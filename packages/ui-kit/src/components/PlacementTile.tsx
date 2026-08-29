@@ -6,6 +6,7 @@ import {
   ArrowRight,
   FolderInput,
   GripVertical,
+  Layers,
   Maximize2,
   Pencil,
   Trash2,
@@ -34,6 +35,7 @@ import { ConnectorIcon } from "@loom/ui-kit/components/ConnectorIcon";
 import { ConnectorStatusBadge } from "@loom/ui-kit/components/ConnectorStatusBadge";
 import { cn } from "@loom/ui-kit/lib/utils";
 import { describeConnectorError } from "@loom/ui-kit/lib/connector-error";
+import { describeTarget } from "@loom/ui-kit/lib/target-label";
 import {
   matchesTarget,
   statusDetailsForTarget,
@@ -196,6 +198,10 @@ export function PlacementTile({
     pendingOperation: live === undefined ? instance.pendingOperation : live.pendingOperation,
     diagnosis: live === undefined ? instance.diagnosis : live.diagnosis,
   });
+  // Derived from the id alone — no fetch. A header that had to load the
+  // sub-target list to render its own title would put a request, a loading
+  // state and a failure state on a dashboard that already has what it needs.
+  const target = describeTarget(placement.targetId);
   const currentDetails = statusDetailsForTarget(status?.details, placement.targetId);
   const details = useRetainedStatusDetails(
     `${instance.id}:${placement.targetId ?? ""}`,
@@ -212,7 +218,7 @@ export function PlacementTile({
   // existed — no badge, no button, no request.
   const updateKinds = useQuery({
     queryKey: ["connector-resource-kinds", instance.id],
-    queryFn: ({ signal }) => api.getResourceKinds(instance.id, signal),
+    queryFn: ({ signal }) => api.getResourceKinds(instance.id, placement.targetId, signal),
     enabled: placement.targetId === null,
     // Which kinds exist is a property of the connector, not of its state: it
     // changes when someone edits a configuration, not between polls.
@@ -249,11 +255,18 @@ export function PlacementTile({
               aria-hidden="true"
             />
           ) : null}
-          <ConnectorIcon
-            typeIcon={instance.metadata.icon}
-            iconOverride={instance.iconOverride}
-            size={20}
-          />
+          {/* A stack is not the connector's own thing — it is a set of them —
+              so it takes the layers glyph rather than the Docker whale. A
+              container placement keeps the icon it has always had. */}
+          {target?.isStack === true ? (
+            <Layers className="shrink-0 text-muted-foreground" size={20} aria-hidden="true" />
+          ) : (
+            <ConnectorIcon
+              typeIcon={instance.metadata.icon}
+              iconOverride={instance.iconOverride}
+              size={20}
+            />
+          )}
           <div className="min-w-0">
             <p className="truncate text-sm font-semibold leading-none" title={instance.name}>
               {instance.name}
@@ -261,13 +274,13 @@ export function PlacementTile({
             <p
               className="truncate text-xs text-muted-foreground"
               title={
-                placement.targetId === null
+                target === null
                   ? instance.metadata.name
-                  : `${instance.metadata.name} · ${placement.targetId}`
+                  : `${instance.metadata.name} · ${target.text}`
               }
             >
               {instance.metadata.name}
-              {placement.targetId === null ? null : ` · ${placement.targetId}`}
+              {target === null ? null : ` · ${target.text}`}
             </p>
           </div>
         </div>
@@ -372,7 +385,14 @@ export function PlacementTile({
               variant="ghost"
               size="icon"
               className="loom-grid-control h-7 w-7"
-              aria-label={`Expand ${instance.name}`}
+              // Named by target as well as instance: one connector can place
+              // several tiles on one dashboard, and "Expand Docker host" three
+              // times over is three controls a screen reader cannot tell apart.
+              aria-label={
+                target === null
+                  ? `Expand ${instance.name}`
+                  : `Expand ${instance.name} · ${target.text}`
+              }
               onClick={() => openDetail()}
               title={`Open ${instance.name} details`}
             >

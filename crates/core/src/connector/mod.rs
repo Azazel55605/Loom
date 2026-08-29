@@ -141,7 +141,23 @@ pub trait Connector: Send + Sync {
     ///
     /// Cheap and synchronous, like the other descriptor methods: a client asks
     /// what can be browsed before it asks for any rows.
-    fn resource_kinds(&self) -> Vec<ResourceKindDescriptor> {
+    ///
+    /// # Why this takes a target
+    ///
+    /// `target_id` is which view is being looked at — `None` for the instance
+    /// as a whole, otherwise a [`SubTarget::id`] — and it exists so a kind can
+    /// be **absent** rather than merely empty. [`ApplicableTarget`] already
+    /// lets a descriptor say *where* it belongs, and that is enough while every
+    /// target of a connector is the same sort of thing. It stops being enough
+    /// when they are not: Docker's stacks and its containers are both
+    /// sub-targets, and "the containers in this stack" is a table one of them
+    /// has and the other does not. `TargetOnly` cannot express that, because a
+    /// container is a target too.
+    ///
+    /// A connector that does not care ignores the argument, which is what the
+    /// default body and every existing implementation do.
+    fn resource_kinds(&self, target_id: Option<&str>) -> Vec<ResourceKindDescriptor> {
+        let _ = target_id;
         Vec::new()
     }
 
@@ -589,6 +605,51 @@ pub struct SubTarget {
     pub id: String,
     /// Human-facing name shown when choosing a target.
     pub label: String,
+    /// What *sort* of thing this target is, in the connector's own vocabulary
+    /// — Docker uses `"container"` and `"stack"`.
+    ///
+    /// **Deliberately a free-form string and not an enum.** A closed set would
+    /// have to name every kind of thing every connector will ever address, and
+    /// the first connector to want a "pool", a "share" or a "zone" would either
+    /// wait for a Core release or misuse the nearest existing word. It is the
+    /// same choice already made for connector type ids, action ids and data
+    /// point ids: the vocabulary belongs to the connector, and Loom carries it
+    /// without interpreting it.
+    ///
+    /// Clients may group or icon by it and **must** tolerate a value they do
+    /// not recognise by treating the target as an ordinary one. Nothing in Loom
+    /// branches on it; a connector that distinguishes behaviour by kind does so
+    /// from its own `target_id`, which is the thing it actually receives.
+    #[serde(default = "default_sub_target_kind")]
+    pub kind: String,
+}
+
+/// What [`SubTarget::kind`] means when a connector does not say.
+///
+/// Every existing sub-target was one of these before the field existed, and a
+/// stored or older-connector payload without it still deserializes to one.
+pub const SUB_TARGET_KIND_DEFAULT: &str = "target";
+
+fn default_sub_target_kind() -> String {
+    SUB_TARGET_KIND_DEFAULT.to_owned()
+}
+
+impl SubTarget {
+    /// A target of the default kind.
+    pub fn new(id: impl Into<String>, label: impl Into<String>) -> Self {
+        Self {
+            id: id.into(),
+            label: label.into(),
+            kind: default_sub_target_kind(),
+        }
+    }
+
+    /// Declares what sort of thing this target is.
+    #[must_use]
+    pub fn of_kind(mut self, kind: impl Into<String>) -> Self {
+        self.kind = kind.into();
+        self
+    }
 }
 
 /// The coarse health verdict for a service.
@@ -1920,7 +1981,8 @@ mod tests {
             id: "stub-resources",
             health: HealthState::Healthy,
         };
-        assert!(stub.resource_kinds().is_empty());
+        assert!(stub.resource_kinds(None).is_empty());
+        assert!(stub.resource_kinds(Some("anything")).is_empty());
         assert_eq!(
             stub.list_resource_items("anything", None).await.unwrap(),
             Vec::new()

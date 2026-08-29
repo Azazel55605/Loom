@@ -1143,8 +1143,11 @@ mod tests {
         assert_eq!(
             targets,
             serde_json::json!([
-                { "id": "fixture-a", "label": "fixture-a" },
-                { "id": "fixture-b", "label": "fixture-b" },
+                // `kind` is the connector's own word for what sort of thing a
+                // target is. A connector with nothing to distinguish leaves it
+                // at the default, which is what a client sees here.
+                { "id": "fixture-a", "label": "fixture-a", "kind": "target" },
+                { "id": "fixture-b", "label": "fixture-b", "kind": "target" },
             ])
         );
 
@@ -2795,6 +2798,30 @@ mod tests {
             Ok(ActionResult::ok(format!("{target} now running {image}")))
         }
 
+        /// One kind for every view, plus a second that only a target has.
+        ///
+        /// Mirrors the shape the parameter exists for — Docker's stack members
+        /// — without this test needing Docker: what matters here is that the
+        /// route reaches the connector with the target the caller named.
+        fn resource_kinds(
+            &self,
+            target_id: Option<&str>,
+        ) -> Vec<loom_core::connector::ResourceKindDescriptor> {
+            let mut kinds = vec![loom_core::connector::ResourceKindDescriptor::new(
+                "everywhere",
+                "Everywhere",
+                Vec::new(),
+            )];
+            if let Some(target) = target_id {
+                kinds.push(loom_core::connector::ResourceKindDescriptor::new(
+                    "targetOnly",
+                    format!("Only {target}"),
+                    Vec::new(),
+                ));
+            }
+            kinds
+        }
+
         fn supports_sub_targets(&self) -> bool {
             true
         }
@@ -2805,10 +2832,7 @@ mod tests {
             Ok(self
                 .targets
                 .iter()
-                .map(|id| loom_core::connector::SubTarget {
-                    id: id.clone(),
-                    label: id.clone(),
-                })
+                .map(|id| loom_core::connector::SubTarget::new(id.clone(), id.clone()))
                 .collect())
         }
 
@@ -2903,6 +2927,69 @@ mod tests {
             )
             .await;
         (id, connector)
+    }
+
+    /// Part 2's whole job: the route reaches the connector with the target the
+    /// caller named, so a kind that only one sort of target has is *absent*
+    /// elsewhere rather than merely empty.
+    #[tokio::test]
+    async fn the_resource_kinds_route_passes_its_target_to_the_connector() {
+        let app = test_app().await;
+        let (access, _) = setup_and_login(&app.router).await;
+        let (id, _) =
+            updatable_instance(&app, &access, "Targeted", &["web"], serde_json::json!({})).await;
+
+        let kinds = |query: &str| {
+            let router = app.router.clone();
+            let token = bearer(&access);
+            let path = format!("/connector-instances/{id}/resource-kinds{query}");
+            async move {
+                let (status, body) = send(&router, get_with_auth(&path, &token)).await;
+                assert_eq!(status, StatusCode::OK, "{body:#}");
+                body.as_array()
+                    .expect("an array of descriptors")
+                    .iter()
+                    .map(|kind| kind["kind"].as_str().unwrap_or_default().to_owned())
+                    .collect::<Vec<_>>()
+            }
+        };
+
+        // No target: only the kind that exists everywhere, plus whatever the
+        // platform contributes for an update-checking connector.
+        let host = kinds("").await;
+        assert!(host.contains(&"everywhere".to_owned()));
+        assert!(!host.contains(&"targetOnly".to_owned()));
+
+        // With one: the target-conditional kind appears, labelled for it.
+        let targeted = kinds("?targetId=web").await;
+        assert!(targeted.contains(&"everywhere".to_owned()));
+        assert!(targeted.contains(&"targetOnly".to_owned()));
+
+        // A blank parameter is an absent one — an empty form field must not
+        // become a third case every connector has to think about.
+        assert_eq!(kinds("?targetId=").await, host);
+
+        // And a listing is validated against *that target's* kinds: a kind only
+        // a target has is as much "no such kind" for the host as one nothing
+        // publishes at all.
+        let (status, _) = send(
+            &app.router,
+            get_with_auth(
+                &format!("/connector-instances/{id}/resources/targetOnly"),
+                &bearer(&access),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        let (status, _) = send(
+            &app.router,
+            get_with_auth(
+                &format!("/connector-instances/{id}/resources/targetOnly?targetId=web"),
+                &bearer(&access),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
     }
 
     #[tokio::test]

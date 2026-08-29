@@ -47,7 +47,8 @@ use loom_connector_docker::{
     DATA_POINT_IMAGE_DISK_USAGE_BYTES, DATA_POINT_LOGS, DATA_POINT_MEMORY_USAGE_BYTES,
     DATA_POINT_RUNNING_CONTAINERS, DATA_POINT_STATUS, DATA_POINT_STOPPED_CONTAINERS,
     DATA_POINT_TOTAL_CONTAINERS, DATA_POINT_TOTAL_IMAGES, DATA_POINT_UPTIME, DEFAULT_DOCKER_HOST,
-    RESOURCE_KIND_IMAGES, RESOURCE_KIND_NETWORKS, RESOURCE_KIND_VOLUMES,
+    RESOURCE_KIND_IMAGES, RESOURCE_KIND_LOGS, RESOURCE_KIND_NETWORKS, RESOURCE_KIND_VOLUMES,
+    SUB_TARGET_KIND_CONTAINER,
 };
 use loom_core::connector::{Connector, ConnectorError, HealthState};
 use serde_json::json;
@@ -1076,7 +1077,7 @@ async fn the_host_inventory_tables_describe_what_the_daemon_actually_holds() {
     };
     let (connector, inventory, container) = inventory_fixture(&docker, "inventory").await;
 
-    let kinds = connector.resource_kinds();
+    let kinds = connector.resource_kinds(None);
 
     // --- Images -----------------------------------------------------
     let images = kind_named(&kinds, RESOURCE_KIND_IMAGES);
@@ -1275,4 +1276,99 @@ async fn a_built_in_network_cannot_be_removed_and_says_so() {
         "the refusal should be Docker's own words, was: {}",
         refused.message
     );
+}
+
+#[tokio::test]
+async fn the_host_log_table_has_a_row_and_a_line_for_every_container() {
+    let test_name = "the_host_log_table_has_a_row_and_a_line_for_every_container";
+    let Some(docker) = docker_or_skip(test_name).await else {
+        return;
+    };
+    // The shared fixture's container prints `LOG_MARKER` and then spins, so
+    // there is a known line to find rather than merely "some output".
+    let container = start_test_container(&docker, "logtable").await;
+
+    let connector = DockerConnector::connect(config_for(&container.name))
+        .await
+        .expect("connecting to the local daemon must succeed");
+    let kinds = connector.resource_kinds(None);
+    let logs = kinds
+        .iter()
+        .find(|kind| kind.kind == RESOURCE_KIND_LOGS)
+        .expect("the connector declares a logs table");
+
+    // Poll: the container is started before its first line is written, and a
+    // table that asked half a millisecond too early would flake rather than
+    // fail.
+    let mut rows = Vec::new();
+    for _ in 0..40 {
+        rows = connector
+            .list_resource_items(RESOURCE_KIND_LOGS, None)
+            .await
+            .expect("browsing logs must reach the daemon");
+        if rows.iter().any(|row| {
+            row.id == container.name
+                && row.fields["latestLogLine"]
+                    .as_str()
+                    .is_some_and(|line| line.contains(LOG_MARKER))
+        }) {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(250)).await;
+    }
+
+    // One row per container the daemon lists, and every declared column filled.
+    // Containers only: the sub-target list also carries a stack entry per
+    // Compose project, and a stack has no log of its own.
+    let containers = connector
+        .list_sub_targets()
+        .await
+        .expect("sub-target enumeration")
+        .into_iter()
+        .filter(|target| target.kind == SUB_TARGET_KIND_CONTAINER)
+        .count();
+    assert_eq!(
+        rows.len(),
+        containers,
+        "the log table should have exactly one row per container"
+    );
+    assert_rows_match_columns(logs, &rows);
+
+    let row = rows
+        .iter()
+        .find(|row| row.id == container.name)
+        .expect("the test container must have a row");
+    assert_eq!(row.fields["targetId"], json!(container.name));
+    let line = row.fields["latestLogLine"].as_str().unwrap_or_default();
+    assert!(
+        line.contains(LOG_MARKER),
+        "the latest line should be what this test's container printed, was {line:?}"
+    );
+    // Docker's own timestamp prefix is consumed, not shown: a cell that read
+    // "2026-… loom-connector-docker-live-test" would be the timestamp column's
+    // job done twice.
+    assert!(
+        !line.starts_with("20"),
+        "the timestamp prefix should be stripped from the line, was {line:?}"
+    );
+    assert_eq!(row.fields["status"], json!("running"));
+
+    // Best effort, but a real reading: the instant parses, and it is not in the
+    // future — which it would be if the fallback had been used *and* the
+    // fallback were wrong.
+    let stamped = row.fields["lastLogTimestamp"].as_str().unwrap_or_default();
+    let parsed = chrono::DateTime::parse_from_rfc3339(stamped)
+        .unwrap_or_else(|error| panic!("lastLogTimestamp {stamped:?} does not parse: {error}"));
+    assert!(parsed.timestamp() > 0);
+    assert!(
+        parsed <= chrono::Utc::now(),
+        "a log line cannot have been written in the future"
+    );
+
+    // Rows are name-ordered, so the table does not reshuffle between refreshes
+    // even though the reads complete out of order.
+    let names: Vec<&str> = rows.iter().map(|row| row.id.as_str()).collect();
+    let mut sorted = names.clone();
+    sorted.sort_unstable();
+    assert_eq!(names, sorted);
 }
