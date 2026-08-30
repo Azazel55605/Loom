@@ -174,6 +174,14 @@ pub fn routes() -> Router<AppState> {
             patch(users::update_user).delete(users::delete_user),
         )
         .route(
+            "/users/{id}/sessions",
+            get(users::list_sessions).delete(users::revoke_all_sessions),
+        )
+        .route(
+            "/users/{id}/sessions/{session_id}",
+            axum::routing::delete(users::revoke_session),
+        )
+        .route(
             "/groups",
             get(groups::list_groups).post(groups::create_group),
         )

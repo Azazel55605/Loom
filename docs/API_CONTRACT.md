@@ -13,7 +13,8 @@ name or type here as a breaking change to three clients, and make it
 deliberately.
 
 The auth design and its trade-offs are recorded in
-[ADR 0008](./adr/0008-auth-model.md).
+[ADR 0008](./adr/0008-auth-model.md). Session visibility and login throttling
+are recorded in [ADR 0030](./adr/0030-session-visibility-and-login-rate-limiting.md).
 
 ## Auth model
 
@@ -282,6 +283,11 @@ again.
 | `refreshToken` | string | Opaque hex string. Send in the body of `/auth/refresh` and `/auth/logout`. |
 | `expiresAt` | string | When the **access** token expires — the value to schedule a refresh against. The refresh token's own expiry is not sent, because a client cannot act on it except by discovering its refresh failed. |
 
+Each issued refresh-token session records the direct peer IP address and a
+bounded copy of the request's `User-Agent`. The server never trusts forwarded
+IP headers: until trusted-proxy configuration exists, a deployment behind a
+reverse proxy will therefore report and rate-limit the proxy's address.
+
 **Response 401:**
 
 ```json
@@ -295,10 +301,27 @@ accounts, useless to a legitimate user, whose next step is the same in all three
 cases. The handler also hashes a dummy password when the username does not
 exist, so the *timing* does not leak what the body refuses to.
 
+Failed logins are limited per direct peer IP in a rolling 15-minute window.
+The first 10 failures receive the same generic 401 above; subsequent attempts
+receive 429 until the oldest failure leaves the window. A successful login
+clears that peer's failure history. This state is deliberately in memory: it
+needs no runtime configuration and resets when the backend restarts. The key is
+an IP rather than a username so an anonymous caller cannot lock out a chosen
+account by deliberately failing against it.
+
+**Response 429:**
+
+```json
+{ "error": "too many login attempts; try again later" }
+```
+
+The response includes `Retry-After` as an integer number of seconds.
+
 | Status | Meaning |
 | --- | --- |
 | 200 | Credentials accepted. A session now exists. |
 | 401 | Credentials rejected, for any reason. |
+| 429 | This direct peer has exceeded 10 failed attempts in the rolling 15-minute window. |
 | 415 / 422 | Wrong content type or a body that is not a login request. |
 | 500 | The lookup failed. |
 
@@ -351,7 +374,8 @@ Reporting "no such token" would let an unauthenticated caller test tokens, and
 the caller's session is over either way.
 
 Only the presented refresh token is revoked, so signing out on one device leaves
-other sessions alone. There is no "sign out everywhere" yet.
+other sessions alone. Use `DELETE /users/{id}/sessions` for the explicit
+sign-out-everywhere operation.
 
 **An access token already issued stays valid until it expires.** Logout cannot
 recall it. That is the cost of not checking the database on every request, and
@@ -2973,14 +2997,8 @@ wrong field is the only way a client can say *which* of the two inputs to fix.
 
 **Existing sessions survive a password change.** Nothing is revoked, so a
 session established beforehand keeps working — and the bound on that is the
-*refresh* token's seven days, not the access token's fifteen minutes. This is an
-accepted trade-off rather than a claim that the window is small: the common case
-is a user rotating their own password on their own machine, which gains nothing
-from being signed out, while the mechanism that would genuinely help is
-on-demand revocation of a user's refresh tokens — which is also what "sign out
-my other devices" and "this account is compromised" need. It belongs with that
-feature rather than bolted onto this route. **Revisit when session revocation
-lands.**
+*refresh* token's seven days, not the access token's fifteen minutes. A user may
+end those sessions explicitly from Account's Active Sessions section.
 
 ### `POST /account/avatar`
 
@@ -3111,6 +3129,71 @@ on what it believed the previous state to be.
 | 400 | An unknown group id. |
 | 404 | No such user. |
 | 409 | [A safeguard refused it](#safeguards): this is you, or it would leave no active administrator. |
+
+### `GET /users/{id}/sessions`
+
+Lists the user's active refresh-token sessions, newest first. A caller may
+always name their own user id; naming anybody else requires global
+`users.manage`. Revoked and expired rows are retained for token-history
+semantics but omitted from this view.
+
+**Response 200:**
+
+```json
+[
+  {
+    "id": "32a847f9-448b-4d33-a9e5-b2950299c435",
+    "createdAt": "2026-08-30T12:00:00Z",
+    "expiresAt": "2026-09-06T12:00:00Z",
+    "userAgent": "Mozilla/5.0 (...) Chrome/140.0.0.0 Safari/537.36",
+    "ipAddress": "203.0.113.10",
+    "isCurrent": true
+  }
+]
+```
+
+`userAgent` and `ipAddress` are nullable for sessions created before context
+capture existed or by a caller that supplied no user agent. `isCurrent` is true
+only when the listed row is the refresh-token session named by the requester's
+access token; it is never inferred from an IP or browser string.
+
+| Status | Meaning |
+| --- | --- |
+| 200 | Active sessions returned. |
+| 403 | The target is another user and the caller lacks global `users.manage`. |
+| 404 | No such user. |
+
+### `DELETE /users/{id}/sessions/{sessionId}`
+
+Revokes one refresh-token session. The same self-or-`users.manage` access rule
+applies. **Response 204**, including when that session is already revoked or
+expired; repeating a revocation is harmless. The session id must belong to the
+user id in the path.
+
+| Status | Meaning |
+| --- | --- |
+| 204 | Processed, including when the session is unknown or already ended. |
+| 403 | The target is another user and the caller lacks global `users.manage`. |
+| 404 | No such user. |
+
+### `DELETE /users/{id}/sessions`
+
+Revokes every active refresh-token session for that user. The same
+self-or-`users.manage` access rule applies. For self-service this deliberately
+includes the caller's current session: clients clear their locally stored token
+pair after the 204 and return to login. **Response 204**, including when there
+are no active sessions.
+
+Revocation prevents any affected refresh token from minting another access
+token. An access token already issued remains valid until its 15-minute expiry,
+because ordinary authenticated requests verify its signature without a
+database lookup.
+
+| Status | Meaning |
+| --- | --- |
+| 204 | Processed. |
+| 403 | The target is another user and the caller lacks global `users.manage`. |
+| 404 | No such user. |
 
 ### `DELETE /users/{id}`
 

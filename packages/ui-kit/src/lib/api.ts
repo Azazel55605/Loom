@@ -1890,6 +1890,19 @@ export type User = {
   groupIds: string[];
 };
 
+/** One active refresh-token session for a user. */
+export type UserSession = {
+  id: string;
+  /** RFC 3339. */
+  createdAt: string;
+  /** RFC 3339. */
+  expiresAt: string;
+  userAgent: string | null;
+  ipAddress: string | null;
+  /** True only when this row backs the requester's current access token. */
+  isCurrent: boolean;
+};
+
 /** `POST /users` body. `groupIds` may be omitted — an account with no groups
  *  can sign in and do nothing, which is a valid state. */
 export type CreateUserRequest = {
@@ -1996,6 +2009,46 @@ function updateUser(runtime: ApiRuntime,
  */
 function deleteUser(runtime: ApiRuntime, id: string, signal?: AbortSignal): Promise<void> {
   return authorizedRequest<void>(runtime, `/users/${encodeURIComponent(id)}`, {
+    method: "DELETE",
+    signal,
+  });
+}
+
+/** `GET /users/{id}/sessions` — self-service for `id`, otherwise users.manage. */
+function getUserSessions(
+  runtime: ApiRuntime,
+  id: string,
+  signal?: AbortSignal,
+): Promise<UserSession[]> {
+  return authorizedRequest<UserSession[]>(
+    runtime,
+    `/users/${encodeURIComponent(id)}/sessions`,
+    { signal },
+  );
+}
+
+/** Revokes one active refresh-token session. */
+function revokeUserSession(
+  runtime: ApiRuntime,
+  id: string,
+  sessionId: string,
+  signal?: AbortSignal,
+): Promise<void> {
+  return authorizedRequest<void>(
+    runtime,
+    `/users/${encodeURIComponent(id)}/sessions/${encodeURIComponent(sessionId)}`,
+    { method: "DELETE", signal },
+  );
+}
+
+/** Revokes every active refresh-token session for a user, including the
+ * caller's current session when they target themselves. */
+function revokeAllUserSessions(
+  runtime: ApiRuntime,
+  id: string,
+  signal?: AbortSignal,
+): Promise<void> {
+  return authorizedRequest<void>(runtime, `/users/${encodeURIComponent(id)}/sessions`, {
     method: "DELETE",
     signal,
   });
@@ -2338,6 +2391,12 @@ export function createApiClient(options: {
     updateUser: (id: string, data: UpdateUserRequest, signal?: AbortSignal) =>
       updateUser(runtime, id, data, signal),
     deleteUser: (id: string, signal?: AbortSignal) => deleteUser(runtime, id, signal),
+    getUserSessions: (id: string, signal?: AbortSignal) =>
+      getUserSessions(runtime, id, signal),
+    revokeUserSession: (id: string, sessionId: string, signal?: AbortSignal) =>
+      revokeUserSession(runtime, id, sessionId, signal),
+    revokeAllUserSessions: (id: string, signal?: AbortSignal) =>
+      revokeAllUserSessions(runtime, id, signal),
     getGroups: (signal?: AbortSignal) => getGroups(runtime, signal),
     createGroup: (data: CreateGroupRequest, signal?: AbortSignal) =>
       createGroup(runtime, data, signal),

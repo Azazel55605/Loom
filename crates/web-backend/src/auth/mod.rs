@@ -12,5 +12,6 @@
 pub mod extract;
 pub mod password;
 pub mod permissions;
+pub mod rate_limit;
 pub mod secret;
 pub mod tokens;

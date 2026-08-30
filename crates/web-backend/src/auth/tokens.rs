@@ -51,6 +51,13 @@ pub struct AccessClaims {
     pub username: String,
     /// Effective grants at issuance time.
     pub permissions: Vec<PermissionGrant>,
+    /// Refresh-token row backing this access token. It is an identifier, not a
+    /// credential, and lets session listings mark the caller's current device
+    /// without transmitting the raw refresh token on ordinary API requests.
+    /// Optional so access tokens issued before session visibility was added
+    /// remain valid until their normal short expiry.
+    #[serde(default, rename = "sid")]
+    pub session_id: Option<String>,
     /// Expiry, as a Unix timestamp.
     pub exp: i64,
     /// Issued-at, as a Unix timestamp.
@@ -69,6 +76,7 @@ pub fn issue_access_token(
     user_id: &str,
     username: &str,
     permissions: Vec<PermissionGrant>,
+    session_id: Option<&str>,
 ) -> Result<IssuedAccessToken, jsonwebtoken::errors::Error> {
     let now = Utc::now();
     let expires_at = now + Duration::minutes(ACCESS_TOKEN_LIFETIME_MINUTES);
@@ -77,6 +85,7 @@ pub fn issue_access_token(
         sub: user_id.to_owned(),
         username: username.to_owned(),
         permissions,
+        session_id: session_id.map(str::to_owned),
         exp: expires_at.timestamp(),
         iat: now.timestamp(),
     };
@@ -124,11 +133,29 @@ fn hash_refresh_token(token: &str) -> String {
     digest.iter().map(|byte| format!("{byte:02x}")).collect()
 }
 
-/// Generates a refresh token, stores its hash, and returns the raw value.
+/// Context captured when a refresh token is issued.
+#[derive(Debug, Clone, Default)]
+pub struct RefreshTokenContext {
+    pub user_agent: Option<String>,
+    pub ip_address: Option<String>,
+}
+
+/// A refresh token and the non-secret row id paired into the access token.
+pub struct IssuedRefreshToken {
+    pub id: String,
+    pub token: String,
+}
+
+/// Generates a refresh token, stores its hash and recognition context, and
+/// returns the raw value exactly once.
 ///
 /// The raw token is returned exactly once and never persisted. Losing it means
 /// issuing a new one, which is the intended failure mode.
-pub async fn issue_refresh_token(pool: &SqlitePool, user_id: &str) -> Result<String, sqlx::Error> {
+pub async fn issue_refresh_token(
+    pool: &SqlitePool,
+    user_id: &str,
+    context: &RefreshTokenContext,
+) -> Result<IssuedRefreshToken, sqlx::Error> {
     let mut bytes = [0u8; REFRESH_TOKEN_BYTES];
     rand::thread_rng().fill_bytes(&mut bytes);
     let token: String = bytes.iter().map(|byte| format!("{byte:02x}")).collect();
@@ -136,21 +163,27 @@ pub async fn issue_refresh_token(pool: &SqlitePool, user_id: &str) -> Result<Str
     let now = Utc::now();
     let expires_at = now + Duration::days(REFRESH_TOKEN_LIFETIME_DAYS);
 
+    let id = Uuid::new_v4().to_string();
     sqlx::query(
         r#"
-        INSERT INTO refresh_tokens (id, user_id, token_hash, created_at, expires_at, revoked_at)
-        VALUES (?, ?, ?, ?, ?, NULL)
+        INSERT INTO refresh_tokens (
+            id, user_id, token_hash, created_at, expires_at, revoked_at,
+            user_agent, ip_address
+        )
+        VALUES (?, ?, ?, ?, ?, NULL, ?, ?)
         "#,
     )
-    .bind(Uuid::new_v4().to_string())
+    .bind(&id)
     .bind(user_id)
     .bind(hash_refresh_token(&token))
     .bind(now.to_rfc3339())
     .bind(expires_at.to_rfc3339())
+    .bind(&context.user_agent)
+    .bind(&context.ip_address)
     .execute(pool)
     .await?;
 
-    Ok(token)
+    Ok(IssuedRefreshToken { id, token })
 }
 
 /// Why a refresh token was not accepted.
@@ -269,6 +302,7 @@ mod tests {
             "user-id",
             "someone",
             vec![grant("connectors.view")],
+            Some("session-id"),
         )
         .expect("issuing must succeed");
 
@@ -277,20 +311,22 @@ mod tests {
         assert_eq!(claims.sub, "user-id");
         assert_eq!(claims.username, "someone");
         assert_eq!(claims.permissions, vec![grant("connectors.view")]);
+        assert_eq!(claims.session_id.as_deref(), Some("session-id"));
         assert_eq!(claims.exp, issued.expires_at.timestamp());
     }
 
     #[test]
     fn a_token_signed_with_another_secret_is_rejected() {
-        let issued =
-            issue_access_token("the-real-secret", "user-id", "someone", vec![]).expect("issued");
+        let issued = issue_access_token("the-real-secret", "user-id", "someone", vec![], None)
+            .expect("issued");
 
         assert!(verify_access_token("a-different-secret", &issued.token).is_err());
     }
 
     #[test]
     fn a_tampered_token_is_rejected() {
-        let issued = issue_access_token("secret", "user-id", "someone", vec![]).expect("issued");
+        let issued =
+            issue_access_token("secret", "user-id", "someone", vec![], None).expect("issued");
 
         // Flip the last character of the signature.
         let mut tampered = issued.token.clone();

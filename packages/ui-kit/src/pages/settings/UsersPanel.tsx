@@ -2,7 +2,14 @@ import * as React from "react";
 import { zodResolver } from "@hookform/resolvers/zod";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useForm } from "react-hook-form";
-import { AlertCircle, Loader2, Pencil, Trash2, UserPlus } from "lucide-react";
+import {
+  AlertCircle,
+  Laptop,
+  Loader2,
+  Pencil,
+  Trash2,
+  UserPlus,
+} from "lucide-react";
 import { toast } from "sonner";
 import { z } from "zod";
 
@@ -39,6 +46,7 @@ import {
 } from "@loom/ui-kit/components/ui/form";
 import { GroupMultiSelect } from "@loom/ui-kit/components/GroupMultiSelect";
 import { Input } from "@loom/ui-kit/components/ui/input";
+import { SessionManager } from "@loom/ui-kit/components/SessionManager";
 import { Skeleton } from "@loom/ui-kit/components/ui/skeleton";
 import { Switch } from "@loom/ui-kit/components/ui/switch";
 import {
@@ -66,7 +74,7 @@ import { useAuth } from "@loom/ui-kit/lib/auth-context";
 export function UsersPanel() {
   const api = useApiClient();
   const queryClient = useQueryClient();
-  const { user: currentUser } = useAuth();
+  const { user: currentUser, signOut } = useAuth();
 
   const users = useQuery({
     queryKey: ["users"],
@@ -89,6 +97,7 @@ export function UsersPanel() {
   const [createOpen, setCreateOpen] = React.useState(false);
   const [editing, setEditing] = React.useState<User | null>(null);
   const [deleting, setDeleting] = React.useState<User | null>(null);
+  const [sessionsFor, setSessionsFor] = React.useState<User | null>(null);
 
   const invalidate = React.useCallback(async () => {
     // Groups too: membership changes move `memberCount`, which the groups panel
@@ -160,7 +169,7 @@ export function UsersPanel() {
                 <TableHead className="pl-3">Username</TableHead>
                 <TableHead>Status</TableHead>
                 <TableHead>Groups</TableHead>
-                <TableHead className="w-24 text-right pr-3">Actions</TableHead>
+                <TableHead className="w-32 pr-3 text-right">Actions</TableHead>
               </TableRow>
             </TableHeader>
             <TableBody>
@@ -194,6 +203,15 @@ export function UsersPanel() {
                     </TableCell>
                     <TableCell className="pr-3 text-right">
                       <div className="flex justify-end gap-1">
+                        <Button
+                          variant="ghost"
+                          size="icon"
+                          onClick={() => setSessionsFor(entry)}
+                          aria-label={`Sessions for ${entry.username}`}
+                        >
+                          <Laptop aria-hidden="true" />
+                          <span className="sr-only">Sessions for {entry.username}</span>
+                        </Button>
                         <Button
                           variant="ghost"
                           size="icon"
@@ -245,6 +263,29 @@ export function UsersPanel() {
         isSelf={editing?.id === currentUser?.id}
         onUpdated={invalidate}
       />
+
+      <Dialog
+        open={sessionsFor !== null}
+        onOpenChange={(open) => {
+          if (!open) setSessionsFor(null);
+        }}
+      >
+        <DialogContent className="max-h-[90dvh] overflow-y-auto sm:max-w-2xl">
+          <DialogHeader>
+            <DialogTitle>Sessions for {sessionsFor?.username}</DialogTitle>
+            <DialogDescription>
+              Active devices that can renew access for this account.
+            </DialogDescription>
+          </DialogHeader>
+          {sessionsFor !== null ? (
+            <SessionManager
+              userId={sessionsFor.id}
+              selfService={sessionsFor.id === currentUser?.id}
+              onSelfRevokedAll={signOut}
+            />
+          ) : null}
+        </DialogContent>
+      </Dialog>
 
       <AlertDialog
         open={deleting !== null}

@@ -37,6 +37,7 @@ import {
   FormMessage,
 } from "@loom/ui-kit/components/ui/form";
 import { Input } from "@loom/ui-kit/components/ui/input";
+import { SessionManager } from "@loom/ui-kit/components/SessionManager";
 import { PasswordChangeForm } from "@loom/ui-kit/pages/settings/PasswordChangeForm";
 import { Skeleton } from "@loom/ui-kit/components/ui/skeleton";
 import {
@@ -44,6 +45,7 @@ import {
   type Account,
 } from "@loom/ui-kit/lib/api";
 import { useApiClient } from "@loom/ui-kit/lib/api-context";
+import { useAuth } from "@loom/ui-kit/lib/auth-context";
 import { describeAdminFailure } from "@loom/ui-kit/lib/admin-error";
 import { cn } from "@loom/ui-kit/lib/utils";
 
@@ -59,6 +61,7 @@ const ACCOUNT_QUERY_KEY = ["account"];
  */
 export function AccountPanel() {
   const api = useApiClient();
+  const { signOut } = useAuth();
   const account = useQuery({
     queryKey: ACCOUNT_QUERY_KEY,
     queryFn: ({ signal }) => api.getAccount(signal),
@@ -98,6 +101,21 @@ export function AccountPanel() {
       <AvatarSection account={account.data} />
       <ProfileForm account={account.data} />
       <PasswordChangeForm />
+      <Card>
+        <CardHeader>
+          <CardTitle className="text-lg">Active Sessions</CardTitle>
+          <CardDescription>
+            Devices that can renew access to this account.
+          </CardDescription>
+        </CardHeader>
+        <CardContent>
+          <SessionManager
+            userId={account.data.id}
+            selfService
+            onSelfRevokedAll={signOut}
+          />
+        </CardContent>
+      </Card>
     </div>
   );
 }

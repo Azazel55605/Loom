@@ -237,7 +237,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         "loom web-backend listening"
     );
 
-    axum::serve(listener, app(state)).await?;
+    axum::serve(
+        listener,
+        app(state).into_make_service_with_connect_info::<std::net::SocketAddr>(),
+    )
+    .await?;
     Ok(())
 }
 
@@ -248,6 +252,7 @@ mod tests {
 
     use axum::{
         body::Body,
+        extract::ConnectInfo,
         http::{Request, StatusCode},
     };
     use chrono::TimeZone;
@@ -258,6 +263,7 @@ mod tests {
         ConnectorStatus, DataPointDescriptor, DisplayField, WidgetLayout,
     };
     use serde_json::Value;
+    use std::net::SocketAddr;
     use std::time::Duration;
     use tower::ServiceExt;
 
@@ -363,6 +369,13 @@ mod tests {
         (status, body)
     }
 
+    async fn send_response(app: &Router, request: Request<Body>) -> axum::response::Response {
+        app.clone()
+            .oneshot(request)
+            .await
+            .expect("the router is infallible")
+    }
+
     fn get(uri: &str) -> Request<Body> {
         Request::builder()
             .uri(uri)
@@ -455,6 +468,42 @@ mod tests {
             .header("content-type", "application/json")
             .body(Body::from(body.to_string()))
             .expect("valid request")
+    }
+
+    fn with_client_context(
+        mut request: Request<Body>,
+        address: [u8; 4],
+        user_agent: &str,
+    ) -> Request<Body> {
+        request
+            .extensions_mut()
+            .insert(ConnectInfo(SocketAddr::from((address, 4242))));
+        request.headers_mut().insert(
+            axum::http::header::USER_AGENT,
+            HeaderValue::from_str(user_agent).expect("valid user agent"),
+        );
+        request
+    }
+
+    async fn login_from(
+        app: &Router,
+        username: &str,
+        password: &str,
+        address: [u8; 4],
+        user_agent: &str,
+    ) -> (StatusCode, serde_json::Value) {
+        send(
+            app,
+            with_client_context(
+                post_json(
+                    "/auth/login",
+                    serde_json::json!({ "username": username, "password": password }),
+                ),
+                address,
+                user_agent,
+            ),
+        )
+        .await
     }
 
     fn post_json_auth(uri: &str, token: &str, body: serde_json::Value) -> Request<Body> {
@@ -863,9 +912,13 @@ mod tests {
         // Refreshing yields a new pair.
         let (status, body) = send(
             &app.router,
-            post_json(
-                "/auth/refresh",
-                serde_json::json!({ "refreshToken": refresh }),
+            with_client_context(
+                post_json(
+                    "/auth/refresh",
+                    serde_json::json!({ "refreshToken": refresh }),
+                ),
+                [198, 51, 100, 23],
+                "RotatedClient/1.0",
             ),
         )
         .await;
@@ -888,6 +941,17 @@ mod tests {
         .await;
         assert_eq!(status, StatusCode::OK);
         assert_eq!(session["permissions"].as_array().expect("array").len(), 6);
+        let user_id = session["userId"].as_str().expect("user id");
+        let (status, sessions) = send(
+            &app.router,
+            get_with_auth(&format!("/users/{user_id}/sessions"), &bearer(&new_access)),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{sessions:#}");
+        assert_eq!(sessions.as_array().expect("sessions").len(), 1);
+        assert_eq!(sessions[0]["isCurrent"], true);
+        assert_eq!(sessions[0]["userAgent"], "RotatedClient/1.0");
+        assert_eq!(sessions[0]["ipAddress"], "198.51.100.23");
 
         // The old refresh token was revoked by rotation and cannot be replayed.
         let (status, _) = send(
@@ -943,6 +1007,284 @@ mod tests {
         .await;
 
         assert_eq!(status, StatusCode::NO_CONTENT);
+    }
+
+    #[tokio::test]
+    async fn a_user_can_recognise_and_revoke_their_own_sessions_without_manage() {
+        let app = test_app().await;
+        let (admin, _) = setup_and_login(&app.router).await;
+        let ordinary =
+            user_with_grants(&app.router, &admin, "session-owner", serde_json::json!([])).await;
+        let user_id = current_user_id(&app.router, &ordinary).await;
+        let admin_id = current_user_id(&app.router, &admin).await;
+
+        let (status, second) = login_from(
+            &app.router,
+            "session-owner",
+            "a-good-password",
+            [198, 51, 100, 24],
+            "ExampleBrowser/1.0 ExampleOS",
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{second:#}");
+        let second_access = second["accessToken"].as_str().expect("access token");
+
+        let (status, sessions) = send(
+            &app.router,
+            get_with_auth(
+                &format!("/users/{user_id}/sessions"),
+                &bearer(second_access),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{sessions:#}");
+        let sessions = sessions.as_array().expect("sessions");
+        assert_eq!(sessions.len(), 2);
+        let current = sessions
+            .iter()
+            .find(|session| session["isCurrent"] == true)
+            .expect("current session");
+        assert_eq!(current["userAgent"], "ExampleBrowser/1.0 ExampleOS");
+        assert_eq!(current["ipAddress"], "198.51.100.24");
+
+        let other_id = sessions
+            .iter()
+            .find(|session| session["isCurrent"] == false)
+            .and_then(|session| session["id"].as_str())
+            .expect("other session");
+        let (status, body) = send(
+            &app.router,
+            delete_auth(
+                &format!("/users/{user_id}/sessions/{other_id}"),
+                second_access,
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::NO_CONTENT, "{body:#}");
+
+        let (status, remaining) = send(
+            &app.router,
+            get_with_auth(
+                &format!("/users/{user_id}/sessions"),
+                &bearer(second_access),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(remaining.as_array().expect("sessions").len(), 1);
+        assert_eq!(remaining[0]["isCurrent"], true);
+
+        let (status, _) = send(
+            &app.router,
+            get_with_auth(
+                &format!("/users/{admin_id}/sessions"),
+                &bearer(second_access),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn an_admin_can_manage_another_users_sessions_and_revoke_them_all() {
+        let app = test_app().await;
+        let (admin, _) = setup_and_login(&app.router).await;
+        let ordinary = user_with_grants(
+            &app.router,
+            &admin,
+            "managed-sessions",
+            serde_json::json!([]),
+        )
+        .await;
+        let user_id = current_user_id(&app.router, &ordinary).await;
+        let (status, second) = login_from(
+            &app.router,
+            "managed-sessions",
+            "a-good-password",
+            [198, 51, 100, 25],
+            "ManagedClient/2.0",
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{second:#}");
+        let refresh = second["refreshToken"]
+            .as_str()
+            .expect("refresh token")
+            .to_owned();
+
+        let (status, sessions) = send(
+            &app.router,
+            get_with_auth(&format!("/users/{user_id}/sessions"), &bearer(&admin)),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{sessions:#}");
+        assert_eq!(sessions.as_array().expect("sessions").len(), 2);
+        assert!(sessions
+            .as_array()
+            .expect("sessions")
+            .iter()
+            .all(|session| session["isCurrent"] == false));
+
+        let (status, body) = send(
+            &app.router,
+            delete_auth(&format!("/users/{user_id}/sessions"), &admin),
+        )
+        .await;
+        assert_eq!(status, StatusCode::NO_CONTENT, "{body:#}");
+
+        let (status, sessions) = send(
+            &app.router,
+            get_with_auth(&format!("/users/{user_id}/sessions"), &bearer(&admin)),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(sessions.as_array().expect("sessions").is_empty());
+
+        let (status, _) = send(
+            &app.router,
+            post_json(
+                "/auth/refresh",
+                serde_json::json!({ "refreshToken": refresh }),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn self_revoke_all_includes_the_callers_current_session() {
+        let app = test_app().await;
+        let (access, first_refresh) = setup_and_login(&app.router).await;
+        let user_id = current_user_id(&app.router, &access).await;
+        let (status, second) = login_from(
+            &app.router,
+            "admin",
+            "a-good-password",
+            [198, 51, 100, 26],
+            "SecondDevice/1.0",
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{second:#}");
+        let second_access = second["accessToken"].as_str().expect("access token");
+        let second_refresh = second["refreshToken"].as_str().expect("refresh token");
+
+        let (status, body) = send(
+            &app.router,
+            delete_auth(&format!("/users/{user_id}/sessions"), second_access),
+        )
+        .await;
+        assert_eq!(status, StatusCode::NO_CONTENT, "{body:#}");
+
+        for refresh in [&first_refresh, second_refresh] {
+            let (status, _) = send(
+                &app.router,
+                post_json(
+                    "/auth/refresh",
+                    serde_json::json!({ "refreshToken": refresh }),
+                ),
+            )
+            .await;
+            assert_eq!(status, StatusCode::UNAUTHORIZED);
+        }
+    }
+
+    #[tokio::test]
+    async fn login_failures_are_limited_per_peer_and_success_resets_the_window() {
+        let app = test_app().await;
+        let (status, _) = send(&app.router, post_json("/setup", setup_body())).await;
+        assert_eq!(status, StatusCode::OK);
+
+        let limited_peer = [198, 51, 100, 40];
+        for _ in 0..auth::rate_limit::LOGIN_FAILURE_LIMIT {
+            let (status, body) = login_from(
+                &app.router,
+                "admin",
+                "not-the-password",
+                limited_peer,
+                "RateLimitTest/1.0",
+            )
+            .await;
+            assert_eq!(status, StatusCode::UNAUTHORIZED, "{body:#}");
+            assert_eq!(body["error"], "invalid credentials");
+        }
+
+        let response = send_response(
+            &app.router,
+            with_client_context(
+                post_json(
+                    "/auth/login",
+                    serde_json::json!({
+                        "username": "admin",
+                        "password": "a-good-password",
+                    }),
+                ),
+                limited_peer,
+                "RateLimitTest/1.0",
+            ),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
+        let retry_after = response
+            .headers()
+            .get(axum::http::header::RETRY_AFTER)
+            .and_then(|value| value.to_str().ok())
+            .and_then(|value| value.parse::<u64>().ok())
+            .expect("numeric Retry-After header");
+        assert!((1..=15 * 60).contains(&retry_after));
+
+        // Another direct peer is independent and can still sign in.
+        let (status, body) = login_from(
+            &app.router,
+            "admin",
+            "a-good-password",
+            [198, 51, 100, 41],
+            "FreshPeer/1.0",
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body:#}");
+
+        // A success below the threshold removes earlier failures. Ten new
+        // failures are allowed before the following request is limited.
+        let reset_peer = [198, 51, 100, 42];
+        for _ in 0..3 {
+            let (status, _) = login_from(
+                &app.router,
+                "admin",
+                "not-the-password",
+                reset_peer,
+                "ResetPeer/1.0",
+            )
+            .await;
+            assert_eq!(status, StatusCode::UNAUTHORIZED);
+        }
+        let (status, body) = login_from(
+            &app.router,
+            "admin",
+            "a-good-password",
+            reset_peer,
+            "ResetPeer/1.0",
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body:#}");
+        for _ in 0..auth::rate_limit::LOGIN_FAILURE_LIMIT {
+            let (status, _) = login_from(
+                &app.router,
+                "admin",
+                "not-the-password",
+                reset_peer,
+                "ResetPeer/1.0",
+            )
+            .await;
+            assert_eq!(status, StatusCode::UNAUTHORIZED);
+        }
+        let (status, _) = login_from(
+            &app.router,
+            "admin",
+            "a-good-password",
+            reset_peer,
+            "ResetPeer/1.0",
+        )
+        .await;
+        assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
     }
 
     /* ---------------------------------------------------------------- */

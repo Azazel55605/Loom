@@ -278,6 +278,7 @@ mod tests {
             sub: "user-id".to_owned(),
             username: "someone".to_owned(),
             permissions: grants,
+            session_id: None,
             exp: 0,
             iat: 0,
         }

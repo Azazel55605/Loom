@@ -1,4 +1,9 @@
-//! User administration. Every route requires a global `users.manage` grant.
+//! User administration and session management.
+//!
+//! Account CRUD requires a global `users.manage` grant. Session routes are the
+//! deliberate exception: a caller may always inspect and revoke their own
+//! refresh-token sessions, while managing someone else's sessions requires the
+//! same global grant as the rest of this module.
 //!
 //! ## The safeguards
 //!
@@ -31,7 +36,7 @@ use serde::{Deserialize, Serialize};
 use sqlx::{Sqlite, SqliteConnection, Transaction};
 use uuid::Uuid;
 
-use crate::auth::extract::{RequirePermission, UsersManage};
+use crate::auth::extract::{AuthenticatedUser, Permission, RequirePermission, UsersManage};
 use crate::auth::password::{hash_password, MIN_PASSWORD_LENGTH};
 use crate::error::{internal_error, ErrorBody};
 use crate::state::AppState;
@@ -82,6 +87,167 @@ struct UserRow {
     username: String,
     is_active: bool,
     created_at: String,
+}
+
+#[derive(Debug, sqlx::FromRow)]
+struct SessionRow {
+    id: String,
+    created_at: String,
+    expires_at: String,
+    user_agent: Option<String>,
+    ip_address: Option<String>,
+}
+
+/// One active refresh-token session. The token hash is intentionally absent:
+/// it is neither useful to the client nor a credential that should leave the
+/// storage boundary.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UserSessionResponse {
+    id: String,
+    created_at: String,
+    expires_at: String,
+    user_agent: Option<String>,
+    ip_address: Option<String>,
+    is_current: bool,
+}
+
+/// `GET /users/{id}/sessions`
+///
+/// Self-service for the named user, otherwise requires global `users.manage`.
+/// Only refresh tokens that are both unrevoked and unexpired are sessions a
+/// person can still act on, so ended rows stay in storage but not this list.
+pub async fn list_sessions(
+    caller: AuthenticatedUser,
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Response {
+    if let Some(denied) = session_access_denial(&caller, &id) {
+        return denied;
+    }
+    match user_exists(&state, &id).await {
+        Ok(true) => {}
+        Ok(false) => {
+            return ErrorBody::message(StatusCode::NOT_FOUND, format!("no such user: {id}"))
+        }
+        Err(error) => return internal_error("checking the session owner", error),
+    }
+
+    let rows = sqlx::query_as::<_, SessionRow>(
+        "SELECT id, created_at, expires_at, user_agent, ip_address \
+         FROM refresh_tokens \
+         WHERE user_id = ? AND revoked_at IS NULL AND expires_at > ? \
+         ORDER BY created_at DESC, id DESC",
+    )
+    .bind(&id)
+    .bind(Utc::now().to_rfc3339())
+    .fetch_all(&state.pool)
+    .await;
+
+    match rows {
+        Ok(rows) => Json(
+            rows.into_iter()
+                .map(|row| UserSessionResponse {
+                    is_current: id == caller.id()
+                        && caller.claims.session_id.as_deref() == Some(row.id.as_str()),
+                    id: row.id,
+                    created_at: row.created_at,
+                    expires_at: row.expires_at,
+                    user_agent: row.user_agent,
+                    ip_address: row.ip_address,
+                })
+                .collect::<Vec<_>>(),
+        )
+        .into_response(),
+        Err(error) => internal_error("listing user sessions", error),
+    }
+}
+
+/// `DELETE /users/{id}/sessions/{session_id}`
+///
+/// Idempotent for a session that has already ended. The user id remains part
+/// of the update predicate so an administrator cannot revoke a different
+/// user's row by combining two unrelated ids.
+pub async fn revoke_session(
+    caller: AuthenticatedUser,
+    State(state): State<AppState>,
+    Path((id, session_id)): Path<(String, String)>,
+) -> Response {
+    if let Some(denied) = session_access_denial(&caller, &id) {
+        return denied;
+    }
+    match user_exists(&state, &id).await {
+        Ok(true) => {}
+        Ok(false) => {
+            return ErrorBody::message(StatusCode::NOT_FOUND, format!("no such user: {id}"))
+        }
+        Err(error) => return internal_error("checking the session owner", error),
+    }
+
+    match sqlx::query(
+        "UPDATE refresh_tokens SET revoked_at = ? \
+         WHERE id = ? AND user_id = ? AND revoked_at IS NULL AND expires_at > ?",
+    )
+    .bind(Utc::now().to_rfc3339())
+    .bind(&session_id)
+    .bind(&id)
+    .bind(Utc::now().to_rfc3339())
+    .execute(&state.pool)
+    .await
+    {
+        Ok(_) => StatusCode::NO_CONTENT.into_response(),
+        Err(error) => internal_error("revoking a user session", error),
+    }
+}
+
+/// `DELETE /users/{id}/sessions`
+///
+/// Includes the caller's own current refresh token when they target
+/// themselves. “Log out everywhere” means everywhere; the frontend clears the
+/// still-valid short-lived access token locally after this succeeds.
+pub async fn revoke_all_sessions(
+    caller: AuthenticatedUser,
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Response {
+    if let Some(denied) = session_access_denial(&caller, &id) {
+        return denied;
+    }
+    match user_exists(&state, &id).await {
+        Ok(true) => {}
+        Ok(false) => {
+            return ErrorBody::message(StatusCode::NOT_FOUND, format!("no such user: {id}"))
+        }
+        Err(error) => return internal_error("checking the session owner", error),
+    }
+
+    match sqlx::query(
+        "UPDATE refresh_tokens SET revoked_at = ? \
+         WHERE user_id = ? AND revoked_at IS NULL AND expires_at > ?",
+    )
+    .bind(Utc::now().to_rfc3339())
+    .bind(&id)
+    .bind(Utc::now().to_rfc3339())
+    .execute(&state.pool)
+    .await
+    {
+        Ok(_) => StatusCode::NO_CONTENT.into_response(),
+        Err(error) => internal_error("revoking all user sessions", error),
+    }
+}
+
+fn session_access_denial(caller: &AuthenticatedUser, user_id: &str) -> Option<Response> {
+    if caller.id() == user_id || caller.can(UsersManage::KEY, None, None) {
+        return None;
+    }
+    caller.deny_unless(UsersManage::KEY, None, None)
+}
+
+async fn user_exists(state: &AppState, id: &str) -> Result<bool, sqlx::Error> {
+    sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM users WHERE id = ?)")
+        .bind(id)
+        .fetch_one(&state.pool)
+        .await
 }
 
 /// `GET /users`

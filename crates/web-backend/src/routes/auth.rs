@@ -1,7 +1,11 @@
 //! Login, refresh, logout, and session inspection.
 
-use axum::extract::State;
-use axum::http::{HeaderMap, StatusCode};
+use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+
+use axum::extract::{ConnectInfo, FromRequestParts, State};
+use axum::http::header::{RETRY_AFTER, USER_AGENT};
+use axum::http::request::Parts;
+use axum::http::{HeaderMap, HeaderValue, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::Json;
 use chrono::{DateTime, Utc};
@@ -12,7 +16,7 @@ use crate::auth::password::{hash_password, verify_password};
 use crate::auth::permissions::{effective_permissions, PermissionGrant};
 use crate::auth::tokens::{
     issue_access_token, issue_refresh_token, revoke_refresh_token, revoke_refresh_token_by_id,
-    validate_refresh_token, verify_access_token,
+    validate_refresh_token, verify_access_token, RefreshTokenContext,
 };
 use crate::error::{internal_error, ErrorBody};
 use crate::state::AppState;
@@ -30,6 +34,62 @@ const INVALID_CREDENTIALS: &str = "invalid credentials";
 /// Likewise collapsed: missing, revoked, and expired are one answer, because
 /// the client's response to all three is to sign in again.
 const INVALID_REFRESH_TOKEN: &str = "invalid or expired refresh token";
+
+/// What a caller is told after its direct peer address exhausts the failure
+/// window. Deliberately says nothing about any username.
+const TOO_MANY_LOGIN_ATTEMPTS: &str = "too many login attempts; try again later";
+
+/// Request context retained with a session and used for login throttling.
+///
+/// Axum's `ConnectInfo` is supplied by the real TCP service. In-process tests
+/// and alternate callers may omit it, in which case session context is null
+/// and throttling falls back to one unspecified peer bucket rather than being
+/// disabled silently.
+#[derive(Debug, Clone)]
+pub struct ClientContext {
+    user_agent: Option<String>,
+    peer_ip: Option<IpAddr>,
+}
+
+impl ClientContext {
+    fn rate_limit_key(&self) -> IpAddr {
+        self.peer_ip.unwrap_or(IpAddr::V4(Ipv4Addr::UNSPECIFIED))
+    }
+
+    fn refresh_token_context(&self) -> RefreshTokenContext {
+        RefreshTokenContext {
+            user_agent: self.user_agent.clone(),
+            ip_address: self.peer_ip.map(|address| address.to_string()),
+        }
+    }
+}
+
+impl FromRequestParts<AppState> for ClientContext {
+    type Rejection = Response;
+
+    async fn from_request_parts(
+        parts: &mut Parts,
+        _state: &AppState,
+    ) -> Result<Self, Self::Rejection> {
+        let user_agent = parts
+            .headers
+            .get(USER_AGENT)
+            .and_then(|value| value.to_str().ok())
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            // Avoid allowing an unauthenticated header to grow the database
+            // without bound. 512 Unicode scalar values is ample for real UAs.
+            .map(|value| value.chars().take(512).collect());
+        let peer_ip = parts
+            .extensions
+            .get::<ConnectInfo<SocketAddr>>()
+            .map(|ConnectInfo(address)| address.ip());
+        Ok(Self {
+            user_agent,
+            peer_ip,
+        })
+    }
+}
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -75,7 +135,16 @@ struct UserRow {
 }
 
 /// `POST /auth/login`
-pub async fn login(State(state): State<AppState>, Json(request): Json<LoginRequest>) -> Response {
+pub async fn login(
+    State(state): State<AppState>,
+    context: ClientContext,
+    Json(request): Json<LoginRequest>,
+) -> Response {
+    let peer = context.rate_limit_key();
+    if let Some(wait) = state.login_rate_limiter.retry_after(peer).await {
+        return rate_limited(wait);
+    }
+
     let user = sqlx::query_as::<_, UserRow>(
         "SELECT id, username, password_hash, is_active FROM users WHERE username = ?",
     )
@@ -94,21 +163,22 @@ pub async fn login(State(state): State<AppState>, Json(request): Json<LoginReque
         // which is the same enumeration leak the shared message closes — just
         // through a stopwatch instead of the response body.
         let _ = hash_password(&request.password);
-        return ErrorBody::message(StatusCode::UNAUTHORIZED, INVALID_CREDENTIALS.to_owned());
+        return invalid_credentials(&state, peer).await;
     };
 
     if !verify_password(&request.password, &user.password_hash) {
-        return ErrorBody::message(StatusCode::UNAUTHORIZED, INVALID_CREDENTIALS.to_owned());
+        return invalid_credentials(&state, peer).await;
     }
 
     // Checked after the password, not before: answering "that account is
     // disabled" to anyone who guesses a username is another enumeration leak.
     // A deactivated account is indistinguishable from a wrong password.
     if !user.is_active {
-        return ErrorBody::message(StatusCode::UNAUTHORIZED, INVALID_CREDENTIALS.to_owned());
+        return invalid_credentials(&state, peer).await;
     }
 
-    issue_session(&state, &user.id, &user.username).await
+    state.login_rate_limiter.clear(peer).await;
+    issue_session(&state, &user.id, &user.username, &context).await
 }
 
 /// `POST /auth/refresh`
@@ -119,6 +189,7 @@ pub async fn login(State(state): State<AppState>, Json(request): Json<LoginReque
 /// because their token was already spent.
 pub async fn refresh(
     State(state): State<AppState>,
+    context: ClientContext,
     Json(request): Json<RefreshRequest>,
 ) -> Response {
     let validated = match validate_refresh_token(&state.pool, &request.refresh_token).await {
@@ -157,7 +228,7 @@ pub async fn refresh(
         return internal_error("rotating the refresh token", error);
     }
 
-    issue_session(&state, &user.id, &user.username).await
+    issue_session(&state, &user.id, &user.username, &context).await
 }
 
 /// `POST /auth/logout`
@@ -214,28 +285,69 @@ pub async fn session(State(state): State<AppState>, headers: HeaderMap) -> Respo
 /// Shared by login and refresh so both paths compute permissions the same way —
 /// from the database, at issuance — and neither can drift into copying stale
 /// claims forward.
-async fn issue_session(state: &AppState, user_id: &str, username: &str) -> Response {
+async fn issue_session(
+    state: &AppState,
+    user_id: &str,
+    username: &str,
+    context: &ClientContext,
+) -> Response {
     let permissions = match effective_permissions(&state.pool, user_id).await {
         Ok(permissions) => permissions,
         Err(error) => return internal_error("computing effective permissions", error),
     };
 
-    let access = match issue_access_token(&state.jwt_secret, user_id, username, permissions) {
-        Ok(access) => access,
-        Err(error) => return internal_error("signing the access token", error),
-    };
+    let refresh_token =
+        match issue_refresh_token(&state.pool, user_id, &context.refresh_token_context()).await {
+            Ok(token) => token,
+            Err(error) => return internal_error("issuing the refresh token", error),
+        };
 
-    let refresh_token = match issue_refresh_token(&state.pool, user_id).await {
-        Ok(token) => token,
-        Err(error) => return internal_error("issuing the refresh token", error),
+    let access = match issue_access_token(
+        &state.jwt_secret,
+        user_id,
+        username,
+        permissions,
+        Some(&refresh_token.id),
+    ) {
+        Ok(access) => access,
+        Err(error) => {
+            if let Err(cleanup_error) =
+                revoke_refresh_token_by_id(&state.pool, &refresh_token.id).await
+            {
+                return internal_error(
+                    "cleaning up a session after token signing failed",
+                    cleanup_error,
+                );
+            }
+            return internal_error("signing the access token", error);
+        }
     };
 
     Json(TokenResponse {
         access_token: access.token,
-        refresh_token,
+        refresh_token: refresh_token.token,
         expires_at: access.expires_at,
     })
     .into_response()
+}
+
+async fn invalid_credentials(state: &AppState, peer: IpAddr) -> Response {
+    state.login_rate_limiter.record_failure(peer).await;
+    ErrorBody::message(StatusCode::UNAUTHORIZED, INVALID_CREDENTIALS.to_owned())
+}
+
+fn rate_limited(wait: std::time::Duration) -> Response {
+    let seconds = wait.as_secs() + u64::from(wait.subsec_nanos() > 0);
+    let mut response = ErrorBody::message(
+        StatusCode::TOO_MANY_REQUESTS,
+        TOO_MANY_LOGIN_ATTEMPTS.to_owned(),
+    );
+    response.headers_mut().insert(
+        RETRY_AFTER,
+        HeaderValue::from_str(&seconds.max(1).to_string())
+            .expect("a decimal duration is a valid header value"),
+    );
+    response
 }
 
 /// Extracts the token from an `Authorization: Bearer <token>` header.

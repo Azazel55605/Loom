@@ -5,6 +5,7 @@ use std::sync::Arc;
 
 use sqlx::SqlitePool;
 
+use crate::auth::rate_limit::LoginRateLimiter;
 use crate::connectors::config_secrets::ConfigEncryptionKey;
 use crate::connectors::{ConnectorRuntime, UpdateCache};
 
@@ -18,6 +19,9 @@ pub struct AppState {
     pub pool: SqlitePool,
     /// HS256 signing secret, read once at startup so no request pays for it.
     pub jwt_secret: Arc<String>,
+    /// Per-direct-peer failed-login windows. Intentionally in memory: this is
+    /// abuse throttling, not durable account state.
+    pub login_rate_limiter: LoginRateLimiter,
     /// Independent AES-256 key for schema-marked connector config fields.
     pub config_encryption_key: Arc<ConfigEncryptionKey>,
     /// Directory holding uploaded avatar files.
@@ -59,6 +63,7 @@ impl AppState {
         Self {
             pool,
             jwt_secret: Arc::new(jwt_secret),
+            login_rate_limiter: LoginRateLimiter::default(),
             config_encryption_key: Arc::new(config_encryption_key),
             avatars_dir: Arc::new(avatars_dir),
             connectors,
