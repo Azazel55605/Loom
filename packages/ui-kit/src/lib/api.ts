@@ -107,6 +107,43 @@ export type ActionResult = {
   payload: unknown | null;
 };
 
+/** One generic connector action invocation, shared by the per-instance History
+ * tab and the cross-instance Audit Log. Instance identity is present on global
+ * rows and omitted when the endpoint's URL already provides that context. */
+export type AuditLogEntry = {
+  id: string;
+  instanceId?: string;
+  instanceName?: string;
+  connectorType?: string;
+  actionId: string;
+  targetId: string | null;
+  params: unknown;
+  invokedBy: {
+    id: string | null;
+    username: string | null;
+    system: boolean;
+  };
+  /** RFC 3339. */
+  invokedAt: string;
+  /** Null while the invocation is still outstanding. */
+  completedAt: string | null;
+  success: boolean | null;
+  resultMessage: string | null;
+  snapshot: unknown | null;
+};
+
+/** Filters common to action-history endpoints. Timestamp bounds are exclusive. */
+export type AuditLogFilters = {
+  instanceId?: string;
+  actionId?: string;
+  targetId?: string;
+  userId?: string;
+  success?: boolean;
+  before?: string;
+  after?: string;
+  limit?: number;
+};
+
 /**
  * A disruptive action the platform is currently running against an instance.
  *
@@ -1536,6 +1573,46 @@ function executeConnectorAction(
   );
 }
 
+/** Build an encoded audit-log query while preserving false boolean values. */
+function auditLogQuery(filters: AuditLogFilters = {}): string {
+  const params = new URLSearchParams();
+  if (filters.instanceId) params.set("instanceId", filters.instanceId);
+  if (filters.actionId) params.set("actionId", filters.actionId);
+  if (filters.targetId) params.set("targetId", filters.targetId);
+  if (filters.userId) params.set("userId", filters.userId);
+  if (filters.success !== undefined) params.set("success", String(filters.success));
+  if (filters.before) params.set("before", filters.before);
+  if (filters.after) params.set("after", filters.after);
+  if (filters.limit !== undefined) params.set("limit", String(filters.limit));
+  const query = params.toString();
+  return query === "" ? "" : `?${query}`;
+}
+
+/** `GET /connector-instances/{id}/action-log` — newest first. */
+function getInstanceActionLog(
+  runtime: ApiRuntime,
+  instanceId: string,
+  filters: AuditLogFilters = {},
+  signal?: AbortSignal,
+): Promise<AuditLogEntry[]> {
+  return authorizedRequest<AuditLogEntry[]>(
+    runtime,
+    `/connector-instances/${encodeURIComponent(instanceId)}/action-log${auditLogQuery(filters)}`,
+    { signal },
+  );
+}
+
+/** `GET /audit-log` — newest first across every connector instance. */
+function getGlobalAuditLog(
+  runtime: ApiRuntime,
+  filters: AuditLogFilters = {},
+  signal?: AbortSignal,
+): Promise<AuditLogEntry[]> {
+  return authorizedRequest<AuditLogEntry[]>(runtime, `/audit-log${auditLogQuery(filters)}`, {
+    signal,
+  });
+}
+
 /* -------------------------------------------------------------------------- */
 /* Dashboards                                                                  */
 /* -------------------------------------------------------------------------- */
@@ -2190,6 +2267,13 @@ export function createApiClient(options: {
       targetId?: string | null,
       signal?: AbortSignal,
     ) => executeConnectorAction(runtime, instanceId, actionId, params, targetId, signal),
+    getInstanceActionLog: (
+      instanceId: string,
+      filters?: AuditLogFilters,
+      signal?: AbortSignal,
+    ) => getInstanceActionLog(runtime, instanceId, filters, signal),
+    getGlobalAuditLog: (filters?: AuditLogFilters, signal?: AbortSignal) =>
+      getGlobalAuditLog(runtime, filters, signal),
     getDashboards: (signal?: AbortSignal) => getDashboards(runtime, signal),
     createDashboard: (name: string, signal?: AbortSignal) =>
       createDashboard(runtime, name, signal),

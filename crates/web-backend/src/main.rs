@@ -2475,6 +2475,17 @@ mod tests {
         body.as_array().expect("a list of log entries").clone()
     }
 
+    /// Reads the cross-instance audit log through the real endpoint.
+    async fn global_audit_log(app: &TestApp, token: &str, query: &str) -> Vec<serde_json::Value> {
+        let (status, body) = send(
+            &app.router,
+            get_with_auth(&format!("/audit-log{query}"), &bearer(token)),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body:#}");
+        body.as_array().expect("a list of audit entries").clone()
+    }
+
     #[tokio::test]
     async fn every_action_is_recorded_with_its_caller_params_and_outcome() {
         let app = test_app().await;
@@ -2669,6 +2680,109 @@ mod tests {
         )
         .await;
         assert_eq!(status, StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn the_global_audit_log_joins_context_filters_and_requires_manage() {
+        let app = test_app().await;
+        let (admin, _) = setup_and_login(&app.router).await;
+        let admin_id = current_user_id(&app.router, &admin).await;
+        let first = create_debug_instance(&app.router, &admin, "First fixture").await;
+        let second = create_debug_instance(&app.router, &admin, "Second fixture").await;
+
+        let (status, body) = send(
+            &app.router,
+            post_json_auth(
+                &format!("/connector-instances/{first}/actions/ping"),
+                &admin,
+                serde_json::json!({}),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body:#}");
+
+        // A connector refusal is still an audit row and must be filterable as
+        // a failure rather than disappearing from the global view.
+        let (status, _) = send(
+            &app.router,
+            post_json_auth(
+                &format!("/connector-instances/{second}/actions/set-load"),
+                &admin,
+                serde_json::json!({ "value": 900 }),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+
+        // Fixed-width timestamps make the before/after assertions independent
+        // of scheduler timing while exercising the same TEXT range query used
+        // in production.
+        sqlx::query(
+            "UPDATE connector_action_log SET invoked_at = CASE action_id \
+             WHEN 'ping' THEN '2026-08-30T12:00:10+00:00' \
+             ELSE '2026-08-30T12:00:20+00:00' END",
+        )
+        .execute(&app.pool)
+        .await
+        .expect("stamp audit fixtures");
+
+        let entries = global_audit_log(&app, &admin, "").await;
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries[0]["instanceId"], second);
+        assert_eq!(entries[0]["instanceName"], "Second fixture");
+        assert_eq!(entries[0]["connectorType"], "debug");
+        assert_eq!(entries[0]["invokedBy"]["username"], "admin");
+        assert_eq!(entries[0]["success"], false);
+        assert_eq!(entries[1]["instanceId"], first);
+
+        assert_eq!(
+            global_audit_log(&app, &admin, &format!("?instanceId={first}"))
+                .await
+                .len(),
+            1
+        );
+        assert_eq!(
+            global_audit_log(&app, &admin, "?actionId=ping&success=true")
+                .await
+                .len(),
+            1
+        );
+        assert_eq!(
+            global_audit_log(&app, &admin, &format!("?userId={admin_id}"))
+                .await
+                .len(),
+            2
+        );
+        assert_eq!(
+            global_audit_log(&app, &admin, "?before=2026-08-30T12:00:15Z").await[0]["actionId"],
+            "ping"
+        );
+        assert_eq!(
+            global_audit_log(&app, &admin, "?after=2026-08-30T12:00:15Z").await[0]["actionId"],
+            "set-load"
+        );
+        assert_eq!(global_audit_log(&app, &admin, "?limit=1").await.len(), 1);
+
+        let (status, body) = send(
+            &app.router,
+            get_with_auth("/audit-log?before=not-a-timestamp", &bearer(&admin)),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{body:#}");
+
+        let viewer = user_with_grants(
+            &app.router,
+            &admin,
+            "audit-viewer",
+            serde_json::json!([{
+                "key": "connectors.view",
+                "resourceType": null,
+                "resourceId": null,
+            }]),
+        )
+        .await;
+        let (status, _) = send(&app.router, get_with_auth("/audit-log", &bearer(&viewer))).await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
     }
 
     /// Reading the history is looking, not doing — and the people who most need

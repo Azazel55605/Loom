@@ -20,6 +20,10 @@ export function SettingsLayout({
   const canAdminister =
     hasPermission(permissions, PERMISSION_KEYS.usersManage) ||
     hasPermission(permissions, PERMISSION_KEYS.groupsManage);
+  const canViewAuditLog = hasPermission(
+    permissions,
+    PERMISSION_KEYS.connectorsManage,
+  );
 
   return renderShell(
     <div className="space-y-6">
@@ -45,6 +49,11 @@ export function SettingsLayout({
             {canAdminister && (
               <TabsTrigger className="shrink-0" value="permissions">
                 Permissions
+              </TabsTrigger>
+            )}
+            {canViewAuditLog && (
+              <TabsTrigger className="shrink-0" value="audit-log">
+                Audit Log
               </TabsTrigger>
             )}
           </TabsList>

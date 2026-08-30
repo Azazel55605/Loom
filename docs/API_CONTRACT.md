@@ -1635,6 +1635,9 @@ exactly the ones without authority to have done it.
 | --- | --- | --- |
 | `actionId` | Only invocations of this action. | All actions. |
 | `targetId` | Only invocations against this sub-target. | All targets. |
+| `success` | `true` for successful invocations or `false` for failures. Outstanding rows match neither value. | All outcomes. |
+| `before` | Only rows invoked before this RFC 3339 timestamp (exclusive). Used as the newest-first “Load more” cursor. | No upper bound. |
+| `after` | Only rows invoked after this RFC 3339 timestamp (exclusive). | No lower bound. |
 | `limit` | Maximum rows. Clamped to 1–200 rather than refused, because an over-large value means "as much as there is". | 50 |
 
 **Response 200** — newest first:
@@ -1676,8 +1679,61 @@ exactly the ones without authority to have done it.
 | Status | Meaning |
 | --- | --- |
 | 200 | Entries returned; an empty array means nothing has been invoked here. |
+| 400 | `before` or `after` is not an RFC 3339 timestamp. |
 | 403 | The caller lacks a global `connectors.view` grant. |
 | 404 | No instance with that id. |
+
+### `GET /audit-log`
+
+Requires a global `connectors.manage` grant. This is the cross-instance
+administrative view of the same `connector_action_log` rows returned by the
+per-instance endpoint; it joins connector identity and actor names rather than
+maintaining a second audit store.
+
+All supplied filters combine with AND. Results are newest first.
+
+| Query parameter | Meaning | Default |
+| --- | --- | --- |
+| `instanceId` | Only invocations for this connector instance. | All instances. |
+| `actionId` | Only invocations of this action. | All actions. |
+| `userId` | Only invocations attributed to this user. System invocations have no user id and therefore do not match. | All actors. |
+| `success` | `true` for successful invocations or `false` for failures. Outstanding rows match neither value. | All outcomes. |
+| `before` | Only rows invoked before this RFC 3339 timestamp (exclusive). Used as the newest-first “Load more” cursor. | No upper bound. |
+| `after` | Only rows invoked after this RFC 3339 timestamp (exclusive). | No lower bound. |
+| `limit` | Maximum rows. Clamped to 1–200. | 50 |
+
+**Response 200:** the per-instance [action-log response](#get-connector-instancesidaction-log),
+with these fields added to every row:
+
+```json
+[
+  {
+    "instanceId": "f5318e63-4516-4302-81cb-23cb99820f52",
+    "instanceName": "Workshop Docker",
+    "connectorType": "docker",
+    "id": "0f2f1a5c-6b0e-4a1f-9a2e-2b6f4e1c33d0",
+    "actionId": "restart",
+    "targetId": "container:example-app",
+    "params": {},
+    "invokedBy": {
+      "id": "48ae87dc-fc35-42db-a3de-467677ff8061",
+      "username": "admin",
+      "system": false
+    },
+    "invokedAt": "2026-08-30T18:00:00+00:00",
+    "completedAt": "2026-08-30T18:00:02+00:00",
+    "success": true,
+    "resultMessage": "Container restarted.",
+    "snapshot": null
+  }
+]
+```
+
+| Status | Meaning |
+| --- | --- |
+| 200 | Entries returned; an empty array means no invocations match. |
+| 400 | `before` or `after` is not an RFC 3339 timestamp. |
+| 403 | The caller lacks a global `connectors.manage` grant. |
 
 **Deleting a connector instance deletes its log** (`ON DELETE CASCADE`) — a
 history of something that no longer exists is not evidence. **Deleting a *user*

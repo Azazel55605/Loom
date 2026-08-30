@@ -54,6 +54,9 @@ const UsersPanel = React.lazy(async () => ({
 const GroupsPanel = React.lazy(async () => ({
   default: (await import("@loom/ui-kit/pages/settings/GroupsPanel")).GroupsPanel,
 }));
+const AuditLogPage = React.lazy(async () => ({
+  default: (await import("@loom/ui-kit/pages/settings/AuditLogPage")).AuditLogPage,
+}));
 
 /**
  * The route table.
@@ -128,6 +131,7 @@ export default function App() {
             <Route path="general" element={<GeneralPanel />} />
             <Route path="account" element={<AccountPanel />} />
             <Route path="appearance" element={<AppearancePanel />} />
+            <Route path="audit-log" element={<AuditLogPage />} />
             <Route path="permissions" element={<PermissionsLayout />}>
               {/* Which half to land on depends on which grant the user holds,
                   so the decision is a component rather than a fixed target. */}

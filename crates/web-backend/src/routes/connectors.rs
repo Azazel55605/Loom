@@ -20,7 +20,7 @@ use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::Json;
-use chrono::Utc;
+use chrono::{DateTime, Utc};
 use loom_core::connector::{
     ActionResult, ApplicableTarget, ColumnDescriptor, ColumnValueType, Connector, ConnectorAction,
     ConnectorError, ConnectorMetadata, ConnectorStatus, DataPointDescriptor, DisplayField,
@@ -1399,13 +1399,20 @@ pub struct ActionLogQuery {
     #[serde(default)]
     target_id: Option<String>,
     #[serde(default)]
+    success: Option<bool>,
+    #[serde(default)]
+    before: Option<String>,
+    #[serde(default)]
+    after: Option<String>,
+    #[serde(default)]
     limit: Option<i64>,
 }
 
 /// `GET /connector-instances/{id}/action-log`
 ///
 /// Requires a global `connectors.view` grant. Newest first, optionally narrowed
-/// by `actionId` and `targetId`, at most `limit` rows.
+/// by `actionId`, `targetId`, outcome and timestamp bounds, at most `limit`
+/// rows.
 ///
 /// **`connectors.view`, not `connectors.control`.** Reading the history is
 /// looking, not doing, and the people most in need of "what happened to this
@@ -1436,6 +1443,14 @@ pub async fn list_action_log(
         .clamp(1, ACTION_LOG_MAX_LIMIT);
     let action_id = trimmed(query.action_id.as_deref());
     let target_id = trimmed(query.target_id.as_deref());
+    let before = match timestamp_bound(query.before.as_deref(), "before") {
+        Ok(value) => value,
+        Err(response) => return *response,
+    };
+    let after = match timestamp_bound(query.after.as_deref(), "after") {
+        Ok(value) => value,
+        Err(response) => return *response,
+    };
 
     // Both filters are expressed as `(? IS NULL OR column = ?)` rather than by
     // building SQL per request: one prepared statement, no string assembly
@@ -1450,12 +1465,18 @@ pub async fn list_action_log(
          WHERE log.instance_id = ? \
            AND (?2 IS NULL OR log.action_id = ?2) \
            AND (?3 IS NULL OR log.target_id = ?3) \
+           AND (?4 IS NULL OR log.success = ?4) \
+           AND (?5 IS NULL OR log.invoked_at < ?5) \
+           AND (?6 IS NULL OR log.invoked_at > ?6) \
          ORDER BY log.invoked_at DESC, log.rowid DESC \
-         LIMIT ?4",
+         LIMIT ?7",
     )
     .bind(&id)
     .bind(action_id)
     .bind(target_id)
+    .bind(query.success)
+    .bind(before)
+    .bind(after)
     .bind(limit)
     .fetch_all(&state.pool)
     .await;
@@ -1469,6 +1490,165 @@ pub async fn list_action_log(
         .into_response(),
         Err(error) => internal_error("reading the connector action log", error),
     }
+}
+
+/// One global audit-log row, including the instance context omitted by the
+/// per-instance endpoint.
+#[derive(Debug, sqlx::FromRow)]
+struct GlobalActionLogRow {
+    id: String,
+    instance_id: String,
+    instance_name: String,
+    connector_type: String,
+    action_id: String,
+    target_id: Option<String>,
+    params: String,
+    invoked_by_user_id: Option<String>,
+    invoked_by_username: Option<String>,
+    invoked_by_system: bool,
+    invoked_at: String,
+    completed_at: Option<String>,
+    success: Option<bool>,
+    result_message: Option<String>,
+    snapshot: Option<String>,
+}
+
+/// One entry in `GET /audit-log`.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GlobalActionLogResponse {
+    instance_id: String,
+    instance_name: String,
+    connector_type: String,
+    #[serde(flatten)]
+    entry: ActionLogResponse,
+}
+
+impl From<GlobalActionLogRow> for GlobalActionLogResponse {
+    fn from(row: GlobalActionLogRow) -> Self {
+        Self {
+            instance_id: row.instance_id,
+            instance_name: row.instance_name,
+            connector_type: row.connector_type,
+            entry: ActionLogResponse::from(ActionLogRow {
+                id: row.id,
+                action_id: row.action_id,
+                target_id: row.target_id,
+                params: row.params,
+                invoked_by_user_id: row.invoked_by_user_id,
+                invoked_by_username: row.invoked_by_username,
+                invoked_by_system: row.invoked_by_system,
+                invoked_at: row.invoked_at,
+                completed_at: row.completed_at,
+                success: row.success,
+                result_message: row.result_message,
+                snapshot: row.snapshot,
+            }),
+        }
+    }
+}
+
+/// Filters accepted by the cross-instance audit log.
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GlobalActionLogQuery {
+    #[serde(default)]
+    instance_id: Option<String>,
+    #[serde(default)]
+    action_id: Option<String>,
+    #[serde(default)]
+    user_id: Option<String>,
+    #[serde(default)]
+    success: Option<bool>,
+    #[serde(default)]
+    before: Option<String>,
+    #[serde(default)]
+    after: Option<String>,
+    #[serde(default)]
+    limit: Option<i64>,
+}
+
+/// `GET /audit-log`
+///
+/// Requires an unscoped `connectors.manage` grant because this view crosses
+/// every connector instance and exposes who invoked administrative actions.
+/// Optional filters are combined with AND; timestamp bounds are exclusive and
+/// the result remains newest-first so `before` is a stable "load more" cursor.
+pub async fn list_global_audit_log(
+    _caller: RequirePermission<ConnectorsManage>,
+    State(state): State<AppState>,
+    Query(query): Query<GlobalActionLogQuery>,
+) -> Response {
+    let limit = query
+        .limit
+        .unwrap_or(ACTION_LOG_DEFAULT_LIMIT)
+        .clamp(1, ACTION_LOG_MAX_LIMIT);
+    let instance_id = trimmed(query.instance_id.as_deref());
+    let action_id = trimmed(query.action_id.as_deref());
+    let user_id = trimmed(query.user_id.as_deref());
+    let before = match timestamp_bound(query.before.as_deref(), "before") {
+        Ok(value) => value,
+        Err(response) => return *response,
+    };
+    let after = match timestamp_bound(query.after.as_deref(), "after") {
+        Ok(value) => value,
+        Err(response) => return *response,
+    };
+
+    let rows = sqlx::query_as::<_, GlobalActionLogRow>(
+        "SELECT log.id, log.instance_id, instances.name AS instance_name, \
+                instances.connector_type, log.action_id, log.target_id, log.params, \
+                log.invoked_by_user_id, users.username AS invoked_by_username, \
+                log.invoked_by_system, log.invoked_at, log.completed_at, log.success, \
+                log.result_message, log.snapshot \
+         FROM connector_action_log AS log \
+         INNER JOIN connector_instances AS instances ON instances.id = log.instance_id \
+         LEFT JOIN users ON users.id = log.invoked_by_user_id \
+         WHERE (?1 IS NULL OR log.instance_id = ?1) \
+           AND (?2 IS NULL OR log.action_id = ?2) \
+           AND (?3 IS NULL OR log.invoked_by_user_id = ?3) \
+           AND (?4 IS NULL OR log.success = ?4) \
+           AND (?5 IS NULL OR log.invoked_at < ?5) \
+           AND (?6 IS NULL OR log.invoked_at > ?6) \
+         ORDER BY log.invoked_at DESC, log.rowid DESC \
+         LIMIT ?7",
+    )
+    .bind(instance_id)
+    .bind(action_id)
+    .bind(user_id)
+    .bind(query.success)
+    .bind(before)
+    .bind(after)
+    .bind(limit)
+    .fetch_all(&state.pool)
+    .await;
+
+    match rows {
+        Ok(rows) => Json(
+            rows.into_iter()
+                .map(GlobalActionLogResponse::from)
+                .collect::<Vec<_>>(),
+        )
+        .into_response(),
+        Err(error) => internal_error("reading the global connector audit log", error),
+    }
+}
+
+/// Validate and normalize a timestamp bound before comparing it with the
+/// canonical UTC RFC 3339 strings stored in SQLite. Comparing an arbitrary
+/// RFC 3339 spelling as TEXT (for example `Z` against `+00:00`) can put the
+/// same instant on the wrong side of a boundary.
+fn timestamp_bound(value: Option<&str>, parameter: &str) -> RouteResult<Option<String>> {
+    let Some(value) = trimmed(value) else {
+        return Ok(None);
+    };
+    let parsed = DateTime::parse_from_rfc3339(&value).map_err(|_| {
+        Box::new(ErrorBody::message(
+            StatusCode::BAD_REQUEST,
+            format!("{parameter} must be an RFC 3339 timestamp"),
+        ))
+    })?;
+    Ok(Some(parsed.with_timezone(&Utc).to_rfc3339()))
 }
 
 /// Who is invoking an action.

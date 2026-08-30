@@ -1,5 +1,5 @@
 import * as React from "react";
-import { useMutation, useQuery } from "@tanstack/react-query";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { AlertCircle, Layers } from "lucide-react";
 import { toast } from "sonner";
 
@@ -12,6 +12,7 @@ import {
   DialogTitle,
 } from "@loom/ui-kit/components/ui/dialog";
 import { ConnectorIcon } from "@loom/ui-kit/components/ConnectorIcon";
+import { InstanceActionHistory } from "@loom/ui-kit/components/InstanceActionHistory";
 import { ResourceKindBrowser } from "@loom/ui-kit/components/ResourceKindBrowser";
 import {
   Tabs,
@@ -59,6 +60,7 @@ export function ConnectorDetailModal({
   open,
   onOpenChange,
   focus = null,
+  initialTab = null,
 }: {
   placement: DashboardPlacement;
   open: boolean;
@@ -74,8 +76,11 @@ export function ConnectorDetailModal({
    * caller.
    */
   focus?: "logs" | null;
+  /** Opens the universal History tab when arriving from the global audit log. */
+  initialTab?: "history" | null;
 }) {
   const api = useApiClient();
+  const queryClient = useQueryClient();
   const socket = useConnectorStatusSocket();
   const { user } = useAuth();
   const instance = placement.connector;
@@ -120,7 +125,13 @@ export function ConnectorDetailModal({
   const execute = useMutation({
     mutationFn: ({ actionId, params }: { actionId: string; params: Record<string, unknown> }) =>
       api.executeConnectorAction(instance.id, actionId, params, placement.targetId),
-    onSettled: () => void detail.refetch(),
+    onSettled: async () => {
+      await Promise.all([
+        detail.refetch(),
+        queryClient.invalidateQueries({ queryKey: ["connector-action-log", instance.id] }),
+        queryClient.invalidateQueries({ queryKey: ["global-audit-log"] }),
+      ]);
+    },
   });
   const runAction = React.useCallback(async (actionId: string, params: Record<string, unknown>) => {
     const label = detail.data?.actions.find(
@@ -198,6 +209,15 @@ export function ConnectorDetailModal({
   const browsableKinds = (resourceKinds.data ?? []).filter((kind) =>
     appliesToTarget(kind, placement.targetId),
   );
+  // Do not choose History merely because the descriptor query has not settled
+  // yet. Existing connectors should continue opening on their first resource
+  // tab; the global audit-log deep link is the one deliberate exception.
+  const defaultDetailTab =
+    initialTab === "history"
+      ? "history"
+      : resourceKinds.isPending
+        ? null
+        : (browsableKinds[0]?.kind ?? "history");
 
   // A container the reader picked out of the host's log table, if any. The
   // nested modal below is that container's own detail view — the same component
@@ -269,21 +289,26 @@ export function ConnectorDetailModal({
                   <div key={index} ref={index === focusIndex ? focusRef : undefined} className="min-w-0">{renderWidget({ binding, statusDetails, dataPoints: targetDataPoints, actions: targetActions, onExecute: runAction, disabled: !canControl, unavailableReason: availability.unavailableReason, size: "expanded", className: "min-h-[5rem]" })}</div>
                 ))}
               </div>
-              {/* Whatever this connector says it can browse, as tabs. Nothing
-                  here knows what any of them are: the kinds, their columns and
-                  their buttons all come from the descriptors. A connector that
-                  browses nothing renders no tab strip at all rather than an
-                  empty one. */}
-              {browsableKinds.length > 0 ? (
-                <section className="space-y-3 border-t pt-5">
-                  <Tabs defaultValue={browsableKinds[0].kind}>
-                    <TabsList>
-                      {browsableKinds.map((kind) => (
-                        <TabsTrigger key={kind.kind} value={kind.kind}>
-                          {kind.label}
-                        </TabsTrigger>
-                      ))}
-                    </TabsList>
+              {/* Resource kinds remain descriptor-driven; History is universal
+                  because action logging happens in the platform endpoint for
+                  every connector rather than being a connector capability. */}
+              <section className="flex flex-col gap-3 border-t pt-5">
+                {defaultDetailTab === null ? (
+                  <Skeleton className="h-9 w-full" />
+                ) : (
+                  <Tabs
+                    defaultValue={defaultDetailTab}
+                  >
+                    <div className="max-w-full overflow-x-auto pb-1">
+                      <TabsList className="w-max min-w-full justify-start sm:min-w-0">
+                        {browsableKinds.map((kind) => (
+                          <TabsTrigger key={kind.kind} value={kind.kind}>
+                            {kind.label}
+                          </TabsTrigger>
+                        ))}
+                        <TabsTrigger value="history">History</TabsTrigger>
+                      </TabsList>
+                    </div>
                     {browsableKinds.map((kind) => (
                       <TabsContent key={kind.kind} value={kind.kind} className="pt-3">
                         <ResourceKindBrowser
@@ -303,9 +328,15 @@ export function ConnectorDetailModal({
                         />
                       </TabsContent>
                     ))}
+                    <TabsContent value="history" className="pt-3">
+                      <InstanceActionHistory
+                        instanceId={instance.id}
+                        actions={detail.data?.actions ?? []}
+                      />
+                    </TabsContent>
                   </Tabs>
+                )}
                 </section>
-              ) : null}
 
               {targetActions.some((action) => !boundActions.has(action.id)) ? (
                 <section className="space-y-3 border-t pt-5">

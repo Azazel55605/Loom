@@ -120,6 +120,7 @@ pub fn routes() -> Router<AppState> {
             "/connector-instances/{id}/action-log",
             get(connectors::list_action_log),
         )
+        .route("/audit-log", get(connectors::list_global_audit_log))
         .route("/ws", get(connector_socket::connector_status_socket))
         .route(
             "/dashboards",
