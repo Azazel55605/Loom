@@ -35,6 +35,10 @@ use crate::auth::extract::{
     AuthenticatedUser, ConnectorsControl, ConnectorsManage, ConnectorsView, Permission,
     RequirePermission,
 };
+use crate::connectors::config_secrets::{
+    decrypt_sensitive_fields, encrypt_sensitive_fields, merge_sensitive_update,
+    redact_sensitive_fields,
+};
 use crate::connectors::runtime::{BuildError, ConnectorStatusSnapshot, PendingOperation};
 use crate::error::{internal_error, ErrorBody};
 use crate::state::AppState;
@@ -175,6 +179,9 @@ pub struct ConnectorInstanceResponse {
     created_at: String,
     /// Free-form administrator labels, sorted alphabetically.
     tags: Vec<String>,
+    /// Sensitive config keys that currently hold a value; values never leave
+    /// the backend.
+    sensitive_fields_set: Vec<String>,
     metadata: ConnectorMetadata,
     /// The user's per-instance icon choice, overriding `metadata.icon`.
     ///
@@ -215,13 +222,7 @@ pub struct ConnectorInstanceResponse {
 pub struct ConnectorInstanceDetail {
     #[serde(flatten)]
     instance: ConnectorInstanceResponse,
-    /// The stored configuration, as written.
-    ///
-    /// Returned so the edit form can be pre-filled. **Revisit when a connector
-    /// type stores a credential**: this is `connectors.view`-gated today
-    /// because the only registered type has nothing secret in it, and a real
-    /// integration will need either a redaction pass here or a stricter
-    /// permission on this field.
+    /// The stored configuration with schema-marked sensitive keys omitted.
     config: Value,
     /// What this connector can be asked to do, right now. May be empty.
     actions: Vec<ConnectorAction>,
@@ -349,7 +350,13 @@ pub async fn list_instances(
         };
 
         let tags = tags_by_instance.remove(&row.id).unwrap_or_default();
-        entries.push(entry_for(&row, tags, live.as_deref(), snapshot.as_ref()));
+        entries.push(entry_for(
+            &row,
+            tags,
+            sensitive_fields_set_for(&state, &row),
+            live.as_deref(),
+            snapshot.as_ref(),
+        ));
     }
 
     Json(entries).into_response()
@@ -409,6 +416,7 @@ pub async fn get_instance(
     };
 
     detail_for(
+        &state,
         &row,
         tags,
         live.as_deref(),
@@ -745,6 +753,7 @@ pub(crate) async fn instance_summary(
     Ok(Some(entry_for(
         &row,
         tags,
+        sensitive_fields_set_for(state, &row),
         live.as_deref(),
         snapshot.as_ref(),
     )))
@@ -779,9 +788,20 @@ pub async fn create_instance(
         Err(error) => return build_failure(error),
     };
 
+    let schema = &state
+        .connectors
+        .registration(&request.connector_type)
+        .expect("a successfully built connector type must remain registered")
+        .schema;
+    let stored_config =
+        match encrypt_sensitive_fields(&request.config, schema, &state.config_encryption_key) {
+            Ok(config) => config,
+            Err(error) => return ErrorBody::message(StatusCode::BAD_REQUEST, error.to_string()),
+        };
+
     let id = Uuid::new_v4();
     let created_at = Utc::now().to_rfc3339();
-    let config = request.config.to_string();
+    let config = stored_config.to_string();
 
     let inserted = sqlx::query(
         "INSERT INTO connector_instances (id, connector_type, name, config, created_at) \
@@ -821,6 +841,7 @@ pub async fn create_instance(
     // A brand-new instance has never been checked, so its update status is
     // empty rather than absent — the same distinction the cache draws.
     let body = detail_for(
+        &state,
         &row,
         Vec::new(),
         Some(connector.as_ref()),
@@ -859,9 +880,32 @@ pub async fn update_instance(
     // Rebuilt whether or not the config changed: the new connector replaces the
     // live one, and building from the stored value is how an instance that
     // failed to load at startup gets a second chance once its config is fixed.
-    let config = request.config.clone().unwrap_or_else(|| {
-        serde_json::from_str(&row.config).unwrap_or(Value::Object(Default::default()))
-    });
+    let stored_config = match serde_json::from_str::<Value>(&row.config) {
+        Ok(config) => config,
+        Err(error) => return internal_error("reading stored connector config", error),
+    };
+    let Some(registration) = state.connectors.registration(&row.connector_type) else {
+        return build_failure(BuildError::UnknownType(row.connector_type.clone()));
+    };
+    let (config, next_stored_config) = match request.config.as_ref() {
+        Some(incoming) => match merge_sensitive_update(
+            &stored_config,
+            incoming,
+            &registration.schema,
+            &state.config_encryption_key,
+        ) {
+            Ok(configs) => configs,
+            Err(error) => return ErrorBody::message(StatusCode::BAD_REQUEST, error.to_string()),
+        },
+        None => match decrypt_sensitive_fields(
+            &stored_config,
+            &registration.schema,
+            &state.config_encryption_key,
+        ) {
+            Ok(plaintext) => (plaintext, stored_config),
+            Err(error) => return internal_error("decrypting stored connector config", error),
+        },
+    };
 
     let connector = match state
         .connectors
@@ -896,7 +940,7 @@ pub async fn update_instance(
         },
     };
 
-    let serialized = config.to_string();
+    let serialized = next_stored_config.to_string();
     let mut transaction = match state.pool.begin().await {
         Ok(transaction) => transaction,
         Err(error) => return internal_error("starting connector instance update", error),
@@ -964,6 +1008,7 @@ pub async fn update_instance(
     };
 
     detail_for(
+        &state,
         &row,
         response_tags,
         Some(connector.as_ref()),
@@ -1740,6 +1785,7 @@ async fn discover_with(connector: &dyn Connector, subject: &str) -> Response {
 fn entry_for(
     row: &InstanceRow,
     tags: Vec<String>,
+    sensitive_fields_set: Vec<String>,
     live: Option<&dyn Connector>,
     snapshot: Option<&ConnectorStatusSnapshot>,
 ) -> ConnectorInstanceResponse {
@@ -1780,6 +1826,7 @@ fn entry_for(
         connector_type: row.connector_type.clone(),
         created_at: row.created_at.clone(),
         tags,
+        sensitive_fields_set,
         metadata,
         icon_override: row.icon_override.clone(),
         status,
@@ -1792,13 +1839,15 @@ fn entry_for(
 
 /// Builds the full detail response for one row.
 async fn detail_for(
+    state: &AppState,
     row: &InstanceRow,
     tags: Vec<String>,
     live: Option<&dyn Connector>,
     snapshot: Option<&ConnectorStatusSnapshot>,
     update_status: HashMap<String, crate::connectors::updates::UpdateStatus>,
 ) -> Response {
-    let instance = entry_for(row, tags, live, snapshot);
+    let (config, sensitive_fields_set) = redacted_config_for(state, row);
+    let instance = entry_for(row, tags, sensitive_fields_set, live, snapshot);
 
     let (
         actions,
@@ -1828,7 +1877,7 @@ async fn detail_for(
 
     Json(ConnectorInstanceDetail {
         instance,
-        config: serde_json::from_str(&row.config).unwrap_or(Value::Null),
+        config,
         actions,
         data_points,
         default_layout,
@@ -1838,6 +1887,21 @@ async fn detail_for(
         update_status,
     })
     .into_response()
+}
+
+/// Parses and redacts one stored config according to its registered schema.
+/// Unknown connector types have no schema to interpret, so their config stays
+/// visible exactly as before; a type cannot gain secret semantics by accident.
+fn redacted_config_for(state: &AppState, row: &InstanceRow) -> (Value, Vec<String>) {
+    let stored = serde_json::from_str(&row.config).unwrap_or(Value::Null);
+    match state.connectors.registration(&row.connector_type) {
+        Some(registration) => redact_sensitive_fields(&stored, &registration.schema),
+        None => (stored, Vec::new()),
+    }
+}
+
+fn sensitive_fields_set_for(state: &AppState, row: &InstanceRow) -> Vec<String> {
+    redacted_config_for(state, row).1
 }
 
 /// Stand-in metadata for an instance with no live connector behind it.

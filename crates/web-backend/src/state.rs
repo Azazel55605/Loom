@@ -5,6 +5,7 @@ use std::sync::Arc;
 
 use sqlx::SqlitePool;
 
+use crate::connectors::config_secrets::ConfigEncryptionKey;
 use crate::connectors::{ConnectorRuntime, UpdateCache};
 
 /// Everything a handler needs, cloned per request.
@@ -17,6 +18,8 @@ pub struct AppState {
     pub pool: SqlitePool,
     /// HS256 signing secret, read once at startup so no request pays for it.
     pub jwt_secret: Arc<String>,
+    /// Independent AES-256 key for schema-marked connector config fields.
+    pub config_encryption_key: Arc<ConfigEncryptionKey>,
     /// Directory holding uploaded avatar files.
     ///
     /// Carried on the state rather than re-resolved per request so a handler
@@ -49,12 +52,14 @@ impl AppState {
     pub fn new(
         pool: SqlitePool,
         jwt_secret: String,
+        config_encryption_key: ConfigEncryptionKey,
         avatars_dir: PathBuf,
         connectors: ConnectorRuntime,
     ) -> Self {
         Self {
             pool,
             jwt_secret: Arc::new(jwt_secret),
+            config_encryption_key: Arc::new(config_encryption_key),
             avatars_dir: Arc::new(avatars_dir),
             connectors,
             updates: UpdateCache::new(),

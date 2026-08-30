@@ -29,6 +29,7 @@ import { TagChipEditor } from "@loom/ui-kit/components/TagChipEditor";
 import {
   defaultsForSchema,
   SchemaForm,
+  sensitiveFieldKeysForSchema,
   validateSchemaValues,
 } from "@loom/ui-kit/components/SchemaForm";
 import { Skeleton } from "@loom/ui-kit/components/ui/skeleton";
@@ -176,18 +177,33 @@ export function ConnectorInstanceDialog({
     // Local checks are `required` and basic types only. The connector's factory
     // on the backend is the real validator, and its refusal is reported below
     // as a form-level Alert rather than a toast — it names the field to fix.
-    const found = validateSchemaValues(selectedType.configSchema, config);
+    const existingSensitiveFields = detail.data?.sensitiveFieldsSet ?? [];
+    const found = validateSchemaValues(
+      selectedType.configSchema,
+      config,
+      isEditing ? existingSensitiveFields : [],
+    );
     setErrors(found);
     if (Object.keys(found).length > 0) return;
 
     setIsSubmitting(true);
     try {
       if (isEditing) {
+        const submittedConfig = { ...config };
+        const existing = new Set(existingSensitiveFields);
+        for (const key of sensitiveFieldKeysForSchema(selectedType.configSchema)) {
+          if (
+            existing.has(key) &&
+            (submittedConfig[key] === "" || submittedConfig[key] === undefined)
+          ) {
+            delete submittedConfig[key];
+          }
+        }
         // Always sent when editing, `null` included: omitting the key means
         // "leave it alone", which would make clearing an override impossible.
         await api.updateConnectorInstance(instance.id, {
           name: trimmed,
-          config,
+          config: submittedConfig,
           iconOverride,
           tags,
         });
@@ -226,7 +242,7 @@ export function ConnectorInstanceDialog({
           </DialogTitle>
           <DialogDescription>
             {isEditing
-              ? "The connector type cannot be changed — a different type is a different connector. Configuration is replaced with exactly what is here."
+              ? "The connector type cannot be changed — a different type is a different connector. Existing sensitive values stay unchanged when left blank."
               : "Pick a type, name the instance, and fill in whatever configuration it asks for."}
           </DialogDescription>
         </DialogHeader>
@@ -385,6 +401,7 @@ export function ConnectorInstanceDialog({
                       errors={errors}
                       disabled={isSubmitting}
                       idPrefix={`config-${selectedType.typeId}`}
+                      sensitiveFieldsSet={detail.data?.sensitiveFieldsSet}
                     />
                   </TabsContent>
                   <TabsContent
@@ -411,6 +428,7 @@ export function ConnectorInstanceDialog({
                     errors={errors}
                     disabled={isSubmitting}
                     idPrefix={`config-${selectedType.typeId}`}
+                    sensitiveFieldsSet={detail.data?.sensitiveFieldsSet}
                   />
                 </>
               )}

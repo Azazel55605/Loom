@@ -213,6 +213,10 @@ pub struct DebugConnectorConfig {
     /// The starting value of the simulated boolean data point.
     pub enabled: bool,
 
+    /// Test-only secret used to exercise backend encryption and redaction.
+    /// The fixture deliberately never sends or otherwise uses this value.
+    pub api_token: Option<String>,
+
     /// What [`Connector::network_target`] should report. Defaults to `None`.
     ///
     /// The fixture reaches nothing, so it has no real endpoint — which is
@@ -247,6 +251,7 @@ impl Default for DebugConnectorConfig {
             base_load: 42.0,
             label: "debug-fixture".to_string(),
             enabled: true,
+            api_token: None,
             network_target: None,
             simulated_update_available: false,
         }
@@ -438,6 +443,7 @@ impl DebugConnector {
             base_load,
             label,
             enabled: raw.enabled.unwrap_or(true),
+            api_token: raw.api_token,
             network_target: raw.network_target,
             simulated_update_available: raw.simulated_update_available,
         }))
@@ -531,6 +537,8 @@ struct RawConfig {
     label: Option<String>,
     #[serde(default)]
     enabled: Option<bool>,
+    #[serde(default)]
+    api_token: Option<String>,
     #[serde(default)]
     network_target: Option<NetworkTarget>,
     #[serde(default)]
@@ -969,6 +977,12 @@ impl Connector for DebugConnector {
                     "type": "boolean",
                     "default": true,
                     "description": "Starting value of the simulated on/off data point."
+                },
+                "apiToken": {
+                    "type": "string",
+                    "x-loom-sensitive": true,
+                    "description": "Test-only fixture value for exercising Loom's encrypted \
+                                    connector configuration storage. It has no runtime effect."
                 },
                 "networkTarget": {
                     "type": "object",
@@ -2144,6 +2158,27 @@ mod tests {
                 .expect("an empty configuration")
                 .config()
                 .simulated_update_available
+        );
+    }
+
+    #[test]
+    fn the_api_token_is_an_optional_sensitive_fixture_field() {
+        let schema = DebugConnector::default().config_schema();
+        assert_eq!(
+            schema["properties"]["apiToken"]["x-loom-sensitive"],
+            json!(true)
+        );
+        assert!(schema["required"]
+            .as_array()
+            .is_none_or(|required| !required.iter().any(|key| key == "apiToken")));
+
+        let connector = DebugConnector::from_config_value(json!({
+            "apiToken": "test-only-secret"
+        }))
+        .expect("the fixture accepts its proof field");
+        assert_eq!(
+            connector.config().api_token.as_deref(),
+            Some("test-only-secret")
         );
     }
 

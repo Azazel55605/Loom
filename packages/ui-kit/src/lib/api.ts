@@ -488,6 +488,9 @@ export type ConnectorInstanceSummary = {
   createdAt: string;
   /** Free-form administrator labels, sorted by the backend. */
   tags: string[];
+  /** Schema-marked sensitive config keys that currently hold a value. The
+   * values themselves are never returned. */
+  sensitiveFieldsSet: string[];
   metadata: ConnectorMetadata;
   /** The user's per-instance icon choice, in the same reference convention as
    *  `metadata.icon`. `null` means "no override" — fall back to the connector
@@ -528,7 +531,8 @@ export type ConnectorInstanceSummary = {
  * immediately and fills the actions in when this resolves.
  */
 export type ConnectorInstanceDetail = ConnectorInstanceSummary & {
-  /** The stored configuration, as written. `null` when it is unreadable. */
+  /** Stored non-sensitive configuration. Sensitive keys are omitted. `null`
+   * when the stored JSON is unreadable. */
   config: unknown;
   /** What this instance can be asked to do right now. May be empty. */
   actions: ConnectorAction[];
@@ -764,9 +768,9 @@ export type CreateConnectorInstanceRequest = {
  * `PATCH /connector-instances/{id}` body. Every field is optional; an absent
  * field is left alone.
  *
- * `config` **replaces** the whole configuration rather than merging into it — a
- * connector is rebuilt from its configuration wholesale, so a partial one has
- * no coherent meaning.
+ * `config` replaces all non-sensitive fields. A sensitive schema field omitted
+ * from an included config object keeps its existing encrypted value; including
+ * it replaces that value.
  */
 export type UpdateConnectorInstanceRequest = {
   name?: string;

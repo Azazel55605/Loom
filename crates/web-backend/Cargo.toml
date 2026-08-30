@@ -14,8 +14,10 @@ path = "src/main.rs"
 [dependencies]
 loom-connector-docker.workspace = true
 loom-core.workspace = true
+aes-gcm.workspace = true
 argon2.workspace = true
 axum.workspace = true
+base64.workspace = true
 chrono.workspace = true
 image.workspace = true
 jsonwebtoken.workspace = true

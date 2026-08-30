@@ -11,6 +11,10 @@ rust-version = "1.82"
 [workspace.dependencies]
 loom-core = { path = "crates/core" }
 loom-connector-docker = { path = "crates/connector-docker" }
+# Authenticated encryption for connector configuration fields marked sensitive.
+aes-gcm = "0.10"
+# Stable text encoding for persisted encryption keys and nonce/ciphertext blobs.
+base64 = "0.22"
 # `async fn` in traits is stable on our pinned 1.82 toolchain but not
 # dyn-compatible, and the connector contract must work as `Box<dyn Connector>`.
 async-trait = "0.1"

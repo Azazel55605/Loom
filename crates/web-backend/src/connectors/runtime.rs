@@ -27,6 +27,7 @@ use tokio::task::{JoinHandle, JoinSet};
 use tokio::time::{self, MissedTickBehavior};
 use uuid::Uuid;
 
+use super::config_secrets::{decrypt_sensitive_fields, ConfigEncryptionKey};
 use super::diagnostics;
 use super::registry::{ConnectorTypeRegistration, ConnectorTypeRegistry};
 
@@ -310,6 +311,7 @@ impl ConnectorRuntime {
     pub async fn load(
         pool: &SqlitePool,
         types: ConnectorTypeRegistry,
+        config_encryption_key: &ConfigEncryptionKey,
     ) -> Result<Self, sqlx::Error> {
         let runtime = Self::new(types);
 
@@ -333,6 +335,30 @@ impl ConnectorRuntime {
                         instance = %id,
                         %error,
                         "skipping connector instance whose stored config is not valid JSON"
+                    );
+                    continue;
+                }
+            };
+
+            let Some(registration) = runtime.registration(&connector_type) else {
+                tracing::warn!(
+                    instance = %id,
+                    connector_type,
+                    "skipping connector instance of a type this build does not register"
+                );
+                continue;
+            };
+            let config = match decrypt_sensitive_fields(
+                &config,
+                &registration.schema,
+                config_encryption_key,
+            ) {
+                Ok(config) => config,
+                Err(error) => {
+                    tracing::warn!(
+                        instance = %id,
+                        %error,
+                        "skipping connector instance whose sensitive config cannot be decrypted"
                     );
                     continue;
                 }

@@ -1037,6 +1037,7 @@ Requires a **global** `connectors.view` grant.
     "connectorType": "debug",
     "createdAt": "2026-08-21T09:14:03.914238771+00:00",
     "tags": ["lab", "test"],
+    "sensitiveFieldsSet": ["apiToken"],
     "metadata": {
       "id": "debug",
       "name": "Debug Connector",
@@ -1078,6 +1079,7 @@ Requires a **global** `connectors.view` grant.
 | `connectorType` | string | Which registered type it is. | Always present. |
 | `createdAt` | string | RFC 3339 timestamp, in the stored spelling — numeric offset, sub-second digits. See [Conventions](#conventions). | Always present. |
 | `tags` | array of strings | Free-form administrator labels assigned to this instance, sorted alphabetically. | Always present; may be empty. |
+| `sensitiveFieldsSet` | array of strings | Schema-marked sensitive config keys that currently have a stored value. The values themselves are never returned. | Always present; may be empty. |
 | `metadata` | object | [`ConnectorMetadata`](#connectormetadata) from the live connector. | Always present. |
 | `iconOverride` | string | The user's icon for *this instance*, overriding `metadata.icon`. Same [reference convention](#icon-references). Set through `PATCH /connector-instances/{id}`. | **`null`** when no override is set — fall back to `metadata.icon`, then to the client's own default. |
 | `status` | object | [`ConnectorStatus`](#connectorstatus) from the latest completed poll. | **`null`** before the first background poll or when the latest check itself failed. |
@@ -1179,6 +1181,7 @@ carries, plus what a dashboard placement UI needs.
   "connectorType": "debug",
   "createdAt": "2026-08-21T09:14:03.914238771+00:00",
   "tags": ["lab", "test"],
+  "sensitiveFieldsSet": ["apiToken"],
   "metadata": { "id": "debug", "name": "Debug Connector", "icon": "lucide:bug", "version": "0.1.0", "minSize": [2, 2] },
   "iconOverride": null,
   "status": { "health": "healthy", "details": { "": {} }, "lastChecked": "2026-08-21T09:20:11Z" },
@@ -1211,17 +1214,15 @@ carries, plus what a dashboard placement UI needs.
 | Field | JSON type | Meaning | Nullability |
 | --- | --- | --- | --- |
 | *(list-entry fields)* | | Exactly as in `GET /connector-instances`. | |
-| `config` | any | The stored configuration, as written. Returned so an edit form can be pre-filled. | `null` for a row whose stored config is unreadable. |
+| `config` | any | Stored non-sensitive configuration for pre-filling an edit form. Every property marked `x-loom-sensitive` in the type schema is omitted. | `null` for a row whose stored config is unreadable. |
 | `actions` | array | [`ConnectorAction`](#connectoraction) — what this instance can be asked to do right now. | Always present; **may be empty** for a read-only or currently-broken connector. |
 | `dataPoints` | array | [`DataPointDescriptor`](#datapointdescriptor) — what can be bound to a widget. | Always present; may be empty. |
 | `defaultLayout` | object | [`WidgetLayout`](#widgetlayout) the connector ships with. | Always present; `bindings` may be empty. |
 | `discoverableType` | string | Type id this live instance can discover. Clients use this to decide whether to offer discovery without guessing from `connectorType`. | **`null`** when unsupported or the stored instance is not loaded. |
 | `supportsSubTargets` | boolean | Whether this live instance exposes addressable views through the sub-target endpoint. | Always present; `false` for unloaded and ordinary single-view connectors. |
 
-**`config` is `connectors.view`-gated, which will not be good enough forever.**
-The currently registered types store no credentials. A future integration storing an
-API token will need either a redaction pass here or a stricter permission on
-this field; treat that as a known open item rather than a settled decision.
+Sensitive values are never returned, even to `connectors.manage`. An edit form
+uses `sensitiveFieldsSet` to show that a value exists without receiving it.
 
 | Status | Meaning |
 | --- | --- |
@@ -2136,13 +2137,16 @@ Requires a global `connectors.manage` grant.
 | Field | JSON type | Meaning |
 | --- | --- | --- |
 | `name` | string | New display name. Must not be empty or whitespace. |
-| `config` | object | New configuration, **replacing** the stored one. |
+| `config` | object | New configuration. Non-sensitive fields replace the stored set; omitted sensitive fields keep their existing encrypted value. |
 | `iconOverride` | string or `null` | This instance's icon, overriding its type's. See below. |
 | `tags` | array of strings | Complete replacement tag set. Values are trimmed, duplicates are collapsed, and an empty array clears all tags. |
 
-**`config` replaces the whole configuration**; it is not merged. A connector is
-rebuilt from its configuration wholesale, so there is no coherent meaning for a
-partial one.
+**`config` replaces all non-sensitive fields.** Sensitive fields are the one
+intentional exception: including one replaces it, while omitting one preserves
+its existing encrypted value byte-for-byte. Sending an empty string is not
+"keep"; clients must omit an untouched sensitive key. Before the connector is
+rebuilt, the backend decrypts preserved values into a temporary plaintext copy,
+so factories never receive ciphertext.
 
 **`iconOverride` has three request states, not two.** Omitting the key leaves
 the stored override alone; sending `null` **clears** it back to the connector
@@ -3559,6 +3563,13 @@ value that is the right type and still wrong.
 A connector needing no configuration returns an empty schema object rather than
 `null`, matching the `paramsSchema` convention.
 
+Connector configuration schemas may mark a top-level string property with the
+Loom extension `"x-loom-sensitive": true`. The backend validates the submitted
+plaintext first, then stores that field as an authenticated AES-256-GCM blob.
+Clients render it as a password input and use `sensitiveFieldsSet` on edit;
+schema-marked values never appear in instance responses. See
+[ADR 0028](./adr/0028-connector-secrets-at-rest.md).
+
 ## Known temporary behavior
 
 Authentication is real. Several things around it are not finished, and the first
@@ -3587,9 +3598,6 @@ one is the important one.
   data points move on a deterministic oscillation so charts have something to
   draw. It is a permanent development and testing fixture, not scaffolding —
   see the module docs in `crates/core/src/connector/debug.rs`.
-- **An instance's stored `config` is returned to anyone with
-  `connectors.view`.** Fine while no registered type stores a secret; it needs
-  redaction or a stricter permission before one does.
 - **A connector instance that fails to load is skipped with a warning, not a
   fatal error.** The row survives, is listed with a `statusError`, and can be
   fixed with `PATCH` or removed with `DELETE`.
@@ -3635,6 +3643,10 @@ The JWT signing secret is generated from the OS CSPRNG on first boot and stored
 in `server_config`. It is never supplied by environment variable, and it is
 persisted rather than regenerated because a secret that changed on restart would
 invalidate every outstanding access token on every deploy.
+
+The independent connector-config encryption key follows the same persistence
+pattern under its own `server_config` key. It is generated from the OS CSPRNG on
+first boot and never derived from or shared with the JWT signing secret.
 
 The Cargo package is **`loom-web-backend`**, not `web-backend` — a crate named
 `core` would collide with Rust's built-in `core`, so both crates carry the

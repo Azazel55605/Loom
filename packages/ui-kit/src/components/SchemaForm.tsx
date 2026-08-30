@@ -49,6 +49,8 @@ export type JsonSchema = {
   maximum?: number;
   minLength?: number;
   enum?: unknown[];
+  /** Loom extension: encrypt this top-level connector-config string at rest. */
+  "x-loom-sensitive"?: boolean;
 };
 
 export type SchemaFormDiscovery = {
@@ -157,7 +159,16 @@ export function defaultsForSchema(schema: JsonSchema | unknown): Record<string, 
 export function validateSchemaValues(
   schema: JsonSchema | unknown,
   values: unknown,
-  prefix: string[] = [],
+  sensitiveFieldsSet: readonly string[] = [],
+): Record<string, string> {
+  return validateSchemaFields(asSchema(schema), values, [], new Set(sensitiveFieldsSet));
+}
+
+function validateSchemaFields(
+  schema: JsonSchema,
+  values: unknown,
+  prefix: string[],
+  sensitiveFieldsSet: ReadonlySet<string>,
 ): Record<string, string> {
   const parsed = asSchema(schema);
   const errors: Record<string, string> = {};
@@ -171,13 +182,16 @@ export function validateSchemaValues(
     const value = valueAt(values, path);
 
     if (kind === "object") {
-      Object.assign(errors, validateSchemaValues(property, values, path));
+      Object.assign(errors, validateSchemaFields(property, values, path, sensitiveFieldsSet));
       continue;
     }
 
     const missing = value === undefined || value === "" || value === null;
     if (missing) {
-      if (required.has(key)) errors[path.join(".")] = "This field is required.";
+      const dotted = path.join(".");
+      if (required.has(key) && !sensitiveFieldsSet.has(dotted)) {
+        errors[dotted] = "This field is required.";
+      }
       continue;
     }
 
@@ -192,6 +206,13 @@ export function validateSchemaValues(
   return errors;
 }
 
+/** Top-level keys using Loom's sensitive-field schema extension. */
+export function sensitiveFieldKeysForSchema(schema: JsonSchema | unknown): string[] {
+  return Object.entries(asSchema(schema).properties ?? {})
+    .filter(([, property]) => property["x-loom-sensitive"] === true)
+    .map(([key]) => key);
+}
+
 function asSchema(schema: JsonSchema | unknown): JsonSchema {
   return typeof schema === "object" && schema !== null ? (schema as JsonSchema) : {};
 }
@@ -204,6 +225,7 @@ export function SchemaForm({
   disabled,
   idPrefix = "schema",
   discovery,
+  sensitiveFieldsSet = [],
 }: {
   /** The type's `configSchema`, as published by `GET /connector-types`. */
   schema: JsonSchema | unknown;
@@ -217,6 +239,8 @@ export function SchemaForm({
   idPrefix?: string;
   /** Optional generic discovery assistance for one schema field. */
   discovery?: SchemaFormDiscovery;
+  /** Existing secrets reported by an edit response; their values stay blank. */
+  sensitiveFieldsSet?: readonly string[];
 }) {
   return (
     <SchemaFields
@@ -228,6 +252,7 @@ export function SchemaForm({
       disabled={disabled === true}
       idPrefix={idPrefix}
       discovery={discovery}
+      sensitiveFieldsSet={new Set(sensitiveFieldsSet)}
     />
   );
 }
@@ -241,6 +266,7 @@ function SchemaFields({
   disabled,
   idPrefix,
   discovery,
+  sensitiveFieldsSet,
 }: {
   schema: JsonSchema;
   root: Record<string, unknown>;
@@ -250,6 +276,7 @@ function SchemaFields({
   disabled: boolean;
   idPrefix: string;
   discovery?: SchemaFormDiscovery;
+  sensitiveFieldsSet: ReadonlySet<string>;
 }) {
   const properties = Object.entries(schema.properties ?? {});
   const required = new Set(schema.required ?? []);
@@ -303,6 +330,7 @@ function SchemaFields({
                 disabled={disabled}
                 idPrefix={idPrefix}
                 discovery={discovery}
+                sensitiveFieldsSet={sensitiveFieldsSet}
               />
             </fieldset>
           );
@@ -310,6 +338,9 @@ function SchemaFields({
 
         const current = valueAt(root, fieldPath);
         const set = (next: unknown) => onChange(withValueAt(root, fieldPath, next));
+        const isSensitive = property["x-loom-sensitive"] === true;
+        const sensitiveValueIsSet = isSensitive && sensitiveFieldsSet.has(dotted);
+        const sensitiveStateId = sensitiveValueIsSet ? `${id}-sensitive-state` : undefined;
 
         if (kind === "boolean") {
           return (
@@ -339,7 +370,7 @@ function SchemaFields({
               {label}
               {required.has(key) && <span aria-hidden="true"> *</span>}
             </Label>
-            {kind === "string" && discovery?.targetField === dotted ? (
+            {kind === "string" && !isSensitive && discovery?.targetField === dotted ? (
               <DiscoveryFieldPicker
                 fieldName={label}
                 inputId={id}
@@ -357,13 +388,14 @@ function SchemaFields({
               <Input
                 id={id}
                 disabled={disabled}
-                type={kind === "number" ? "number" : "text"}
+                type={kind === "number" ? "number" : isSensitive ? "password" : "text"}
+                autoComplete={isSensitive ? "new-password" : undefined}
                 inputMode={kind === "number" ? "decimal" : undefined}
                 min={property.minimum}
                 max={property.maximum}
                 aria-invalid={error !== undefined}
                 aria-describedby={
-                  [descriptionId, errorId].filter(Boolean).join(" ") || undefined
+                  [descriptionId, sensitiveStateId, errorId].filter(Boolean).join(" ") || undefined
                 }
                 value={current === undefined || current === null ? "" : String(current)}
                 onChange={(event) => {
@@ -390,6 +422,11 @@ function SchemaFields({
             {property.description !== undefined && (
               <p id={descriptionId} className="text-xs text-muted-foreground">
                 {property.description}
+              </p>
+            )}
+            {sensitiveValueIsSet && (
+              <p id={sensitiveStateId} className="text-xs text-muted-foreground">
+                Value is set — leave blank to keep unchanged.
               </p>
             )}
             {error !== undefined && (

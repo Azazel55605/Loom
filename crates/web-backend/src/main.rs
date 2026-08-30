@@ -10,11 +10,10 @@
 //! `docs/adr/0008-auth-model.md` for the auth design.
 //!
 //! Startup is ordered: resolve the data directory, open and migrate the
-//! database, load or generate the JWT signing secret, then serve. Each step
-//! depends on the last, and a failure in any of them is fatal rather than
-//! degraded — a server that cannot reach its database cannot authenticate
-//! anyone, and pretending otherwise would mean serving requests it has no way
-//! to authorize.
+//! database, load or generate the JWT signing and connector-config encryption
+//! keys, then serve. Each step depends on the last, and a failure in any of
+//! them is fatal rather than degraded — a server that cannot reach its database
+//! or recover its durable keys cannot safely serve requests.
 
 use std::path::Path;
 
@@ -199,15 +198,32 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let pool = open_database(&config::database_url(&database_path)).await?;
     let jwt_secret = auth::secret::load_or_create_jwt_secret(&pool).await?;
+    let loaded_config_key =
+        connectors::config_secrets::load_or_create_config_encryption_key(&pool).await?;
+    if loaded_config_key.generated {
+        info!("generated connector config encryption key");
+    } else {
+        info!("loaded existing connector config encryption key");
+    }
     let avatars_dir = config::avatars_dir(&data_dir)?;
 
     // Built after the database is migrated: the runtime's whole job is to hold
     // the live form of what is stored in `connector_instances`.
-    let connectors =
-        connectors::ConnectorRuntime::load(&pool, connectors::builtin_registry()).await?;
+    let connectors = connectors::ConnectorRuntime::load(
+        &pool,
+        connectors::builtin_registry(),
+        &loaded_config_key.key,
+    )
+    .await?;
     let _poller = connectors.spawn_poller();
 
-    let state = AppState::new(pool, jwt_secret, avatars_dir, connectors);
+    let state = AppState::new(
+        pool,
+        jwt_secret,
+        loaded_config_key.key,
+        avatars_dir,
+        connectors,
+    );
     // A second background task, deliberately not folded into the poller: one
     // asks a local daemon how things are every few seconds, the other asks a
     // third-party registry what exists every few hours. See
@@ -296,13 +312,24 @@ mod tests {
         let secret = auth::secret::load_or_create_jwt_secret(&pool)
             .await
             .expect("secret must be generated");
-        let avatars = config::avatars_dir(dir.path()).expect("avatar directory must be created");
-        let connectors = connectors::ConnectorRuntime::load(&pool, connectors::builtin_registry())
+        let config_key = connectors::config_secrets::load_or_create_config_encryption_key(&pool)
             .await
-            .expect("an empty connector table must load");
+            .expect("config encryption key must be generated")
+            .key;
+        let avatars = config::avatars_dir(dir.path()).expect("avatar directory must be created");
+        let connectors =
+            connectors::ConnectorRuntime::load(&pool, connectors::builtin_registry(), &config_key)
+                .await
+                .expect("an empty connector table must load");
         connectors.poll_once().await;
 
-        let state = AppState::new(pool.clone(), secret, avatars, connectors.clone());
+        let state = AppState::new(
+            pool.clone(),
+            secret,
+            config_key,
+            avatars,
+            connectors.clone(),
+        );
 
         TestApp {
             router: app(state.clone()),
@@ -1733,6 +1760,138 @@ mod tests {
         )
         .await;
         assert_eq!(status, StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn sensitive_connector_config_is_encrypted_redacted_and_merged() {
+        let app = test_app().await;
+        let (access, _) = setup_and_login(&app.router).await;
+
+        let (status, created) = send(
+            &app.router,
+            post_json_auth(
+                "/connector-instances",
+                &access,
+                serde_json::json!({
+                    "connectorType": "debug",
+                    "name": "Secret fixture",
+                    "config": {
+                        "label": "before",
+                        "apiToken": "original-secret"
+                    }
+                }),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED, "create failed: {created:#}");
+        let id = created["id"].as_str().expect("id");
+        assert!(created["config"].get("apiToken").is_none());
+        assert_eq!(
+            created["sensitiveFieldsSet"],
+            serde_json::json!(["apiToken"])
+        );
+
+        let raw_before: String =
+            sqlx::query_scalar("SELECT config FROM connector_instances WHERE id = ?")
+                .bind(id)
+                .fetch_one(&app.pool)
+                .await
+                .expect("stored config");
+        assert!(!raw_before.contains("original-secret"));
+        let stored_before: Value = serde_json::from_str(&raw_before).expect("stored JSON");
+        let ciphertext_before = stored_before["apiToken"]
+            .as_str()
+            .expect("encrypted token")
+            .to_owned();
+        assert_eq!(
+            connectors::config_secrets::decrypt_value(
+                &ciphertext_before,
+                &app.state.config_encryption_key,
+            )
+            .expect("token decrypts"),
+            "original-secret"
+        );
+        let reloaded = connectors::ConnectorRuntime::load(
+            &app.pool,
+            connectors::builtin_registry(),
+            &app.state.config_encryption_key,
+        )
+        .await
+        .expect("runtime reload decrypts stored config");
+        assert_eq!(reloaded.len().await, 1);
+
+        let (status, listed) = send(
+            &app.router,
+            get_with_auth("/connector-instances", &bearer(&access)),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(
+            listed[0]["sensitiveFieldsSet"],
+            serde_json::json!(["apiToken"])
+        );
+
+        let (status, updated) = send(
+            &app.router,
+            patch_json_auth(
+                &format!("/connector-instances/{id}"),
+                &access,
+                serde_json::json!({ "config": { "label": "after" } }),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "update failed: {updated:#}");
+        assert_eq!(updated["config"]["label"], "after");
+        assert!(updated["config"].get("apiToken").is_none());
+
+        let raw_after_omission: String =
+            sqlx::query_scalar("SELECT config FROM connector_instances WHERE id = ?")
+                .bind(id)
+                .fetch_one(&app.pool)
+                .await
+                .expect("stored config after omission");
+        let stored_after_omission: Value =
+            serde_json::from_str(&raw_after_omission).expect("stored JSON");
+        assert_eq!(stored_after_omission["apiToken"], ciphertext_before);
+
+        let (status, replaced) = send(
+            &app.router,
+            patch_json_auth(
+                &format!("/connector-instances/{id}"),
+                &access,
+                serde_json::json!({
+                    "config": { "label": "after", "apiToken": "replacement-secret" }
+                }),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "replacement failed: {replaced:#}");
+        assert!(replaced["config"].get("apiToken").is_none());
+        assert_eq!(
+            replaced["sensitiveFieldsSet"],
+            serde_json::json!(["apiToken"])
+        );
+
+        let raw_after_replacement: String =
+            sqlx::query_scalar("SELECT config FROM connector_instances WHERE id = ?")
+                .bind(id)
+                .fetch_one(&app.pool)
+                .await
+                .expect("stored config after replacement");
+        let stored_after_replacement: Value =
+            serde_json::from_str(&raw_after_replacement).expect("stored JSON");
+        let replacement_blob = stored_after_replacement["apiToken"]
+            .as_str()
+            .expect("replacement ciphertext");
+        assert_ne!(replacement_blob, ciphertext_before);
+        assert_eq!(
+            connectors::config_secrets::decrypt_value(
+                replacement_blob,
+                &app.state.config_encryption_key,
+            )
+            .expect("replacement token decrypts"),
+            "replacement-secret"
+        );
     }
 
     #[tokio::test]
