@@ -623,6 +623,12 @@ fn debug_capabilities(reachable: bool, actions_enabled: bool) -> Vec<CapabilityS
             note: (!reachable).then(|| "Requires a reachable connector.".to_owned()),
         },
         CapabilityStatus {
+            key: "view-gadgets".to_owned(),
+            label: "View gadgets".to_owned(),
+            available: reachable,
+            note: (!reachable).then(|| "Requires a reachable connector.".to_owned()),
+        },
+        CapabilityStatus {
             key: "perform-actions".to_owned(),
             label: "Perform actions".to_owned(),
             available: reachable && actions_enabled,
@@ -1247,6 +1253,11 @@ impl Connector for DebugConnector {
                             required_toggle_keys: vec!["enableWidgets".to_owned()],
                         },
                         CapabilityRequirement {
+                            capability_key: "view-gadgets".to_owned(),
+                            label: "View gadgets".to_owned(),
+                            required_toggle_keys: vec!["enableWidgets".to_owned()],
+                        },
+                        CapabilityRequirement {
                             capability_key: "perform-actions".to_owned(),
                             label: "Perform actions".to_owned(),
                             required_toggle_keys: vec!["enableActions".to_owned()],
@@ -1452,9 +1463,9 @@ mod tests {
         assert!(configurable.template.contains("{{label}}"));
         assert!(configurable.template.contains("{{LOOM_DEBUG_WIDGETS}}"));
         assert!(configurable.template.contains("{{LOOM_DEBUG_ACTIONS}}"));
-        assert_eq!(configurable.capability_requirements.len(), 2);
+        assert_eq!(configurable.capability_requirements.len(), 3);
         assert_eq!(
-            configurable.capability_requirements[1].required_toggle_keys,
+            configurable.capability_requirements[2].required_toggle_keys,
             ["enableActions"]
         );
         assert!(connector.config_schema()["properties"]["label"].is_object());

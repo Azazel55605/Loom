@@ -3,7 +3,7 @@ name = "loom-connector-docker"
 description = "Loom connector for Docker host monitoring, container discovery, and per-container control."
 edition.workspace = true
 license.workspace = true
-version = "0.4.2"
+version = "0.4.3"
 repository.workspace = true
 rust-version.workspace = true
 
@@ -24,6 +24,8 @@ bollard = "0.21"
 reqwest.workspace = true
 
 [dev-dependencies]
+# Runs the same public descriptor/status/layout contract against live Docker.
+loom-connector-test-kit.workspace = true
 # The live-Docker integration tests create their own container to point the
 # connector at; they use the same client the connector does rather than a second
 # Docker library.

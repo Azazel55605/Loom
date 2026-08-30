@@ -146,6 +146,7 @@ pub const ACTION_PAUSE: &str = "pause";
 pub const ACTION_UNPAUSE: &str = "unpause";
 
 const CAPABILITY_LIST_CONTAINERS: &str = "list-containers";
+const CAPABILITY_LIST_STACK_MEMBERS: &str = "list-stack-members";
 const CAPABILITY_READ_LOGS: &str = "read-logs";
 const CAPABILITY_START: &str = "start-containers";
 const CAPABILITY_STOP: &str = "stop-containers";
@@ -370,6 +371,11 @@ pub fn setup_guide() -> SetupGuide {
                     capability_requirement(
                         CAPABILITY_LIST_CONTAINERS,
                         "List containers",
+                        &["containers"],
+                    ),
+                    capability_requirement(
+                        CAPABILITY_LIST_STACK_MEMBERS,
+                        "Browse stack members",
                         &["containers"],
                     ),
                     capability_requirement(
@@ -1614,6 +1620,7 @@ impl Connector for DockerConnector {
                 reachable: true,
                 capabilities: vec![
                     available_capability(CAPABILITY_LIST_CONTAINERS, "List containers"),
+                    available_capability(CAPABILITY_LIST_STACK_MEMBERS, "Browse stack members"),
                     available_capability(CAPABILITY_READ_LOGS, "Read container logs"),
                     available_capability(CAPABILITY_START, "Start containers"),
                     available_capability(CAPABILITY_STOP, "Stop containers"),
@@ -1669,6 +1676,12 @@ impl Connector for DockerConnector {
             "CONTAINERS and IMAGES",
             &[&containers, &images],
         );
+        let stack_members = combine_read_probes(
+            CAPABILITY_LIST_STACK_MEMBERS,
+            "Browse stack members",
+            "CONTAINERS",
+            &[&containers],
+        );
 
         ConnectionTestResult {
             reachable: true,
@@ -1679,6 +1692,7 @@ impl Connector for DockerConnector {
                     "CONTAINERS",
                     containers,
                 ),
+                stack_members,
                 proxy_read_capability(
                     CAPABILITY_READ_LOGS,
                     "Read container logs",
@@ -2960,6 +2974,7 @@ mod tests {
             requirements,
             vec![
                 (CAPABILITY_LIST_CONTAINERS, vec!["containers"]),
+                (CAPABILITY_LIST_STACK_MEMBERS, vec!["containers"]),
                 (CAPABILITY_READ_LOGS, vec!["containers", "allowLogs"]),
                 (CAPABILITY_START, vec!["containers", "allowStart"]),
                 (CAPABILITY_STOP, vec!["containers", "allowStop"]),

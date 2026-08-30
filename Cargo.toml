@@ -1,6 +1,11 @@
 [workspace]
 resolver = "2"
-members = ["crates/core", "crates/connector-docker", "crates/web-backend"]
+members = [
+    "crates/core",
+    "crates/connector-docker",
+    "crates/connector-test-kit",
+    "crates/web-backend",
+]
 
 [workspace.package]
 edition = "2021"
@@ -11,6 +16,8 @@ rust-version = "1.82"
 [workspace.dependencies]
 loom-core = { path = "crates/core" }
 loom-connector-docker = { path = "crates/connector-docker" }
+# Test-only reusable assertions for every implementation of Core's connector contract.
+loom-connector-test-kit = { path = "crates/connector-test-kit" }
 # Authenticated encryption for connector configuration fields marked sensitive.
 aes-gcm = "0.10"
 # Stable text encoding for persisted encryption keys and nonce/ciphertext blobs.

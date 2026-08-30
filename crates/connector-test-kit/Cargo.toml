@@ -1,0 +1,14 @@
+[package]
+name = "loom-connector-test-kit"
+description = "Reusable contract assertions for Loom connector implementations."
+edition.workspace = true
+license.workspace = true
+version = "0.1.0"
+publish = false
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+loom-core.workspace = true
+# Connector contract checks await live async methods under each consumer's test runtime.
+tokio.workspace = true

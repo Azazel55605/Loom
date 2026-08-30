@@ -1524,12 +1524,15 @@ mod tests {
         assert_eq!(healthy["reachable"], true);
         assert_eq!(healthy["message"], serde_json::Value::Null);
         let capabilities = healthy["capabilities"].as_array().expect("capabilities");
-        assert_eq!(capabilities.len(), 3);
+        assert_eq!(capabilities.len(), 4);
         assert!(capabilities.iter().any(|capability| {
             capability["key"] == "read-status" && capability["available"] == true
         }));
         assert!(capabilities.iter().any(|capability| {
             capability["key"] == "perform-actions" && capability["available"] == false
+        }));
+        assert!(capabilities.iter().any(|capability| {
+            capability["key"] == "view-gadgets" && capability["available"] == true
         }));
 
         let (status, failing) = send(

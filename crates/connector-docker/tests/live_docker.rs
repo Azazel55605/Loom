@@ -48,8 +48,9 @@ use loom_connector_docker::{
     DATA_POINT_RUNNING_CONTAINERS, DATA_POINT_STATUS, DATA_POINT_STOPPED_CONTAINERS,
     DATA_POINT_TOTAL_CONTAINERS, DATA_POINT_TOTAL_IMAGES, DATA_POINT_UPTIME, DEFAULT_DOCKER_HOST,
     RESOURCE_KIND_IMAGES, RESOURCE_KIND_LOGS, RESOURCE_KIND_NETWORKS, RESOURCE_KIND_VOLUMES,
-    SUB_TARGET_KIND_CONTAINER,
+    SUB_TARGET_KIND_CONTAINER, SUB_TARGET_KIND_STACK,
 };
+use loom_connector_test_kit::assert_connector_contract;
 use loom_core::connector::{Connector, ConnectorError, HealthState};
 use serde_json::json;
 
@@ -293,6 +294,41 @@ async fn start_test_container(docker: &Docker, suffix: &str) -> TestContainer {
         .expect("starting the test container must succeed");
 
     guard
+}
+
+#[tokio::test]
+async fn live_docker_connector_obeys_the_public_connector_contract() {
+    let test_name = "live_docker_connector_obeys_the_public_connector_contract";
+    let Some(docker) = docker_or_skip(test_name).await else {
+        return;
+    };
+    let container = start_test_container(&docker, "contract").await;
+    let connector = DockerConnector::connect(config_for(&container.name))
+        .await
+        .expect("the already-reachable daemon must build");
+
+    let sub_targets = connector
+        .list_sub_targets()
+        .await
+        .expect("the live daemon must enumerate sub-targets");
+    let container_target = sub_targets
+        .iter()
+        .find(|target| target.kind == SUB_TARGET_KIND_CONTAINER && target.id == container.name)
+        .unwrap_or_else(|| {
+            panic!(
+                "the live Docker fixture container `{}` was not enumerated",
+                container.name
+            )
+        });
+    let mut known_targets = vec![None, Some(container_target.id.clone())];
+    if let Some(stack) = sub_targets
+        .iter()
+        .find(|target| target.kind == SUB_TARGET_KIND_STACK)
+    {
+        known_targets.push(Some(stack.id.clone()));
+    }
+
+    assert_connector_contract(&connector, &known_targets).await;
 }
 
 fn config_for(_name: &str) -> DockerConnectorConfig {

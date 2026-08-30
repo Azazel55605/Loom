@@ -3,7 +3,7 @@ name = "loom-core"
 description = "Shared library for Loom: connector logic, business logic, and (later) the shared UI kit."
 edition.workspace = true
 license.workspace = true
-version = "0.2.3"
+version = "0.2.4"
 repository.workspace = true
 rust-version.workspace = true
 
@@ -16,3 +16,6 @@ thiserror.workspace = true
 # Only for `tokio::time::sleep`, which `DebugConnector` needs to simulate
 # latency; core spawns nothing and owns no runtime.
 tokio.workspace = true
+
+[dev-dependencies]
+loom-connector-test-kit.workspace = true

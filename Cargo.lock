@@ -1244,12 +1244,13 @@ checksum = "0ceec5bc11778974d1bcb055b18002eba7f4b3518b6a0081b3af5f21666da9ad"
 
 [[package]]
 name = "loom-connector-docker"
-version = "0.4.2"
+version = "0.4.3"
 dependencies = [
  "async-trait",
  "bollard",
  "chrono",
  "futures-util",
+ "loom-connector-test-kit",
  "loom-core",
  "reqwest",
  "serde",
@@ -1258,11 +1259,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "loom-connector-test-kit"
+version = "0.1.0"
+dependencies = [
+ "loom-core",
+ "tokio",
+]
+
+[[package]]
 name = "loom-core"
-version = "0.2.3"
+version = "0.2.4"
 dependencies = [
  "async-trait",
  "chrono",
+ "loom-connector-test-kit",
  "serde",
  "serde_json",
  "thiserror",
@@ -1271,7 +1281,7 @@ dependencies = [
 
 [[package]]
 name = "loom-web-backend"
-version = "0.3.2"
+version = "0.3.4"
 dependencies = [
  "aes-gcm",
  "argon2",
