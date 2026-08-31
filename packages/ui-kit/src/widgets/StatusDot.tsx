@@ -64,11 +64,11 @@ export function StatusDotWidget({ label, value, config, className }: DisplayWidg
             dotClass(value, config),
           )}
         />
-        <span className="truncate text-sm font-medium" title={text}>
+        <span className="min-w-0 whitespace-normal text-sm font-medium [overflow-wrap:anywhere]">
           {text}
         </span>
       </div>
-      <span className="truncate text-xs text-muted-foreground" title={label}>
+      <span className="whitespace-normal text-xs text-muted-foreground [overflow-wrap:anywhere]">
         {label}
       </span>
     </div>

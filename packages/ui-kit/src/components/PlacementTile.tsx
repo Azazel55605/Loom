@@ -268,16 +268,11 @@ export function PlacementTile({
             />
           )}
           <div className="min-w-0">
-            <p className="truncate text-sm font-semibold leading-none" title={instance.name}>
+            <p className="whitespace-normal text-sm font-semibold leading-tight [overflow-wrap:anywhere]">
               {instance.name}
             </p>
             <p
-              className="truncate text-xs text-muted-foreground"
-              title={
-                target === null
-                  ? instance.metadata.name
-                  : `${instance.metadata.name} · ${target.text}`
-              }
+              className="whitespace-normal text-xs text-muted-foreground [overflow-wrap:anywhere]"
             >
               {instance.metadata.name}
               {target === null ? null : ` · ${target.text}`}

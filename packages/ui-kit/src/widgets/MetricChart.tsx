@@ -64,7 +64,7 @@ export function MetricChartWidget({
 }: DisplayWidgetProps & { chartType: ChartType; expanded?: boolean }) {
   return (
     <div className={cn("flex min-h-0 min-w-0 flex-col gap-1", className)}>
-      <span className="truncate text-xs text-muted-foreground" title={label}>
+      <span className="whitespace-normal text-xs text-muted-foreground [overflow-wrap:anywhere]">
         {label}
       </span>
       <div className={cn("flex-1", expanded ? "min-h-[18rem]" : "min-h-[6rem]")}>

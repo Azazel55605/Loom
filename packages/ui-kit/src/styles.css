@@ -169,19 +169,40 @@
 }
 
 @layer components {
-  /* Elevated "glass" surface. Contrast comes from the solid fallback colour,
-     never from the blur itself, so this stays legible with blur disabled. */
+  /* Solid-first surface fallbacks. Android System WebView is updated separately
+     from the app/OS and `backdrop-filter` only became Baseline in 2024; older
+     or vendor WebViews may ignore it. Keeping the base opaque prevents a
+     translucent, unblurred sheet/header from exposing visually noisy content. */
   .surface-elevated {
-    background-color: hsl(var(--card) / var(--surface-alpha));
-    backdrop-filter: blur(var(--blur-surface));
+    background-color: hsl(var(--card));
   }
 
-  /* Secondary inset surface: tab bars and the like. Solid until the blur level
-     is "extra", at which point --panel-alpha drops and it joins the effect
-     without needing a second class toggled at runtime. */
   .surface-panel {
-    background-color: hsl(var(--muted) / var(--panel-alpha));
-    backdrop-filter: blur(var(--blur-surface));
+    background-color: hsl(var(--muted));
+  }
+
+  /* Apply translucent surfaces only when the rendering engine recognizes a
+     backdrop filter. Both spellings cover Chromium/WebView and WebKit. The
+     declarations above remain the complete, legible fallback when neither is
+     supported; importantly, Extra never makes the page canvas transparent in
+     that case. */
+  @supports ((-webkit-backdrop-filter: blur(1px)) or (backdrop-filter: blur(1px))) {
+    .surface-elevated {
+      background-color: hsl(var(--card) / var(--surface-alpha));
+      -webkit-backdrop-filter: blur(var(--blur-surface));
+      backdrop-filter: blur(var(--blur-surface));
+    }
+
+    /* Secondary inset surfaces remain solid until Extra lowers --panel-alpha. */
+    .surface-panel {
+      background-color: hsl(var(--muted) / var(--panel-alpha));
+      -webkit-backdrop-filter: blur(var(--blur-surface));
+      backdrop-filter: blur(var(--blur-surface));
+    }
+
+    .blur-extra .app-canvas {
+      background-color: transparent;
+    }
   }
 
   /*
@@ -192,10 +213,6 @@
    * a gradient behind it accomplishes nothing. At the "extra" level this goes
    * transparent and the body's background plus the wash show through.
    */
-  .blur-extra .app-canvas {
-    background-color: transparent;
-  }
-
   /*
    * Something for the blur to actually blur.
    *

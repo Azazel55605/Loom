@@ -110,7 +110,7 @@ export function GaugeWidget({
           </div>
         </div>
       </div>
-      <span className="mt-1 max-w-full truncate text-xs text-muted-foreground" title={label}>
+      <span className="mt-1 max-w-full whitespace-normal text-center text-xs text-muted-foreground [overflow-wrap:anywhere]">
         {label}
       </span>
     </div>

@@ -51,15 +51,20 @@ export function StatTileWidget({
 
   return (
     <div className={cn("flex min-w-0 flex-col justify-center gap-1", className)}>
-      <div className="flex min-w-0 items-baseline gap-1">
-        <span className={cn(statTileValue({ size: resolvedSize }), "truncate")} title={text}>
+      <div className="flex min-w-0 flex-wrap items-baseline gap-x-1 gap-y-0">
+        <span
+          className={cn(
+            statTileValue({ size: resolvedSize }),
+            "min-w-0 max-w-full whitespace-normal [overflow-wrap:anywhere]",
+          )}
+        >
           {text}
         </span>
         {displayedUnit && value !== undefined ? (
           <span className="shrink-0 text-sm text-muted-foreground">{displayedUnit}</span>
         ) : null}
       </div>
-      <span className="truncate text-xs text-muted-foreground" title={label}>
+      <span className="whitespace-normal text-xs text-muted-foreground [overflow-wrap:anywhere]">
         {label}
       </span>
     </div>

@@ -13,28 +13,49 @@
 .mobile-platform body {
   box-sizing: border-box;
   min-height: 100dvh;
-  padding: var(--mobile-safe-area-top) var(--mobile-safe-area-right)
-    var(--mobile-safe-area-bottom) var(--mobile-safe-area-left);
+  padding: 0 var(--mobile-safe-area-right) var(--mobile-safe-area-bottom)
+    var(--mobile-safe-area-left);
 }
 
 .mobile-platform #root {
+  min-height: calc(100dvh - var(--mobile-safe-area-bottom));
+}
+
+/* Full-screen states do not have AppShell's header to own the top inset. Keep
+   their content inside the system bars without making the shell pay it twice. */
+.mobile-platform #root > .min-h-screen:not(.app-canvas) {
+  box-sizing: border-box;
+  min-height: calc(100dvh - var(--mobile-safe-area-bottom));
+  padding-top: calc(var(--mobile-safe-area-top) + 1.5rem);
+}
+
+/* The sticky header is the topmost painted layer, so it owns the top inset as
+   padding. Keeping `top: 0` makes its normal-flow and stuck positions use the
+   same coordinate system; offsetting both body and header made it jump into
+   the status bar as scrolling engaged. Padding also extends the glass/solid
+   surface behind the Android status icons instead of leaving a background gap. */
+.mobile-platform .app-canvas {
+  min-height: calc(100dvh - var(--mobile-safe-area-bottom));
+}
+
+.mobile-platform .app-header {
+  top: 0;
+  padding-top: var(--mobile-safe-area-top);
+}
+
+.mobile-platform .app-shell-body {
   min-height: calc(
-    100dvh - var(--mobile-safe-area-top) - var(--mobile-safe-area-bottom)
+    100dvh - 3.5rem - var(--mobile-safe-area-top) -
+      var(--mobile-safe-area-bottom)
   );
 }
 
-/* Shared full-screen states otherwise add the system-bar insets on top of a
-   full viewport and leave an unnecessary page-length overflow. */
-.mobile-platform #root > .min-h-screen {
-  min-height: calc(
-    100dvh - var(--mobile-safe-area-top) - var(--mobile-safe-area-bottom)
+.mobile-platform #app-sidebar {
+  top: calc(3.5rem + var(--mobile-safe-area-top));
+  height: calc(
+    100dvh - 3.5rem - var(--mobile-safe-area-top) -
+      var(--mobile-safe-area-bottom)
   );
-}
-
-/* Sticky positioning and Radix portals use viewport coordinates rather than
-   the body's padded content box, so they need the same inset explicitly. */
-.mobile-platform .app-canvas > header {
-  top: var(--mobile-safe-area-top);
 }
 
 .mobile-platform #mobile-app-sidebar {
@@ -66,6 +87,10 @@
     min-height: calc(
       100dvh - var(--mobile-safe-area-top) - var(--mobile-safe-area-bottom)
     );
+  }
+
+  .mobile-platform .app-shell-main {
+    padding-top: var(--mobile-safe-area-top);
   }
 
   .mobile-platform .app-shell-main > div {

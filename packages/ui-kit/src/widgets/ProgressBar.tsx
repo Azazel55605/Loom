@@ -31,11 +31,11 @@ export function ProgressBarWidget({ label, unit, value, config, className }: Dis
 
   return (
     <div className={cn("flex min-w-0 flex-col justify-center gap-2", className)}>
-      <div className="flex min-w-0 items-baseline justify-between gap-2">
-        <span className="truncate text-xs text-muted-foreground" title={label}>
+      <div className="flex min-w-0 flex-wrap items-baseline justify-between gap-x-2 gap-y-1">
+        <span className="min-w-0 whitespace-normal text-xs text-muted-foreground [overflow-wrap:anywhere]">
           {label}
         </span>
-        <span className="shrink-0 text-sm font-medium tabular-nums">
+        <span className="max-w-full text-sm font-medium tabular-nums [overflow-wrap:anywhere]">
           {reading === null ? "—" : `${Number.isInteger(reading) ? reading : reading.toFixed(1)}${unit ?? ""}`}
         </span>
       </div>

@@ -50,7 +50,7 @@ export function LogStreamWidget({ label, value, config, className, expanded = fa
 
   return (
     <div className={cn("flex min-w-0 flex-col gap-1", className)}>
-      <span className="truncate text-xs text-muted-foreground" title={label}>
+      <span className="whitespace-normal text-xs text-muted-foreground [overflow-wrap:anywhere]">
         {label}
       </span>
       <div
