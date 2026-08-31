@@ -18,7 +18,7 @@ import { Switch } from "@loom/ui-kit/components/ui/switch";
 import { useAppearance } from "@loom/ui-kit/components/AccentThemeProvider";
 
 /**
- * The three customization axes from docs/UI_GUIDELINES.md, as controls.
+ * The customization axes from docs/UI_GUIDELINES.md, as controls.
  *
  * Nothing here has a save button. Each change applies immediately and is
  * written to `localStorage` on the spot — which is the honest interaction for
@@ -36,6 +36,8 @@ export function AppearancePanel() {
     reduceMotion,
     setReduceMotion,
     systemReduceMotion,
+    density,
+    setDensity,
     reset,
   } = useAppearance();
 
@@ -69,6 +71,27 @@ export function AppearancePanel() {
                 label: "System",
                 icon: <Monitor aria-hidden="true" />,
               },
+            ]}
+          />
+        </CardContent>
+      </Card>
+
+      <Card>
+        <CardHeader>
+          <CardTitle className="text-lg">Display density</CardTitle>
+          <CardDescription>
+            Dense mode reduces spacing and text size to fit more on screen — most
+            useful on smaller displays.
+          </CardDescription>
+        </CardHeader>
+        <CardContent>
+          <SegmentedControl
+            label="Display density"
+            value={density}
+            onChange={setDensity}
+            options={[
+              { value: "comfortable", label: "Comfortable" },
+              { value: "dense", label: "Dense" },
             ]}
           />
         </CardContent>

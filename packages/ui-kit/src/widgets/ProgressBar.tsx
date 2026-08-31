@@ -35,7 +35,7 @@ export function ProgressBarWidget({ label, unit, value, config, className }: Dis
         <span className="min-w-0 whitespace-normal text-xs text-muted-foreground [overflow-wrap:anywhere]">
           {label}
         </span>
-        <span className="max-w-full text-sm font-medium tabular-nums [overflow-wrap:anywhere]">
+        <span className="max-w-full font-medium tabular-nums [font-size:calc(var(--stat-tile-font-size)*0.467)] [overflow-wrap:anywhere]">
           {reading === null ? "—" : `${Number.isInteger(reading) ? reading : reading.toFixed(1)}${unit ?? ""}`}
         </span>
       </div>

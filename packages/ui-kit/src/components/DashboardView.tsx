@@ -61,6 +61,7 @@ import type {
 } from "@loom/ui-kit/lib/api";
 import { useApiClient, useConnectorStatusSocket } from "@loom/ui-kit/lib/api-context";
 import { describeConnectorError } from "@loom/ui-kit/lib/connector-error";
+import { useAppearance } from "@loom/ui-kit/components/AccentThemeProvider";
 
 const dashboardQueryKey = (dashboardId: string) => ["dashboard", dashboardId] as const;
 
@@ -81,10 +82,17 @@ const dashboardQueryKey = (dashboardId: string) => ["dashboard", dashboardId] as
  */
 const GRID_COLS = 6;
 const GRID_ROW_HEIGHT = 110;
-const GRID_MARGIN: [number, number] = [16, 16];
 const GRID_BREAKPOINTS = { lg: 768, md: 600, sm: 420, xs: 0 } as const;
 const GRID_COLUMNS = { lg: 6, md: 4, sm: 2, xs: 1 } as const;
 type GridBreakpoint = keyof typeof GRID_BREAKPOINTS;
+
+function dashboardGridGap(): number {
+  if (typeof document === "undefined") return 16;
+  const value = Number.parseFloat(
+    getComputedStyle(document.documentElement).getPropertyValue("--dashboard-grid-gap"),
+  );
+  return Number.isFinite(value) ? value : 16;
+}
 
 const placementGridKey = (id: string) => `placement-${id}`;
 const groupGridKey = (id: string) => `group-${id}`;
@@ -258,6 +266,9 @@ export function DashboardView({
   dashboardId: string;
   onDeleted: () => void;
 }) {
+  const { density } = useAppearance();
+  const gridGap = React.useMemo(dashboardGridGap, [density]);
+  const compactGridGap = Math.min(gridGap, 12);
   const api = useApiClient();
   const queryClient = useQueryClient();
   const connectorSocket = useConnectorStatusSocket();
@@ -723,7 +734,18 @@ export function DashboardView({
               cols={GRID_COLUMNS}
               layouts={responsiveLayouts}
               rowHeight={GRID_ROW_HEIGHT}
-              margin={{ lg: GRID_MARGIN, md: GRID_MARGIN, sm: [12, 12], xs: [12, 12] }}
+              margin={{
+                lg: [gridGap, gridGap],
+                md: [gridGap, gridGap],
+                sm: [compactGridGap, compactGridGap],
+                xs: [compactGridGap, compactGridGap],
+              }}
+              containerPadding={{
+                lg: [gridGap, gridGap],
+                md: [gridGap, gridGap],
+                sm: [compactGridGap, compactGridGap],
+                xs: [compactGridGap, compactGridGap],
+              }}
               // Gates the resize grip in CSS. The library keeps rendering the
               // handle element even with resizing disabled, and a grip that
               // appears on hover and then refuses to move is worse than no grip

@@ -4,11 +4,11 @@ import { TooltipProvider } from "@loom/ui-kit/components/ui/tooltip";
 
 /**
  * Owns the customization axes from docs/UI_GUIDELINES.md — accent colour, blur,
- * and motion — plus the light/dark palette, and persists them per device.
+ * motion, and density — plus the light/dark palette, and persists them per device.
  *
  * This is the mechanism, not the policy. Each axis is a CSS custom property or
- * a root-level class defined in `index.css`; nothing downstream knows a user
- * chose it, so components respond to all three without extra wiring.
+ * a root-level class or data attribute defined in `styles.css`; nothing
+ * downstream knows a user chose it, so components respond without extra wiring.
  *
  * ## Persistence is per device, deliberately for now
  *
@@ -35,6 +35,7 @@ const ACCENT_KEY = "loom-accent-color";
 const BLUR_LEVEL_KEY = "loom-blur-level";
 const REDUCE_MOTION_KEY = "loom-reduce-motion";
 const THEME_KEY = "loom-theme";
+const DENSITY_KEY = "loom-density";
 
 /**
  * Superseded by [`BLUR_LEVEL_KEY`], read once so an existing choice survives.
@@ -53,6 +54,9 @@ export type ThemePreference = "light" | "dark" | "system";
 
 /** The palette actually in effect once `system` has been resolved. */
 export type ResolvedTheme = "light" | "dark";
+
+/** How much non-interactive information fits into a surface. */
+export type DisplayDensity = "comfortable" | "dense";
 
 /** The root class applied for each blur level. Exactly one is ever present. */
 const BLUR_CLASSES: Record<BlurLevel, string> = {
@@ -85,6 +89,9 @@ type AppearanceContextValue = {
   systemReduceMotion: boolean;
   /** What is actually applied: the stricter of the user and OS settings. */
   effectiveReduceMotion: boolean;
+  /** Non-interactive spacing and typography density. */
+  density: DisplayDensity;
+  setDensity: (density: DisplayDensity) => void;
   /** Returns every axis to its default, clearing the stored values. */
   reset: () => void;
 };
@@ -194,6 +201,15 @@ export function AccentThemeProvider({
     () => readStored(REDUCE_MOTION_KEY) === "true",
   );
 
+  const [density, setDensityState] = React.useState<DisplayDensity>(() => {
+    const stored = readStored(DENSITY_KEY) === "dense" ? "dense" : "comfortable";
+    // Density includes react-grid-layout spacing, which must be read from CSS
+    // during the first descendant render. Apply the selector before children
+    // mount so a persisted Dense choice cannot paint one Comfortable frame.
+    if (typeof document !== "undefined") document.documentElement.dataset.density = stored;
+    return stored;
+  });
+
   // Tracked live rather than read once: someone changing the OS setting while
   // the tab is open should see the switch update, not a stale answer.
   const [systemReduceMotion, setSystemReduceMotion] = React.useState(() =>
@@ -243,6 +259,10 @@ export function AccentThemeProvider({
     document.documentElement.classList.toggle("reduce-motion", reduceMotion);
   }, [reduceMotion]);
 
+  React.useEffect(() => {
+    document.documentElement.dataset.density = density;
+  }, [density]);
+
   const setAccent = React.useCallback((next: string) => {
     const value = next.trim();
     if (!isValidAccent(value)) return;
@@ -265,6 +285,12 @@ export function AccentThemeProvider({
     writeStored(REDUCE_MOTION_KEY, String(next));
   }, []);
 
+  const setDensity = React.useCallback((next: DisplayDensity) => {
+    document.documentElement.dataset.density = next;
+    setDensityState(next);
+    writeStored(DENSITY_KEY, next);
+  }, []);
+
   const reset = React.useCallback(() => {
     for (const key of [
       ACCENT_KEY,
@@ -272,6 +298,7 @@ export function AccentThemeProvider({
       LEGACY_BLUR_KEY,
       REDUCE_MOTION_KEY,
       THEME_KEY,
+      DENSITY_KEY,
     ]) {
       clearStored(key);
     }
@@ -281,6 +308,8 @@ export function AccentThemeProvider({
     );
     setReduceMotionState(false);
     setThemeState("system");
+    document.documentElement.dataset.density = "comfortable";
+    setDensityState("comfortable");
   }, [defaultAccent]);
 
   const value = React.useMemo<AppearanceContextValue>(
@@ -296,6 +325,8 @@ export function AccentThemeProvider({
       setReduceMotion,
       systemReduceMotion,
       effectiveReduceMotion,
+      density,
+      setDensity,
       reset,
     }),
     [
@@ -310,6 +341,8 @@ export function AccentThemeProvider({
       setReduceMotion,
       systemReduceMotion,
       effectiveReduceMotion,
+      density,
+      setDensity,
       reset,
     ],
   );

@@ -49,6 +49,24 @@
        turning up the effect does not make every small inset panel translucent
        at the same rate as a dialog. */
     --panel-alpha: 1;
+
+    /* Information density. These affect only non-interactive layout and type;
+       controls keep their independently declared 44px hit areas below. */
+    --stat-tile-font-size: 1.875rem;
+    --card-padding: 1.5rem;
+    --dashboard-grid-gap: 16px;
+    --table-row-padding: 0.5rem;
+    --table-cell-padding: 0.5rem;
+    --table-font-size: 0.875rem;
+  }
+
+  :root[data-density="dense"] {
+    --stat-tile-font-size: 1.125rem;
+    --card-padding: 1rem;
+    --dashboard-grid-gap: 8px;
+    --table-row-padding: 0.25rem;
+    --table-cell-padding: 0.375rem;
+    --table-font-size: 0.8125rem;
   }
 
   .dark {

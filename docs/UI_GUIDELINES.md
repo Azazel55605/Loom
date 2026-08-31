@@ -53,12 +53,12 @@ scroll horizontally inside their own region instead of widening the page.
 
 ## Customization axes
 
-All three are **user-adjustable at runtime**, not hardcoded values. Treat them
+All four are **user-adjustable at runtime**, not hardcoded values. Treat them
 as inputs to the design, not decisions inside it. Any new component must respond
-to all three without extra wiring — if a component only looks right at one
-accent color or one blur level, it is not finished.
+to all four without extra wiring — if a component only looks right at one
+accent color, one blur level, or one density, it is not finished.
 
-> **Status: implemented in web-frontend, Desktop, and Mobile.** All three now have real controls,
+> **Status: implemented in web-frontend, Desktop, and Mobile.** All four now have real controls,
 > under Settings → Appearance, driven by `AccentThemeProvider`, alongside a
 > light/dark/system palette choice. What follows describes working behavior,
 > not intent. All clients consume the same provider from `@loom/ui-kit`.
@@ -66,7 +66,7 @@ accent color or one blur level, it is not finished.
 ### Persistence is per device
 
 Preferences live in `localStorage` under `loom-accent-color`, `loom-blur-level`,
-`loom-reduce-motion`, and `loom-theme`. They therefore **do not follow a
+`loom-reduce-motion`, `loom-density`, and `loom-theme`. They therefore **do not follow a
 user to another browser or machine**, and the Appearance panel says so on screen
 rather than letting someone assume otherwise.
 
@@ -172,6 +172,22 @@ let the user override it explicitly. A component must remain legible with blur
 fully disabled — meaning contrast comes from the solid fallback color, never
 from the blur itself.
 
+### Display density
+
+**Comfortable** is the default; **Dense** reduces non-interactive whitespace and
+display typography so more dashboard and table content fits on smaller screens.
+The root `data-density` attribute selects CSS custom properties for stat-tile
+font size, card padding, dashboard-grid spacing, table row/cell padding, and
+table text size. Components consume those properties instead of branching on
+density themselves.
+
+Density must never shrink an interactive hit area. Buttons, icon buttons,
+checkboxes, switches, segmented-control options, interactive table rows, and
+dashboard resize handles retain a minimum 44 by 44 pixel target independently
+of the density properties. If a visual glyph or control stays small, its
+transparent hit area supplies the difference; table or card padding is never
+relied on to make an action reachable.
+
 ### Animation
 
 Motion should be consistent and purposeful: it explains what changed and where
@@ -204,7 +220,7 @@ silently doing nothing when clicked.
 
 ### Light and dark
 
-A fourth user-facing choice, alongside the three axes above: **Light**, **Dark**,
+A fifth user-facing choice, alongside the four axes above: **Light**, **Dark**,
 or **System**. `System` follows `prefers-color-scheme` and is the default,
 because the OS already carries an answer and opening an app in blazing white at
 night is a bad first impression nobody asked for.

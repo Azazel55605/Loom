@@ -11,9 +11,9 @@ import {
 const statTileValue = cva("font-semibold leading-none tracking-tight tabular-nums", {
   variants: {
     size: {
-      sm: "text-xl",
-      md: "text-3xl",
-      lg: "text-4xl",
+      sm: "[font-size:calc(var(--stat-tile-font-size)*0.667)]",
+      md: "[font-size:var(--stat-tile-font-size)]",
+      lg: "[font-size:calc(var(--stat-tile-font-size)*1.2)]",
     },
   },
   defaultVariants: { size: "md" },

@@ -79,31 +79,33 @@ export function GaugeWidget({
   return (
     <div className={cn(gaugeRoot({ size }), className)}>
       <div className="relative">
-      <svg
-        viewBox="0 0 100 100"
-        className="h-[var(--gauge-size)] w-[var(--gauge-size)] max-w-full"
-        role="img"
-        aria-label={`${label}: ${reading === null ? "no reading" : `${text}${unit ?? ""}`}`}
-      >
-        <path
-          d={arcPath(50, 50, radius, START_DEGREES, START_DEGREES + SWEEP_DEGREES)}
-          fill="none"
-          className="stroke-muted"
-          strokeWidth={8}
-          strokeLinecap="round"
-        />
-        <path
-          d={arcPath(50, 50, radius, START_DEGREES, START_DEGREES + SWEEP_DEGREES)}
-          fill="none"
-          className="stroke-primary transition-[stroke-dasharray]"
-          strokeWidth={8}
-          strokeLinecap="round"
-          strokeDasharray={`${trackLength * fraction} ${circumference}`}
-        />
-      </svg>
+        <svg
+          viewBox="0 0 100 100"
+          className="h-[var(--gauge-size)] w-[var(--gauge-size)] max-w-full"
+          role="img"
+          aria-label={`${label}: ${reading === null ? "no reading" : `${text}${unit ?? ""}`}`}
+        >
+          <path
+            d={arcPath(50, 50, radius, START_DEGREES, START_DEGREES + SWEEP_DEGREES)}
+            fill="none"
+            className="stroke-muted"
+            strokeWidth={8}
+            strokeLinecap="round"
+          />
+          <path
+            d={arcPath(50, 50, radius, START_DEGREES, START_DEGREES + SWEEP_DEGREES)}
+            fill="none"
+            className="stroke-primary transition-[stroke-dasharray]"
+            strokeWidth={8}
+            strokeLinecap="round"
+            strokeDasharray={`${trackLength * fraction} ${circumference}`}
+          />
+        </svg>
         <div className="pointer-events-none absolute inset-0 grid place-items-center">
           <div className="flex flex-col items-center">
-            <span className="text-xl font-semibold tabular-nums">{text}</span>
+            <span className="font-semibold tabular-nums [font-size:calc(var(--stat-tile-font-size)*0.667)]">
+              {text}
+            </span>
             {unit && reading !== null ? (
               <span className="text-xs text-muted-foreground">{unit}</span>
             ) : null}

@@ -64,7 +64,7 @@ export function StatusDotWidget({ label, value, config, className }: DisplayWidg
             dotClass(value, config),
           )}
         />
-        <span className="min-w-0 whitespace-normal text-sm font-medium [overflow-wrap:anywhere]">
+        <span className="min-w-0 whitespace-normal font-medium [font-size:calc(var(--stat-tile-font-size)*0.467)] [overflow-wrap:anywhere]">
           {text}
         </span>
       </div>

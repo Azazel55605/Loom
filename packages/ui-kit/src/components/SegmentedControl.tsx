@@ -53,7 +53,7 @@ export function SegmentedControl<T extends string>({
           key={option.value}
           value={option.value}
           className={cn(
-            "inline-flex items-center justify-center gap-2 whitespace-nowrap rounded-md px-3 py-1.5 text-sm font-medium transition-colors",
+            "inline-flex min-h-11 min-w-11 items-center justify-center gap-2 whitespace-nowrap rounded-md px-3 py-1.5 text-sm font-medium transition-colors",
             "focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring",
             // Selected reads as a raised surface, matching how `TabsTrigger`
             // shows its active state, so the two controls look related.
