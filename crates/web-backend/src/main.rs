@@ -2661,6 +2661,13 @@ mod tests {
         // does this on its next tick.
         app.connectors.poll_once().await;
 
+        // Subscribe before dispatch so the test can synchronize with the
+        // operation marker instead of hoping a wall-clock poll lands inside a
+        // short window. Detail responses call the fixture's latency-gated
+        // `actions()` method, so repeated HTTP requests are not actually
+        // sampled every 50 ms: each one takes roughly the same 600 ms as the
+        // action and can miss the marker entirely on a loaded runner.
+        let mut status_updates = app.connectors.subscribe_statuses();
         let router = app.router.clone();
         let token = access.clone();
         let restart_id = id.clone();
@@ -2676,26 +2683,30 @@ mod tests {
             .await
         });
 
-        // Polled for rather than sampled once at a fixed delay. The fixture
-        // gates *every* call on its simulated latency, including the
-        // `actions()` lookup the route makes to find out whether this action is
-        // disruptive, so the marker goes up around one latency in — and a
-        // single well-timed sleep is the kind of assertion that passes here and
-        // flakes on a loaded runner.
-        let mut during = serde_json::Value::Null;
-        for _ in 0..40 {
-            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-            let (status, body) = send(
-                &app.router,
-                get_with_auth(&format!("/connector-instances/{id}"), &bearer(&access)),
-            )
-            .await;
-            assert_eq!(status, StatusCode::OK);
-            if !body["pendingOperation"].is_null() {
-                during = body;
-                break;
+        let instance_uuid = uuid::Uuid::parse_str(&id).expect("instance id");
+        tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            loop {
+                let update = status_updates.recv().await.expect("status update");
+                if update.instance_id == instance_uuid
+                    && update.snapshot.pending_operation.is_some()
+                {
+                    break;
+                }
             }
-        }
+        })
+        .await
+        .expect("the disruptive action must publish its pending marker");
+
+        // The HTTP response captures the status snapshot before awaiting the
+        // connector's latency-gated descriptors, so it remains a faithful
+        // observation of the marker even if the action completes while the
+        // rest of the response is being assembled.
+        let (status, during) = send(
+            &app.router,
+            get_with_auth(&format!("/connector-instances/{id}"), &bearer(&access)),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
         assert_eq!(
             during["pendingOperation"]["actionLabel"], "Restart",
             "the overlay must be visible while the action runs: {during:#}"
