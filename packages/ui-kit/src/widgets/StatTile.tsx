@@ -3,7 +3,7 @@ import { cva, type VariantProps } from "class-variance-authority";
 import { Skeleton } from "@loom/ui-kit/components/ui/skeleton";
 import { cn } from "@loom/ui-kit/lib/utils";
 import {
-  formatByteReading,
+  formatNumericReading,
   formatReading,
   type DisplayWidgetProps,
 } from "@loom/ui-kit/widgets/types";
@@ -44,9 +44,9 @@ export function StatTileWidget({
   className,
   size,
 }: DisplayWidgetProps & VariantProps<typeof statTileValue>) {
-  const bytes = unit === "bytes" && typeof value === "number" ? formatByteReading(value) : null;
-  const text = bytes?.text ?? formatReading(value);
-  const displayedUnit = bytes?.unit ?? unit;
+  const numeric = typeof value === "number" ? formatNumericReading(value, unit) : null;
+  const text = numeric?.text ?? formatReading(value);
+  const displayedUnit = numeric?.unit ?? unit;
   const resolvedSize = size ?? (value === undefined || text.length > 12 ? "sm" : "md");
 
   return (

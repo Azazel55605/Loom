@@ -6,9 +6,10 @@
 //! `LOOM_TEST_TRUENAS_ALLOW_INSECURE_CERT=1` only for a self-signed test system.
 
 use loom_connector_truenas::{
-    TrueNasClient, TrueNasConnector, ACTION_START_SCRUB, DATA_POINT_AVAILABLE_BYTES,
-    DATA_POINT_CAPACITY_PERCENT, DATA_POINT_COMPRESSION_RATIO, DATA_POINT_FREE_CAPACITY_BYTES,
-    DATA_POINT_POOL_COUNT, DATA_POINT_SNAPSHOT_COUNT, DATA_POINT_STATUS,
+    TrueNasClient, TrueNasConnector, ACTION_START_SCRUB, DATA_POINT_ACTIVE_ALERT_COUNT,
+    DATA_POINT_AVAILABLE_BYTES, DATA_POINT_CAPACITY_PERCENT, DATA_POINT_COMPRESSION_RATIO,
+    DATA_POINT_FREE_CAPACITY_BYTES, DATA_POINT_POOL_COUNT, DATA_POINT_POOL_STORAGE_BREAKDOWN,
+    DATA_POINT_SNAPSHOT_COUNT, DATA_POINT_STATUS, DATA_POINT_SYSTEM_UPTIME,
     DATA_POINT_TOTAL_CAPACITY_BYTES, DATA_POINT_TRUENAS_VERSION, DATA_POINT_USED_BYTES,
     DATA_POINT_USED_CAPACITY_BYTES,
 };
@@ -89,6 +90,7 @@ async fn a_real_truenas_lists_and_reads_pool_and_dataset_targets() {
             "{test_name}: pool={} status={} capacityPercent={}",
             pool.label, state, capacity
         );
+        assert!(status.target_health.contains_key(&pool.id));
     }
     for dataset in datasets {
         let used = required_target_value(&status, &dataset.id, DATA_POINT_USED_BYTES);
@@ -99,6 +101,7 @@ async fn a_real_truenas_lists_and_reads_pool_and_dataset_targets() {
             "{test_name}: dataset={} usedBytes={} availableBytes={} compressionRatio={} snapshotCount={}",
             dataset.label, used, available, compression, snapshots
         );
+        assert!(status.target_health.contains_key(&dataset.id));
     }
 }
 
@@ -206,28 +209,44 @@ async fn a_real_truenas_maps_host_level_connector_readings() {
         HealthState::Healthy | HealthState::Degraded
     ));
 
-    let details = status
-        .details
-        .as_object()
-        .expect("connector status details should be an object");
-    let pool_count = required_u64(details, DATA_POINT_POOL_COUNT);
-    let total = required_u64(details, DATA_POINT_TOTAL_CAPACITY_BYTES);
-    let used = required_u64(details, DATA_POINT_USED_CAPACITY_BYTES);
-    let free = required_u64(details, DATA_POINT_FREE_CAPACITY_BYTES);
-    let version = details
-        .get(DATA_POINT_TRUENAS_VERSION)
-        .and_then(Value::as_str)
+    let pool_count = required_host_value(&status, DATA_POINT_POOL_COUNT)
+        .as_u64()
+        .expect("poolCount must be an unsigned integer");
+    let total = required_host_value(&status, DATA_POINT_TOTAL_CAPACITY_BYTES)
+        .as_u64()
+        .expect("totalCapacityBytes must be an unsigned integer");
+    let used = required_host_value(&status, DATA_POINT_USED_CAPACITY_BYTES)
+        .as_u64()
+        .expect("usedCapacityBytes must be an unsigned integer");
+    let free = required_host_value(&status, DATA_POINT_FREE_CAPACITY_BYTES)
+        .as_u64()
+        .expect("freeCapacityBytes must be an unsigned integer");
+    let version = required_host_value(&status, DATA_POINT_TRUENAS_VERSION)
+        .as_str()
         .filter(|value| !value.is_empty())
         .expect("truenasVersion must be a non-empty string");
+    let uptime = required_host_value(&status, DATA_POINT_SYSTEM_UPTIME)
+        .as_str()
+        .filter(|value| !value.is_empty())
+        .expect("systemUptime must be a non-empty string");
+    let breakdown = required_host_value(&status, DATA_POINT_POOL_STORAGE_BREAKDOWN)
+        .as_array()
+        .expect("poolStorageBreakdown must be an array");
+    assert_eq!(breakdown.len(), pool_count as usize);
+    let alerts = required_host_value(&status, DATA_POINT_ACTIVE_ALERT_COUNT);
+    assert!(alerts.is_u64() || alerts.is_null());
+    assert_eq!(status.target_health.get(""), Some(&status.health));
 
     eprintln!(
-        "{test_name}: poolCount={pool_count}, totalCapacityBytes={total}, usedCapacityBytes={used}, freeCapacityBytes={free}, truenasVersion={version}"
+        "{test_name}: poolCount={pool_count}, totalCapacityBytes={total}, usedCapacityBytes={used}, freeCapacityBytes={free}, truenasVersion={version}, uptime={uptime}"
     );
 }
 
-fn required_u64(details: &serde_json::Map<String, Value>, key: &str) -> u64 {
-    details
-        .get(key)
-        .and_then(Value::as_u64)
-        .unwrap_or_else(|| panic!("{key} must be a non-null unsigned integer"))
+fn required_host_value<'a>(
+    status: &'a loom_core::connector::ConnectorStatus,
+    key: &str,
+) -> &'a Value {
+    status
+        .data_point_value_for(None, key)
+        .unwrap_or_else(|| panic!("{key} must be populated"))
 }

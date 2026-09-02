@@ -3410,6 +3410,10 @@ print_wire_shapes`.
 ```json
 {
   "health": "degraded",
+  "targetHealth": {
+    "": "degraded",
+    "fixture-a": "healthy"
+  },
   "details": {
     "": {
       "load": 62.5,
@@ -3430,6 +3434,7 @@ print_wire_shapes`.
 | Field | JSON type | Meaning | Nullability |
 | --- | --- | --- | --- |
 | `health` | string | One of `"healthy"`, `"degraded"`, `"down"`, `"unknown"`. | Always present. |
+| `targetHealth` | object | Health keyed exactly like `details`: `""` for the host/aggregate view and sub-target ids for addressable targets. Clients fall back to aggregate `health` when a key is absent. | Always present in new responses; `{}` is valid and older serialized values without the field deserialize as empty. |
 | `details` | object | Readings nested first by target and then by `DataPointDescriptor.id`. The empty-string key `""` is the host/aggregate sentinel; every other key is a sub-target id. | Always present; `{}` only for a connector with no data points and nothing else to report. |
 | `lastChecked` | string | RFC 3339 UTC, `Z`-suffixed. When the reading was actually taken. | Always present. |
 
@@ -3450,6 +3455,11 @@ without collisions.
 | `"string"` | a JSON string |
 | `"bool"` | a JSON boolean |
 | `"timeSeries"` | a JSON array of `{ "timestamp": <RFC 3339>, "value": <number> }` objects, **oldest first** |
+| `"categoryBreakdown"` | a JSON array of `{ "label": <string>, "value": <number> }` objects, for one bar or pie slice per named category |
+
+A descriptor whose `unit` is `"bytes"` keeps a raw byte number on the wire.
+Every compatible numeric widget scales that value for presentation (for
+example `8954870480896` as `8.15 TiB`); connectors must not pre-scale it.
 
 A connector may include extra keys that are not data points — a version string,
 a queue depth — and a client that does not recognise one ignores it. What it may
@@ -3623,8 +3633,8 @@ shell, and stored configuration is exactly where credentials live.
 | `id` | string | Stable machine identifier, and the second-level key under its target in `status.details`. Stored in saved layouts, so it must not change when the label does. | Always present. |
 | `targetId` | string | Addressed sub-target for this descriptor. | `null` for a host/aggregate data point. |
 | `label` | string | Human-facing name for a caption or legend entry. | Always present. |
-| `valueType` | string | One of `"number"`, `"string"`, `"bool"`, `"timeSeries"`. Constrains which widgets may render it. | Always present. |
-| `unit` | string | Display suffix (`"%"`, `"MiB"`, `"ms"`). A display concern only — the value is never scaled. | Serialized as **`null`** for a dimensionless value. |
+| `valueType` | string | One of `"number"`, `"string"`, `"bool"`, `"timeSeries"`, `"categoryBreakdown"`. Constrains which widgets may render it. | Always present. |
+| `unit` | string | Display unit (`"%"`, `"bytes"`, `"ms"`). A display concern only — the wire value is never scaled. `"bytes"` is rendered in an appropriate binary unit by every numeric widget. | Serialized as **`null`** for a dimensionless value. |
 
 **Descriptors, not readings.** The current values arrive separately, in
 `status.details`, keyed by target and then `id`. That split is what lets a dashboard be laid out

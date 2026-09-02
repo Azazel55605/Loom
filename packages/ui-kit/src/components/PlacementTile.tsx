@@ -198,6 +198,21 @@ export function PlacementTile({
     pendingOperation: live === undefined ? instance.pendingOperation : live.pendingOperation,
     diagnosis: live === undefined ? instance.diagnosis : live.diagnosis,
   });
+  const targetHealth =
+    placement.targetId === null ? undefined : status?.targetHealth?.[placement.targetId];
+  // Per-target health changes only the header badge. Action availability must
+  // continue to follow the connector-level transport state: a stopped Docker
+  // container is correctly `down`, but its Start action must remain usable.
+  const badgeAvailability =
+    targetHealth === undefined || status === null
+      ? availability
+      : connectorAvailability({
+          status: { ...status, health: targetHealth },
+          statusError,
+          pendingOperation:
+            live === undefined ? instance.pendingOperation : live.pendingOperation,
+          diagnosis: live === undefined ? instance.diagnosis : live.diagnosis,
+        });
   // Derived from the id alone — no fetch. A header that had to load the
   // sub-target list to render its own title would put a request, a loading
   // state and a failure state on a dashboard that already has what it needs.
@@ -294,7 +309,7 @@ export function PlacementTile({
               onCheckedChange={(checked) => onSelectedChange?.(checked === true)}
             />
           ) : null}
-          <ConnectorStatusBadge availability={availability} />
+          <ConnectorStatusBadge availability={badgeAvailability} />
           {grouping ? null : editing ? (
             <>
               {groupMember !== undefined ? (

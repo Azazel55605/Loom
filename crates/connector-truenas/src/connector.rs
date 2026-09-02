@@ -1,13 +1,14 @@
 //! TrueNAS host, pool, and dataset connector surface.
 
-use std::sync::Mutex;
+use std::{collections::HashMap, sync::Mutex};
 
 use async_trait::async_trait;
 use futures_util::future::join_all;
 use loom_core::connector::{
-    details::set_detail, ActionResult, ActionWidgetType, ConnectorAction, ConnectorError,
-    ConnectorMetadata, ConnectorStatus, DataPointDescriptor, DataPointValueType, DisplayField,
-    DisplayWidgetType, HealthState, NetworkTarget, SubTarget, WidgetBinding, WidgetLayout,
+    details::set_detail, ActionResult, ActionWidgetType, ChartType, ConnectorAction,
+    ConnectorError, ConnectorMetadata, ConnectorStatus, DataPointDescriptor, DataPointValueType,
+    DisplayField, DisplayWidgetType, HealthState, NetworkTarget, SubTarget, WidgetBinding,
+    WidgetLayout,
 };
 use serde_json::{json, Map, Value};
 
@@ -22,6 +23,9 @@ pub const DATA_POINT_TOTAL_CAPACITY_BYTES: &str = "totalCapacityBytes";
 pub const DATA_POINT_USED_CAPACITY_BYTES: &str = "usedCapacityBytes";
 pub const DATA_POINT_FREE_CAPACITY_BYTES: &str = "freeCapacityBytes";
 pub const DATA_POINT_TRUENAS_VERSION: &str = "truenasVersion";
+pub const DATA_POINT_POOL_STORAGE_BREAKDOWN: &str = "poolStorageBreakdown";
+pub const DATA_POINT_ACTIVE_ALERT_COUNT: &str = "activeAlertCount";
+pub const DATA_POINT_SYSTEM_UPTIME: &str = "systemUptime";
 pub const DATA_POINT_STATUS: &str = "status";
 pub const DATA_POINT_USED_BYTES: &str = "usedBytes";
 pub const DATA_POINT_FREE_BYTES: &str = "freeBytes";
@@ -36,6 +40,7 @@ const METHOD_POOL_QUERY: &str = "pool.query";
 const METHOD_DATASET_QUERY: &str = "pool.dataset.query";
 const METHOD_SNAPSHOT_COUNT: &str = "pool.dataset.snapshot_count";
 const METHOD_POOL_SCRUB: &str = "pool.scrub.scrub";
+const METHOD_ALERT_LIST: &str = "alert.list";
 
 /// One configured and authenticated TrueNAS host.
 #[derive(Debug)]
@@ -79,11 +84,12 @@ impl TrueNasConnector {
     async fn read_inventory(&self) -> Result<InventoryReadings, String> {
         // These methods are independent and the transport correlates concurrent
         // JSON-RPC calls, so one slow inventory query need not delay the rest.
-        let (system, pools, datasets) = tokio::join!(
+        let (system, pools, datasets, alerts) = tokio::join!(
             self.client.call(METHOD_SYSTEM_INFO, json!([])),
             self.client.call(METHOD_POOL_QUERY, json!([])),
             self.client
                 .call(METHOD_DATASET_QUERY, dataset_query_params()),
+            self.client.call(METHOD_ALERT_LIST, json!([])),
         );
         // Host identity and pool health are the connector's availability
         // boundary. Dataset telemetry enriches that reading, but an API key
@@ -103,6 +109,19 @@ impl TrueNasConnector {
             Err(error) => {
                 warnings.push(format!("{METHOD_DATASET_QUERY} failed: {error}"));
                 Vec::new()
+            }
+        };
+        let active_alert_count = match alerts {
+            Ok(value) => match map_active_alert_count(value) {
+                Ok(count) => Some(count),
+                Err(error) => {
+                    warnings.push(error);
+                    None
+                }
+            },
+            Err(error) => {
+                warnings.push(format!("{METHOD_ALERT_LIST} failed: {error}"));
+                None
             }
         };
 
@@ -132,6 +151,7 @@ impl TrueNasConnector {
             host,
             pools,
             datasets,
+            active_alert_count,
             warnings,
         };
         self.remember_targets(inventory.sub_targets());
@@ -184,9 +204,28 @@ impl loom_core::connector::Connector for TrueNasConnector {
                 json!(inventory.host.free_capacity_bytes),
             ),
             (DATA_POINT_TRUENAS_VERSION, json!(inventory.host.version)),
+            (DATA_POINT_SYSTEM_UPTIME, json!(inventory.host.uptime)),
+            (
+                DATA_POINT_POOL_STORAGE_BREAKDOWN,
+                Value::Array(
+                    inventory
+                        .pools
+                        .iter()
+                        .map(|pool| json!({ "label": pool.name, "value": pool.used_bytes }))
+                        .collect(),
+                ),
+            ),
         ] {
             set_detail(&mut details, None, id, value);
         }
+        set_detail(
+            &mut details,
+            None,
+            DATA_POINT_ACTIVE_ALERT_COUNT,
+            inventory
+                .active_alert_count
+                .map_or(Value::Null, Value::from),
+        );
 
         // Known trade-off: every poll reads every pool and dataset, including a
         // snapshot count per dataset, whether or not a placement displays it.
@@ -233,7 +272,25 @@ impl loom_core::connector::Connector for TrueNasConnector {
             );
         }
 
-        Ok(ConnectorStatus::new(inventory.health(), details))
+        let health = inventory.health();
+        let mut target_health = HashMap::from([(String::new(), health)]);
+        for pool in &inventory.pools {
+            target_health.insert(pool_target_id(&pool.name), pool_health(&pool.status));
+        }
+        for dataset in &inventory.datasets {
+            target_health.insert(
+                dataset_target_id(&dataset.path),
+                if dataset.snapshot_count.is_some() {
+                    HealthState::Healthy
+                } else {
+                    HealthState::Degraded
+                },
+            );
+        }
+
+        let mut status = ConnectorStatus::new(health, details);
+        status.target_health = target_health;
+        Ok(status)
     }
 
     async fn actions(&self) -> Vec<ConnectorAction> {
@@ -304,9 +361,11 @@ impl loom_core::connector::Connector for TrueNasConnector {
     }
 
     fn data_points(&self) -> Vec<DataPointDescriptor> {
-        // `system.info.physmem` is total installed RAM, not usage, and
-        // `loadavg` is not a CPU percentage. Neither is mislabeled as the
-        // requested utilization reading in this minimal pass.
+        // `system.info` is already part of the cheap host poll and supplies
+        // uptime. Its `physmem` is total installed RAM, not usage, and
+        // `loadavg` is scheduler load rather than CPU percentage. True CPU and
+        // memory utilization require separate reporting calls, so neither is
+        // mislabeled as `cpuPercent`/`memoryUsageBytes` here.
         let targets = self
             .known_targets
             .lock()
@@ -331,6 +390,14 @@ impl loom_core::connector::Connector for TrueNasConnector {
             WidgetBinding::display(DATA_POINT_POOL_COUNT, DisplayWidgetType::StatTile),
             WidgetBinding::display(DATA_POINT_TOTAL_CAPACITY_BYTES, DisplayWidgetType::StatTile),
             WidgetBinding::display(DATA_POINT_TRUENAS_VERSION, DisplayWidgetType::StatTile),
+            WidgetBinding::display(DATA_POINT_ACTIVE_ALERT_COUNT, DisplayWidgetType::StatTile),
+            WidgetBinding::display(DATA_POINT_SYSTEM_UPTIME, DisplayWidgetType::StatTile),
+            WidgetBinding::display(
+                DATA_POINT_POOL_STORAGE_BREAKDOWN,
+                DisplayWidgetType::MetricChart {
+                    chart_type: ChartType::Bar,
+                },
+            ),
             WidgetBinding::display(
                 DATA_POINT_USED_CAPACITY_BYTES,
                 DisplayWidgetType::ProgressBar,
@@ -345,7 +412,19 @@ impl loom_core::connector::Connector for TrueNasConnector {
     fn default_layout_for(&self, target_id: Option<&str>) -> WidgetLayout {
         match target_id {
             Some(target) if target.starts_with("pool:") => WidgetLayout::new(vec![
-                WidgetBinding::display(DATA_POINT_STATUS, DisplayWidgetType::StatusDot),
+                WidgetBinding::display(DATA_POINT_STATUS, DisplayWidgetType::StatusDot)
+                    .with_config(json!({
+                        "colorMap": {
+                            "ONLINE": "healthy",
+                            "DEGRADED": "degraded",
+                            "FAULTED": "down",
+                            "OFFLINE": "down",
+                            "UNAVAIL": "down",
+                            "REMOVED": "down"
+                        }
+                    })),
+                WidgetBinding::display(DATA_POINT_USED_BYTES, DisplayWidgetType::StatTile),
+                WidgetBinding::display(DATA_POINT_FREE_BYTES, DisplayWidgetType::StatTile),
                 WidgetBinding::display(DATA_POINT_CAPACITY_PERCENT, DisplayWidgetType::ProgressBar)
                     .with_config(json!({ "min": 0, "max": 100 })),
                 WidgetBinding::action(ACTION_START_SCRUB, ActionWidgetType::Button),
@@ -391,6 +470,22 @@ fn host_data_points() -> Vec<DataPointDescriptor> {
         DataPointDescriptor::new(
             DATA_POINT_TRUENAS_VERSION,
             "TrueNAS version",
+            DataPointValueType::String,
+        ),
+        DataPointDescriptor::new(
+            DATA_POINT_POOL_STORAGE_BREAKDOWN,
+            "Used storage by pool",
+            DataPointValueType::CategoryBreakdown,
+        )
+        .with_unit("bytes"),
+        DataPointDescriptor::new(
+            DATA_POINT_ACTIVE_ALERT_COUNT,
+            "Active alerts",
+            DataPointValueType::Number,
+        ),
+        DataPointDescriptor::new(
+            DATA_POINT_SYSTEM_UPTIME,
+            "System uptime",
             DataPointValueType::String,
         ),
     ]
@@ -458,6 +553,7 @@ fn pool_scrub_action(target_id: &str) -> ConnectorAction {
 #[derive(Debug, PartialEq, Eq)]
 struct HostReadings {
     version: String,
+    uptime: String,
     pool_count: u64,
     total_capacity_bytes: u64,
     used_capacity_bytes: u64,
@@ -488,6 +584,7 @@ struct InventoryReadings {
     host: HostReadings,
     pools: Vec<PoolReadings>,
     datasets: Vec<DatasetReadings>,
+    active_alert_count: Option<u64>,
     warnings: Vec<String>,
 }
 
@@ -519,6 +616,7 @@ fn map_host_readings_from_pools(
     pools: &[PoolReadings],
 ) -> Result<HostReadings, String> {
     let version = required_string(&system, "version", METHOD_SYSTEM_INFO)?.to_owned();
+    let uptime = required_string(&system, "uptime", METHOD_SYSTEM_INFO)?.to_owned();
     // Hostname is a required system.info field in the stable schema. Validate
     // it even though this minimal dashboard does not yet publish it as a data
     // point, so a response from the wrong method shape cannot look healthy.
@@ -535,6 +633,7 @@ fn map_host_readings_from_pools(
 
     Ok(HostReadings {
         version,
+        uptime,
         pool_count: pools.len() as u64,
         total_capacity_bytes,
         used_capacity_bytes,
@@ -637,6 +736,17 @@ fn dataset_query_params() -> Value {
     }])
 }
 
+fn map_active_alert_count(value: Value) -> Result<u64, String> {
+    let alerts = value
+        .as_array()
+        .ok_or_else(|| format!("{METHOD_ALERT_LIST} did not return an array"))?;
+    let active = alerts
+        .iter()
+        .filter(|alert| alert.get("dismissed").and_then(Value::as_bool) == Some(false))
+        .count();
+    u64::try_from(active).map_err(|_| "TrueNAS alert count exceeded the supported range".to_owned())
+}
+
 fn sub_targets(pools: &[PoolReadings], datasets: &[DatasetReadings]) -> Vec<SubTarget> {
     pools
         .iter()
@@ -712,11 +822,15 @@ fn unavailable_status(reason: &str) -> ConnectorStatus {
         (DATA_POINT_USED_CAPACITY_BYTES, json!(0)),
         (DATA_POINT_FREE_CAPACITY_BYTES, json!(0)),
         (DATA_POINT_TRUENAS_VERSION, json!("unavailable")),
+        (DATA_POINT_POOL_STORAGE_BREAKDOWN, json!([])),
+        (DATA_POINT_ACTIVE_ALERT_COUNT, json!(0)),
+        (DATA_POINT_SYSTEM_UPTIME, json!("unavailable")),
         ("error", json!(reason)),
     ] {
         set_detail(&mut details, None, id, value);
     }
     ConnectorStatus::new(HealthState::Down, details)
+        .with_target_health(String::new(), HealthState::Down)
 }
 
 fn connector_error(error: TrueNasError) -> ConnectorError {
@@ -746,7 +860,8 @@ mod tests {
         let readings = map_host_readings(
             json!({
                 "version": "TrueNAS-SCALE-25.10.0",
-                "hostname": "nas"
+                "hostname": "nas",
+                "uptime": "3 days, 04:05:06"
             }),
             json!([
                 { "name": "tank", "status": "ONLINE", "size": 1000, "allocated": 400, "free": 600 },
@@ -759,6 +874,7 @@ mod tests {
             readings,
             HostReadings {
                 version: "TrueNAS-SCALE-25.10.0".to_owned(),
+                uptime: "3 days, 04:05:06".to_owned(),
                 pool_count: 2,
                 total_capacity_bytes: 3000,
                 used_capacity_bytes: 1150,
@@ -770,7 +886,7 @@ mod tests {
     #[test]
     fn nullable_capacity_fields_contribute_zero_without_hiding_the_pool() {
         let readings = map_host_readings(
-            json!({ "version": "25.10", "hostname": "nas" }),
+            json!({ "version": "25.10", "hostname": "nas", "uptime": "1 day" }),
             json!([{ "name": "tank", "status": "ONLINE", "size": null, "allocated": null, "free": null }]),
         )
         .expect("nullable fields are documented");
@@ -786,6 +902,9 @@ mod tests {
             DATA_POINT_USED_CAPACITY_BYTES,
             DATA_POINT_FREE_CAPACITY_BYTES,
             DATA_POINT_TRUENAS_VERSION,
+            DATA_POINT_POOL_STORAGE_BREAKDOWN,
+            DATA_POINT_ACTIVE_ALERT_COUNT,
+            DATA_POINT_SYSTEM_UPTIME,
         ];
         let layout = WidgetLayout::new(vec![
             WidgetBinding::display(DATA_POINT_POOL_COUNT, DisplayWidgetType::StatTile),
@@ -835,6 +954,19 @@ mod tests {
         assert_eq!(pool_health("FAULTED"), HealthState::Down);
         assert_eq!(pool_health("OFFLINE"), HealthState::Down);
         assert_eq!(pool_health("future-state"), HealthState::Unknown);
+    }
+
+    #[test]
+    fn only_non_dismissed_alerts_count_as_active() {
+        assert_eq!(
+            map_active_alert_count(json!([
+                { "id": "active", "dismissed": false },
+                { "id": "dismissed", "dismissed": true }
+            ]))
+            .unwrap(),
+            1
+        );
+        assert!(map_active_alert_count(json!({})).is_err());
     }
 
     #[test]
@@ -898,6 +1030,7 @@ mod tests {
         let inventory = InventoryReadings {
             host: HostReadings {
                 version: "25.10".to_owned(),
+                uptime: "1 day".to_owned(),
                 pool_count: 1,
                 total_capacity_bytes: 100,
                 used_capacity_bytes: 25,
@@ -912,6 +1045,7 @@ mod tests {
                 capacity_percent: 25.0,
             }],
             datasets: Vec::new(),
+            active_alert_count: None,
             warnings: vec!["pool.dataset.query failed: permission denied".to_owned()],
         };
 
@@ -923,6 +1057,7 @@ mod tests {
         let inventory = InventoryReadings {
             host: HostReadings {
                 version: "25.10".to_owned(),
+                uptime: "1 day".to_owned(),
                 pool_count: 1,
                 total_capacity_bytes: 100,
                 used_capacity_bytes: 25,
@@ -937,6 +1072,7 @@ mod tests {
                 capacity_percent: 25.0,
             }],
             datasets: Vec::new(),
+            active_alert_count: Some(0),
             warnings: vec!["snapshot count unavailable".to_owned()],
         };
 

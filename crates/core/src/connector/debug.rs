@@ -1613,6 +1613,9 @@ mod tests {
                             .expect("the sample timestamp must be ISO 8601");
                     }
                 }
+                DataPointValueType::CategoryBreakdown => {
+                    panic!("the DebugConnector does not declare category breakdown data")
+                }
             }
         }
     }
@@ -1632,7 +1635,7 @@ mod tests {
         assert_eq!(
             types.len(),
             4,
-            "the fixture must exercise all four value types"
+            "the fixture must exercise its four existing scalar/time-series value types"
         );
 
         assert!(points.iter().all(|p| !p.label.is_empty()));

@@ -9,11 +9,12 @@ mod connector;
 
 pub use config::{config_schema, TrueNasConnectorConfig};
 pub use connector::{
-    TrueNasConnector, ACTION_START_SCRUB, DATA_POINT_AVAILABLE_BYTES, DATA_POINT_CAPACITY_PERCENT,
-    DATA_POINT_COMPRESSION_RATIO, DATA_POINT_FREE_BYTES, DATA_POINT_FREE_CAPACITY_BYTES,
-    DATA_POINT_POOL_COUNT, DATA_POINT_SNAPSHOT_COUNT, DATA_POINT_STATUS,
-    DATA_POINT_TOTAL_CAPACITY_BYTES, DATA_POINT_TRUENAS_VERSION, DATA_POINT_USED_BYTES,
-    DATA_POINT_USED_CAPACITY_BYTES, DISPLAY_NAME, ICON, TYPE_ID,
+    TrueNasConnector, ACTION_START_SCRUB, DATA_POINT_ACTIVE_ALERT_COUNT,
+    DATA_POINT_AVAILABLE_BYTES, DATA_POINT_CAPACITY_PERCENT, DATA_POINT_COMPRESSION_RATIO,
+    DATA_POINT_FREE_BYTES, DATA_POINT_FREE_CAPACITY_BYTES, DATA_POINT_POOL_COUNT,
+    DATA_POINT_POOL_STORAGE_BREAKDOWN, DATA_POINT_SNAPSHOT_COUNT, DATA_POINT_STATUS,
+    DATA_POINT_SYSTEM_UPTIME, DATA_POINT_TOTAL_CAPACITY_BYTES, DATA_POINT_TRUENAS_VERSION,
+    DATA_POINT_USED_BYTES, DATA_POINT_USED_CAPACITY_BYTES, DISPLAY_NAME, ICON, TYPE_ID,
 };
 
 use std::{collections::HashMap, fmt, sync::Arc, time::Duration};
@@ -29,7 +30,7 @@ use serde_json::{json, Value};
 use thiserror::Error;
 use tokio::{
     net::TcpStream,
-    sync::{mpsc, oneshot, watch, Mutex},
+    sync::{mpsc, oneshot, watch, Mutex, Semaphore},
     time,
 };
 use tokio_tungstenite::{
@@ -51,6 +52,7 @@ const CALL_TIMEOUT: Duration = Duration::from_secs(30);
 const RECONNECT_INITIAL_DELAY: Duration = Duration::from_secs(1);
 const RECONNECT_MAX_DELAY: Duration = Duration::from_secs(30);
 const OUTGOING_CAPACITY: usize = 128;
+const MAX_CONCURRENT_CALLS: usize = 10;
 
 type Socket = WebSocketStream<MaybeTlsStream<TcpStream>>;
 type RpcResult = Result<Value, TrueNasError>;
@@ -154,6 +156,7 @@ pub struct TrueNasClient {
     outgoing: mpsc::Sender<OutgoingCall>,
     pending: PendingRequests,
     state: watch::Receiver<ConnectionState>,
+    call_limit: Arc<Semaphore>,
 }
 
 impl fmt::Debug for TrueNasClient {
@@ -240,11 +243,18 @@ impl TrueNasClient {
             outgoing,
             pending,
             state,
+            call_limit: Arc::new(Semaphore::new(MAX_CONCURRENT_CALLS)),
         })
     }
 
     /// Sends one JSON-RPC request and awaits the response bearing the same id.
     pub async fn call(&self, method: &str, params: Value) -> RpcResult {
+        // TrueNAS correlates concurrent calls correctly, but its middleware
+        // still has finite per-session capacity. Keep one shared cap across
+        // every clone so a future per-target reader cannot flood the socket.
+        let _permit = self.call_limit.acquire().await.map_err(|_| {
+            TrueNasError::ConnectionFailed("the TrueNAS call limiter was closed".to_owned())
+        })?;
         if self.connection_state() != ConnectionState::Connected {
             return Err(TrueNasError::Disconnected);
         }

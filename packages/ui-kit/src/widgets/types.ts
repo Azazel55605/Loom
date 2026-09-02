@@ -118,6 +118,26 @@ export function readTimeSeries(value: unknown): TimeSeriesSample[] {
   return samples;
 }
 
+/** One named slice/bar in a `categoryBreakdown` reading. */
+export type CategoryBreakdownEntry = {
+  label: string;
+  value: number;
+};
+
+/** Reads a categorical reading, dropping malformed entries. */
+export function readCategoryBreakdown(value: unknown): CategoryBreakdownEntry[] {
+  if (!Array.isArray(value)) return [];
+  return value.flatMap((entry) => {
+    if (typeof entry !== "object" || entry === null) return [];
+    const candidate = entry as Partial<CategoryBreakdownEntry>;
+    return typeof candidate.label === "string" &&
+      typeof candidate.value === "number" &&
+      Number.isFinite(candidate.value)
+      ? [{ label: candidate.label, value: candidate.value }]
+      : [];
+  });
+}
+
 /** A finite number from a reading, or `null` when there is nothing usable. */
 export function readNumber(value: unknown): number | null {
   return typeof value === "number" && Number.isFinite(value) ? value : null;
@@ -158,4 +178,26 @@ export function formatByteReading(value: number): { text: string; unit: string }
     text: new Intl.NumberFormat(undefined, { maximumFractionDigits }).format(scaled),
     unit: BYTE_UNITS[exponent],
   };
+}
+
+/** Formats any numeric widget reading, scaling the API's canonical byte unit. */
+export function formatNumericReading(
+  value: number,
+  unit?: string | null,
+): { text: string; unit: string; separator: string } {
+  if (unit === "bytes") {
+    const bytes = formatByteReading(value);
+    return { ...bytes, separator: " " };
+  }
+  return {
+    text: Number.isInteger(value) ? String(value) : value.toFixed(2),
+    unit: unit ?? "",
+    separator: "",
+  };
+}
+
+/** One complete human-readable number for labels, tooltips, and accessibility. */
+export function formatNumericReadingText(value: number, unit?: string | null): string {
+  const formatted = formatNumericReading(value, unit);
+  return `${formatted.text}${formatted.separator}${formatted.unit}`;
 }

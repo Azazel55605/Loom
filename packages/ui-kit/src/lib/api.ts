@@ -55,13 +55,16 @@ export type HealthState = "healthy" | "degraded" | "down" | "unknown";
 /** How a service is doing, as of `lastChecked`. */
 export type ConnectorStatus = {
   health: HealthState;
+  /** Health for the host (`""`) and independently-addressable sub-targets. */
+  targetHealth: Record<string, HealthState>;
   /**
    * Readings nested by target key, then `DataPointDescriptor.id`.
    *
    * The empty-string target key is the host/aggregate view; every other key is
    * a sub-target id. Values follow each data point's declared `valueType` — `number` → number,
    * `string` → string, `bool` → boolean, `timeSeries` → an array of
-   * `{ timestamp, value }` objects, oldest first. A connector may add keys that
+   * `{ timestamp, value }` objects, oldest first, and `categoryBreakdown` → an
+   * array of `{ label, value }` objects. A connector may add keys that
    * are not data points (a version string, a queue depth) and a client that
    * does not recognise one ignores it. This is what a `WidgetBinding.display`
    * resolves against on every poll, which is why there is no separate
@@ -196,7 +199,12 @@ export type DisplayField = {
 };
 
 /** The shape of a data point's values, constraining which widgets can draw it. */
-export type DataPointValueType = "number" | "string" | "bool" | "timeSeries";
+export type DataPointValueType =
+  | "number"
+  | "string"
+  | "bool"
+  | "timeSeries"
+  | "categoryBreakdown";
 
 /**
  * One piece of data an instance can bind to a widget.

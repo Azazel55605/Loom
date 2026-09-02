@@ -265,7 +265,7 @@ export function AddPlacementDialog({
                     value={mode}
                     options={[
                       { value: "server", label: "Server info" },
-                      { value: "target", label: "Container / Stack" },
+                      { value: "target", label: "Specific target" },
                     ]}
                     onChange={(next) => {
                       setMode(next);
@@ -279,7 +279,7 @@ export function AddPlacementDialog({
               {mode === "target" && detail.data.supportsSubTargets ? (
                 <div className="flex min-h-0 flex-col gap-3">
                   <div>
-                    <h3 className="text-sm font-medium">Container or stack</h3>
+                    <h3 className="text-sm font-medium">Specific target</h3>
                     <p className="text-xs text-muted-foreground">
                       Choose one view inside {detail.data.metadata.name}. Its recommended
                       widgets will be added automatically.
@@ -306,8 +306,8 @@ export function AddPlacementDialog({
                       // `label` alone: the badge is a property of the row, not
                       // another thing to type at.
                       options={pickerOptions(subTargets.data)}
-                      searchLabel="Search containers and stacks"
-                      emptyMessage="No containers or stacks found"
+                      searchLabel="Search targets"
+                      emptyMessage="No targets found"
                       selectedId={targetId}
                       disabled={create.isPending}
                       onSelect={(next) => {

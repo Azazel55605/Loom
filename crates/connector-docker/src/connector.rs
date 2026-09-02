@@ -843,6 +843,9 @@ impl DockerConnector {
             ] {
                 set_detail(&mut status.details, Some(&target_id), id, value);
             }
+            status
+                .target_health
+                .insert(target_id, stack_health(running, total));
         }
     }
 
@@ -1285,6 +1288,14 @@ fn overall_status(running: usize, total: usize) -> &'static str {
     }
 }
 
+fn stack_health(running: usize, total: usize) -> HealthState {
+    match (running, total) {
+        (0, _) => HealthState::Down,
+        (running, total) if running == total => HealthState::Healthy,
+        _ => HealthState::Degraded,
+    }
+}
+
 /// Splits Docker's `timestamps=true` prefix off a log line.
 ///
 /// # Which behaviour this implements
@@ -1533,6 +1544,7 @@ impl Connector for DockerConnector {
     /// detail view, not something a user arranges on a dashboard.
     async fn status(&self) -> Result<ConnectorStatus, ConnectorError> {
         let mut status = self.host_status().await;
+        status.target_health.insert(String::new(), status.health);
         let targets = match self.list_sub_targets_live().await {
             Ok(targets) => targets,
             Err(error) => {
@@ -1555,20 +1567,21 @@ impl Connector for DockerConnector {
         // typical homelab count; target-aware polling can be revisited if this
         // becomes a demonstrated cost.
         let target_values = stream::iter(containers.into_iter().map(|target| async move {
-            let values = match self.docker.inspect_container(&target.id, None).await {
-                Ok(inspect) => self.status_from(&target.id, inspect).await.1,
-                Err(error) => {
-                    unavailable_details(&poll_failure_reason(&self.config, &target.id, &error))
-                }
+            let (health, values) = match self.docker.inspect_container(&target.id, None).await {
+                Ok(inspect) => self.status_from(&target.id, inspect).await,
+                Err(error) => (
+                    HealthState::Down,
+                    unavailable_details(&poll_failure_reason(&self.config, &target.id, &error)),
+                ),
             };
-            (target.id, values)
+            (target.id, health, values)
         }))
         .buffer_unordered(CONTAINER_POLL_CONCURRENCY)
         .collect::<Vec<_>>()
         .await;
 
         let mut readings: HashMap<String, MemberReading> = HashMap::new();
-        for (target_id, values) in target_values {
+        for (target_id, health, values) in target_values {
             // Instance health describes the daemon connection, not the
             // least-healthy container. A deliberately stopped container is a
             // valid sub-target state; its target-scoped `status` detail tells
@@ -1577,6 +1590,7 @@ impl Connector for DockerConnector {
             // A *stack's* state follows exactly the same rule, for the same
             // reason: a stopped stack is a stack somebody stopped.
             if let Value::Object(values) = values {
+                status.target_health.insert(target_id.clone(), health);
                 readings.insert(target_id.clone(), member_reading(&values));
                 for (id, value) in values {
                     set_detail(&mut status.details, Some(&target_id), &id, value);
@@ -3705,6 +3719,10 @@ mod tests {
         assert_eq!(read(DATA_POINT_STOPPED_COUNT), Some(json!(1)));
         assert_eq!(read(DATA_POINT_CPU_PERCENT), Some(json!(12.5)));
         assert_eq!(read(DATA_POINT_MEMORY_USAGE_BYTES), Some(json!(1_000.0)));
+        assert_eq!(
+            status.target_health.get("stack:shop"),
+            Some(&HealthState::Degraded)
+        );
         // One sample recorded, because something is running.
         assert_eq!(
             read(DATA_POINT_CPU_HISTORY).and_then(|value| value.as_array().map(std::vec::Vec::len)),
@@ -3740,6 +3758,10 @@ mod tests {
                 },
             )]),
             &mut status,
+        );
+        assert_eq!(
+            status.target_health.get("stack:idle"),
+            Some(&HealthState::Down)
         );
         assert_eq!(
             status

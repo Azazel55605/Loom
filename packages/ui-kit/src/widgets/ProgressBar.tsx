@@ -1,7 +1,12 @@
 import { Progress } from "@loom/ui-kit/components/ui/progress";
 import { Skeleton } from "@loom/ui-kit/components/ui/skeleton";
 import { cn } from "@loom/ui-kit/lib/utils";
-import { configNumber, readNumber, type DisplayWidgetProps } from "@loom/ui-kit/widgets/types";
+import {
+  configNumber,
+  formatNumericReadingText,
+  readNumber,
+  type DisplayWidgetProps,
+} from "@loom/ui-kit/widgets/types";
 
 export function ProgressBarSkeleton({ className }: { className?: string }) {
   return <div className={cn("space-y-2", className)}><div className="flex justify-between"><Skeleton className="h-3 w-20" /><Skeleton className="h-4 w-10" /></div><Skeleton className="h-4 w-full rounded-full" /></div>;
@@ -23,6 +28,12 @@ export function ProgressBarWidget({ label, unit, value, config, className }: Dis
   const min = configNumber(config, "min", 0);
   const max = configNumber(config, "max", 100);
   const span = max - min;
+  const readingText =
+    reading === null
+      ? "—"
+      : unit === "bytes"
+        ? formatNumericReadingText(reading, unit)
+        : `${Number.isInteger(reading) ? reading : reading.toFixed(1)}${unit ?? ""}`;
 
   const percent =
     reading === null || span <= 0
@@ -36,7 +47,7 @@ export function ProgressBarWidget({ label, unit, value, config, className }: Dis
           {label}
         </span>
         <span className="max-w-full font-medium tabular-nums [font-size:calc(var(--stat-tile-font-size)*0.467)] [overflow-wrap:anywhere]">
-          {reading === null ? "—" : `${Number.isInteger(reading) ? reading : reading.toFixed(1)}${unit ?? ""}`}
+          {readingText}
         </span>
       </div>
       <Progress
@@ -44,7 +55,7 @@ export function ProgressBarWidget({ label, unit, value, config, className }: Dis
         aria-label={label}
         // The raw reading, not the derived percentage: a screen reader should
         // hear what the connector said.
-        aria-valuetext={reading === null ? "No reading" : `${reading}${unit ?? ""}`}
+        aria-valuetext={reading === null ? "No reading" : readingText}
       />
     </div>
   );

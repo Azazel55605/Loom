@@ -86,6 +86,8 @@ const BY_VALUE_TYPE: Record<DataPointValueType, DisplayWidgetKey[]> = {
   bool: ["statusDot", "statTile"],
   // A series has exactly one home.
   timeSeries: ["metricChart"],
+  // Named categories are compared as bars or slices by the same chart widget.
+  categoryBreakdown: ["metricChart"],
 };
 
 /** The display widgets that can render a data point of this value type, most

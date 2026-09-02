@@ -523,6 +523,13 @@ pub struct SetupGuide {
 pub struct ConnectorStatus {
     /// The coarse verdict clients act on.
     pub health: HealthState,
+    /// Health for an individual addressable view. The empty-string key is the
+    /// connector-level view; every other key is a [`SubTarget::id`].
+    ///
+    /// Additive and empty by default so statuses produced before target-aware
+    /// health remain wire-compatible and clients can fall back to `health`.
+    #[serde(default)]
+    pub target_health: HashMap<String, HealthState>,
     /// The current reading for every data point, nested by target and then id.
     ///
     /// Typed as [`Value`] for serialization flexibility, but the shape is not
@@ -568,9 +575,17 @@ impl ConnectorStatus {
     pub fn new(health: HealthState, details: Value) -> Self {
         Self {
             health,
+            target_health: HashMap::new(),
             details,
             last_checked: Utc::now(),
         }
+    }
+
+    /// Records the health of one target and returns the enriched status.
+    #[must_use]
+    pub fn with_target_health(mut self, target_id: impl Into<String>, health: HealthState) -> Self {
+        self.target_health.insert(target_id.into(), health);
+        self
     }
 
     /// The current value of one data point, or `None` if this reading has no
@@ -941,6 +956,13 @@ pub enum DataPointValueType {
     Bool,
     /// An ordered run of recent numeric readings, oldest first.
     TimeSeries,
+    /// Several named numeric readings carried by one data point.
+    ///
+    /// Values are arrays of `{ "label": string, "value": number }` objects.
+    /// This is intended for Bar/Pie [`DisplayWidgetType::MetricChart`]
+    /// bindings: pool capacity by pool today, and similar per-interface or
+    /// per-share breakdowns in future connectors.
+    CategoryBreakdown,
 }
 
 /// One piece of data an instance can expose to a widget.
@@ -2001,6 +2023,10 @@ mod tests {
     fn connector_status_serializes_with_camel_case_keys() {
         let status = ConnectorStatus {
             health: HealthState::Degraded,
+            target_health: HashMap::from([
+                (String::new(), HealthState::Degraded),
+                ("fixture-a".to_owned(), HealthState::Healthy),
+            ]),
             details: json!({ "queueDepth": 12 }),
             last_checked: Utc.with_ymd_and_hms(2026, 8, 19, 12, 0, 0).unwrap(),
         };
@@ -2010,6 +2036,10 @@ mod tests {
             value,
             json!({
                 "health": "degraded",
+                "targetHealth": {
+                    "": "degraded",
+                    "fixture-a": "healthy"
+                },
                 "details": { "queueDepth": 12 },
                 "lastChecked": "2026-08-19T12:00:00Z"
             })
@@ -2017,6 +2047,22 @@ mod tests {
         assert_eq!(
             serde_json::from_value::<ConnectorStatus>(value).unwrap(),
             status
+        );
+
+        let legacy = serde_json::from_value::<ConnectorStatus>(json!({
+            "health": "healthy",
+            "details": {},
+            "lastChecked": "2026-08-19T12:00:00Z"
+        }))
+        .unwrap();
+        assert!(legacy.target_health.is_empty());
+    }
+
+    #[test]
+    fn category_breakdown_uses_the_documented_wire_name() {
+        assert_eq!(
+            serde_json::to_value(DataPointValueType::CategoryBreakdown).unwrap(),
+            json!("categoryBreakdown")
         );
     }
 
@@ -2282,6 +2328,7 @@ mod tests {
         let last_checked = Utc.with_ymd_and_hms(2026, 8, 19, 12, 0, 0).unwrap();
         let status = ConnectorStatus {
             health: HealthState::Degraded,
+            target_health: HashMap::new(),
             details: json!({ "version": "1.2.3", "queueDepth": 12 }),
             last_checked,
         };

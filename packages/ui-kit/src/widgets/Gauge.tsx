@@ -2,7 +2,13 @@ import { cva, type VariantProps } from "class-variance-authority";
 
 import { Skeleton } from "@loom/ui-kit/components/ui/skeleton";
 import { cn } from "@loom/ui-kit/lib/utils";
-import { configNumber, readNumber, type DisplayWidgetProps } from "@loom/ui-kit/widgets/types";
+import {
+  configNumber,
+  formatNumericReading,
+  formatNumericReadingText,
+  readNumber,
+  type DisplayWidgetProps,
+} from "@loom/ui-kit/widgets/types";
 
 const gaugeRoot = cva("flex min-w-0 flex-col items-center justify-center", {
   variants: {
@@ -74,7 +80,23 @@ export function GaugeWidget({
   const radius = 42;
   const circumference = 2 * Math.PI * radius;
   const trackLength = (circumference * SWEEP_DEGREES) / 360;
-  const text = reading === null ? "—" : Number.isInteger(reading) ? String(reading) : reading.toFixed(1);
+  const formatted =
+    reading === null
+      ? null
+      : unit === "bytes"
+        ? formatNumericReading(reading, unit)
+        : {
+            text: Number.isInteger(reading) ? String(reading) : reading.toFixed(1),
+            unit: unit ?? "",
+            separator: "",
+          };
+  const text = formatted?.text ?? "—";
+  const readingText =
+    reading === null
+      ? "no reading"
+      : unit === "bytes"
+        ? formatNumericReadingText(reading, unit)
+        : `${text}${unit ?? ""}`;
 
   return (
     <div className={cn(gaugeRoot({ size }), className)}>
@@ -83,7 +105,7 @@ export function GaugeWidget({
           viewBox="0 0 100 100"
           className="h-[var(--gauge-size)] w-[var(--gauge-size)] max-w-full"
           role="img"
-          aria-label={`${label}: ${reading === null ? "no reading" : `${text}${unit ?? ""}`}`}
+          aria-label={`${label}: ${readingText}`}
         >
           <path
             d={arcPath(50, 50, radius, START_DEGREES, START_DEGREES + SWEEP_DEGREES)}
@@ -106,8 +128,8 @@ export function GaugeWidget({
             <span className="font-semibold tabular-nums [font-size:calc(var(--stat-tile-font-size)*0.667)]">
               {text}
             </span>
-            {unit && reading !== null ? (
-              <span className="text-xs text-muted-foreground">{unit}</span>
+            {formatted?.unit ? (
+              <span className="text-xs text-muted-foreground">{formatted.unit}</span>
             ) : null}
           </div>
         </div>

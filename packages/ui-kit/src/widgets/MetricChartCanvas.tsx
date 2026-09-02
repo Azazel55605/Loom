@@ -17,6 +17,8 @@ import {
 import type { ChartType } from "@loom/ui-kit/lib/api";
 import {
   configNumber,
+  formatNumericReadingText,
+  readCategoryBreakdown,
   readNumber,
   readTimeSeries,
   type DisplayWidgetProps,
@@ -34,7 +36,8 @@ export default function MetricChartCanvas({
   config,
   chartType,
 }: Omit<DisplayWidgetProps, "className"> & { chartType: ChartType }) {
-  const suffix = unit ?? "";
+  const formatValue = (entry: unknown) =>
+    typeof entry === "number" ? formatNumericReadingText(entry, unit) : formatEntry(entry);
   const tooltipStyle: React.CSSProperties = {
     background: "hsl(var(--popover, var(--card)))",
     border: "1px solid hsl(var(--border))",
@@ -72,10 +75,11 @@ export default function MetricChartCanvas({
             tickLine={false}
             axisLine={false}
             width={36}
+            tickFormatter={formatValue}
           />
           <Tooltip
             contentStyle={tooltipStyle}
-            formatter={(entry) => [`${formatEntry(entry)}${suffix}`, label]}
+            formatter={(entry) => [formatValue(entry), label]}
           />
           <Line
             type="monotone"
@@ -86,6 +90,58 @@ export default function MetricChartCanvas({
             isAnimationActive={false}
           />
         </LineChart>
+        ),
+      };
+    }
+
+    // Bar and pie charts may receive a connector-supplied categorical series.
+    // Scalar behavior remains intact below for existing descriptors.
+    const categories = readCategoryBreakdown(value);
+    if (Array.isArray(value)) {
+      if (categories.length === 0) return { empty: "No categories yet." };
+
+      if (chartType === "pie") {
+        return {
+          chart: (
+            <PieChart>
+              <Pie
+                data={categories}
+                dataKey="value"
+                nameKey="label"
+                innerRadius="45%"
+                outerRadius="80%"
+                isAnimationActive={false}
+                stroke="none"
+              >
+                {categories.map((category, index) => (
+                  <Cell
+                    key={category.label}
+                    fill={CATEGORY_COLORS[index % CATEGORY_COLORS.length]}
+                  />
+                ))}
+              </Pie>
+              <Tooltip contentStyle={tooltipStyle} formatter={(entry) => formatValue(entry)} />
+            </PieChart>
+          ),
+        };
+      }
+
+      return {
+        chart: (
+          <BarChart data={categories} margin={{ top: 4, right: 8, bottom: 0, left: 0 }}>
+            <CartesianGrid strokeDasharray="3 3" className="stroke-border" vertical={false} />
+            <XAxis dataKey="label" tick={{ fontSize: 10, fill: "hsl(var(--muted-foreground))" }} tickLine={false} axisLine={false} />
+            <YAxis tick={{ fontSize: 10, fill: "hsl(var(--muted-foreground))" }} tickLine={false} axisLine={false} width={52} tickFormatter={formatValue} />
+            <Tooltip contentStyle={tooltipStyle} formatter={(entry) => formatValue(entry)} />
+            <Bar dataKey="value" isAnimationActive={false} radius={[4, 4, 0, 0]}>
+              {categories.map((category, index) => (
+                <Cell
+                  key={category.label}
+                  fill={CATEGORY_COLORS[index % CATEGORY_COLORS.length]}
+                />
+              ))}
+            </Bar>
+          </BarChart>
         ),
       };
     }
@@ -119,7 +175,7 @@ export default function MetricChartCanvas({
           </Pie>
           <Tooltip
             contentStyle={tooltipStyle}
-            formatter={(entry) => `${formatEntry(entry)}${suffix}`}
+            formatter={(entry) => formatValue(entry)}
           />
         </PieChart>
         ),
@@ -131,8 +187,8 @@ export default function MetricChartCanvas({
       <BarChart data={[{ name: label, value: reading, remainder }]} margin={{ top: 4, right: 8, bottom: 0, left: 0 }}>
         <CartesianGrid strokeDasharray="3 3" className="stroke-border" vertical={false} />
         <XAxis dataKey="name" tick={{ fontSize: 10, fill: "hsl(var(--muted-foreground))" }} tickLine={false} axisLine={false} />
-        <YAxis tick={{ fontSize: 10, fill: "hsl(var(--muted-foreground))" }} tickLine={false} axisLine={false} width={36} />
-        <Tooltip contentStyle={tooltipStyle} formatter={(entry) => `${formatEntry(entry)}${suffix}`} />
+        <YAxis tick={{ fontSize: 10, fill: "hsl(var(--muted-foreground))" }} tickLine={false} axisLine={false} width={36} tickFormatter={formatValue} />
+        <Tooltip contentStyle={tooltipStyle} formatter={(entry) => formatValue(entry)} />
         <Bar dataKey="value" stackId="reading" fill="hsl(var(--accent))" isAnimationActive={false} radius={[0, 0, 0, 0]} />
         <Bar dataKey="remainder" stackId="reading" fill="hsl(var(--muted))" isAnimationActive={false} radius={[4, 4, 0, 0]} />
       </BarChart>
@@ -147,6 +203,13 @@ export default function MetricChartCanvas({
     </ResponsiveContainer>
   );
 }
+
+const CATEGORY_COLORS = [
+  "hsl(var(--accent))",
+  "hsl(var(--status-healthy))",
+  "hsl(var(--status-degraded))",
+  "hsl(var(--status-unknown))",
+] as const;
 
 /** Recharts hands a tooltip formatter a loosely-typed value that may be absent
  *  or an array; this narrows it to something printable. */
