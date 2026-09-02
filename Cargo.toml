@@ -3,6 +3,7 @@ resolver = "2"
 members = [
     "crates/core",
     "crates/connector-docker",
+    "crates/connector-truenas",
     "crates/connector-test-kit",
     "crates/web-backend",
 ]
@@ -16,6 +17,7 @@ rust-version = "1.82"
 [workspace.dependencies]
 loom-core = { path = "crates/core" }
 loom-connector-docker = { path = "crates/connector-docker" }
+loom-connector-truenas = { path = "crates/connector-truenas" }
 # Test-only reusable assertions for every implementation of Core's connector contract.
 loom-connector-test-kit = { path = "crates/connector-test-kit" }
 # Authenticated encryption for connector configuration fields marked sensitive.
@@ -93,5 +95,13 @@ http-body-util = "0.1"
 # the host's OpenSSL. No `json` feature: the one response body it parses is a
 # token object, which `serde_json` already handles.
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "http2", "charset"] }
+# WebSocket transport for the TrueNAS JSON-RPC API; rustls matches the
+# workspace's existing TLS stack and avoids a host OpenSSL dependency.
+tokio-tungstenite = { version = "0.29", default-features = false, features = ["connect", "handshake", "rustls-tls-webpki-roots"] }
+# Direct rustls configuration is needed solely for the explicit, off-by-default
+# self-signed-certificate policy; TLS itself is never disabled.
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
+# Mozilla's public trust anchors for the normal certificate-validation path.
+webpki-roots = "1"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }

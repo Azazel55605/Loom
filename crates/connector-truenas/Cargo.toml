@@ -1,0 +1,20 @@
+[package]
+name = "loom-connector-truenas"
+description = "TLS-only JSON-RPC-over-WebSocket transport for TrueNAS."
+edition.workspace = true
+license.workspace = true
+version = "0.1.0"
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+futures-util = { workspace = true, features = ["sink"] }
+loom-core.workspace = true
+rustls.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tokio-tungstenite.workspace = true
+uuid.workspace = true
+webpki-roots.workspace = true

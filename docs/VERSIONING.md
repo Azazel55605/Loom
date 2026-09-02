@@ -6,6 +6,7 @@ truth** for every product's version. It has one entry per product:
 ```json
 {
   "core": "0.1.0",
+  "connector-truenas": "0.1.0",
   "web-backend": "0.1.0",
   "web-frontend": "0.1.0",
   "desktop": "0.1.0",
@@ -88,6 +89,7 @@ reject it.
 | --- | --- |
 | `core` | `crates/core/Cargo.toml` → `package.version` |
 | `connector-docker` | `crates/connector-docker/Cargo.toml` → `package.version` |
+| `connector-truenas` | `crates/connector-truenas/Cargo.toml` → `package.version` |
 | `web-backend` | `crates/web-backend/Cargo.toml` → `package.version` |
 | `web-frontend` | `apps/web-frontend/package.json` → `version` |
 | `desktop` | `apps/desktop/package.json` → `version`, `apps/desktop/src-tauri/Cargo.toml` → `package.version`, `apps/desktop/src-tauri/tauri.conf.json` → `version` |
