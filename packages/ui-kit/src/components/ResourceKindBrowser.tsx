@@ -37,8 +37,8 @@ import { formatByteReading } from "@loom/ui-kit/widgets/types";
 const RESOURCE_ID_PARAM = "resourceId";
 
 /**
- * The one kind this component renders differently, and deliberately the only
- * one.
+ * Resource kinds whose rows are themselves connector sub-targets. Clicking
+ * one opens that target's detail view through the caller-provided callback.
  *
  * A log line is not a table cell. Truncated to a column width in the body font
  * it is unreadable, and every other rendering this component does is
@@ -46,13 +46,13 @@ const RESOURCE_ID_PARAM = "resourceId";
  * exception, and it is named here rather than spread through the render so that
  * "how many special cases are there?" has an answer you can grep for.
  *
- * The honest generic alternative — a `ColumnValueType::LogLine`, or a
- * `rowOpensTarget` flag on the descriptor — was not taken because one case is
- * not a pattern. If a second connector wants a monospace cell or a clickable
- * row, *that* is the moment to promote this into the descriptor, with two real
- * uses to design against instead of one and a guess.
+ * This remains a narrow kind convention: all three row shapes publish the
+ * platform-standard hidden `targetId`, and every destination is the existing
+ * target detail modal. A future kind with a different destination should add
+ * descriptor data instead of another convention here.
  */
 const LOGS_KIND = "logs";
+const TARGET_OPEN_KINDS = new Set([LOGS_KIND, "pools", "datasets"]);
 /** The column carrying the log text, within `LOGS_KIND`. */
 const LOG_LINE_COLUMN = "latestLogLine";
 
@@ -97,7 +97,8 @@ export function ResourceKindBrowser({
    * somewhere to open it; omitted where there is nowhere to go, and the rows
    * are then simply not clickable rather than clickable and inert.
    *
-   * Only the `logs` kind uses it — see `LOGS_KIND` below.
+   * Used by resource kinds whose rows represent sub-targets — see
+   * `TARGET_OPEN_KINDS` below.
    */
   onOpenTarget?: (targetId: string) => void;
   className?: string;
@@ -153,8 +154,8 @@ export function ResourceKindBrowser({
 
   const columns = descriptor.columns;
   const hasRowActions = descriptor.rowActions.length > 0;
-  const columnCount =
-    columns.length + (hasRowActions ? 1 : 0) + (descriptor.kind === LOGS_KIND ? 1 : 0);
+  const opensTargets = TARGET_OPEN_KINDS.has(descriptor.kind);
+  const columnCount = columns.length + (hasRowActions ? 1 : 0) + (opensTargets ? 1 : 0);
   const [query, setQuery] = React.useState("");
   // **Expanded** state, so every group starts closed. A kind is grouped because
   // its list is long — Docker's image table is hundreds of rows — and opening
@@ -175,12 +176,12 @@ export function ResourceKindBrowser({
   // is indistinguishable from no match at all.
   const searching = query.trim().length > 0;
 
-  // A log row opens that container's own detail view, which is the same place
-  // `LogPreview`'s expand icon goes from a dashboard tile — one behaviour, two
-  // entry points, rather than a second way to read a log.
+  // These rows are addressable sub-targets. Logs open a container; TrueNAS
+  // Pools and Datasets open the corresponding storage target. All three use
+  // the hidden `targetId` field and the same existing modal path.
   const isLogs = descriptor.kind === LOGS_KIND;
   const openTarget =
-    isLogs && onOpenTarget !== undefined
+    opensTargets && onOpenTarget !== undefined
       ? (item: ResourceItem) => {
           const target = item.fields[TARGET_ID_FIELD];
           if (typeof target === "string" && target.length > 0) onOpenTarget(target);
@@ -198,7 +199,7 @@ export function ResourceKindBrowser({
         // is a control only a mouse can find.
         role={open === undefined ? undefined : "button"}
         tabIndex={open === undefined ? undefined : 0}
-        aria-label={open === undefined ? undefined : `Open ${item.id} and show its log`}
+        aria-label={open === undefined ? undefined : `Open ${item.id}`}
         className={open === undefined ? undefined : "cursor-pointer"}
         onClick={open}
         onKeyDown={

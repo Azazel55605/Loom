@@ -3,11 +3,13 @@
 use std::{collections::HashMap, sync::Mutex};
 
 use async_trait::async_trait;
+use chrono::{DateTime, Utc};
 use futures_util::future::join_all;
 use loom_core::connector::{
-    details::set_detail, ActionResult, ActionWidgetType, ChartType, ConnectorAction,
-    ConnectorError, ConnectorMetadata, ConnectorStatus, DataPointDescriptor, DataPointValueType,
-    DisplayField, DisplayWidgetType, HealthState, NetworkTarget, SubTarget, WidgetBinding,
+    details::set_detail, ActionResult, ActionWidgetType, ApplicableTarget, ChartType,
+    ColumnDescriptor, ColumnValueType, ConnectorAction, ConnectorError, ConnectorMetadata,
+    ConnectorStatus, DataPointDescriptor, DataPointValueType, DisplayField, DisplayWidgetType,
+    HealthState, NetworkTarget, ResourceItem, ResourceKindDescriptor, SubTarget, WidgetBinding,
     WidgetLayout,
 };
 use serde_json::{json, Map, Value};
@@ -34,13 +36,29 @@ pub const DATA_POINT_AVAILABLE_BYTES: &str = "availableBytes";
 pub const DATA_POINT_COMPRESSION_RATIO: &str = "compressionRatio";
 pub const DATA_POINT_SNAPSHOT_COUNT: &str = "snapshotCount";
 pub const ACTION_START_SCRUB: &str = "startScrub";
+pub const ACTION_CREATE_SNAPSHOT: &str = "createSnapshot";
+pub const ACTION_ROLLBACK_SNAPSHOT: &str = "rollback";
+pub const ACTION_DELETE_SNAPSHOT: &str = "delete";
+pub const ACTION_DISMISS_ALERT: &str = "dismiss";
+
+pub const RESOURCE_KIND_POOLS: &str = "pools";
+pub const RESOURCE_KIND_DATASETS: &str = "datasets";
+pub const RESOURCE_KIND_SNAPSHOTS: &str = "snapshots";
+pub const RESOURCE_KIND_ALERTS: &str = "alerts";
 
 const METHOD_SYSTEM_INFO: &str = "system.info";
 const METHOD_POOL_QUERY: &str = "pool.query";
 const METHOD_DATASET_QUERY: &str = "pool.dataset.query";
 const METHOD_SNAPSHOT_COUNT: &str = "pool.dataset.snapshot_count";
 const METHOD_POOL_SCRUB: &str = "pool.scrub.scrub";
+const METHOD_SNAPSHOT_QUERY: &str = "pool.snapshot.query";
+const METHOD_SNAPSHOT_CREATE: &str = "pool.snapshot.create";
+const METHOD_SNAPSHOT_DELETE: &str = "pool.snapshot.delete";
+const METHOD_SNAPSHOT_ROLLBACK: &str = "pool.snapshot.rollback";
 const METHOD_ALERT_LIST: &str = "alert.list";
+const METHOD_ALERT_DISMISS: &str = "alert.dismiss";
+const RESOURCE_ID_PARAM: &str = "resourceId";
+const DEFAULT_SNAPSHOT_NAMING_SCHEMA: &str = "loom-%Y-%m-%d_%H-%M-%S";
 
 /// One configured and authenticated TrueNAS host.
 #[derive(Debug)]
@@ -84,11 +102,9 @@ impl TrueNasConnector {
     async fn read_inventory(&self) -> Result<InventoryReadings, String> {
         // These methods are independent and the transport correlates concurrent
         // JSON-RPC calls, so one slow inventory query need not delay the rest.
-        let (system, pools, datasets, alerts) = tokio::join!(
+        let (system, storage, alerts) = tokio::join!(
             self.client.call(METHOD_SYSTEM_INFO, json!([])),
-            self.client.call(METHOD_POOL_QUERY, json!([])),
-            self.client
-                .call(METHOD_DATASET_QUERY, dataset_query_params()),
+            self.query_storage_inventory(),
             self.client.call(METHOD_ALERT_LIST, json!([])),
         );
         // Host identity and pool health are the connector's availability
@@ -96,18 +112,12 @@ impl TrueNasConnector {
         // without DATASET_READ (or one inaccessible dataset) must not make an
         // otherwise reachable TrueNAS host look offline.
         let system = system.map_err(|error| error.to_string())?;
-        let pools = map_pool_readings(pools.map_err(|error| error.to_string())?)?;
+        let pools = storage.pools?;
         let mut warnings = Vec::new();
-        let mut datasets = match datasets {
-            Ok(value) => match map_dataset_readings(value) {
-                Ok(datasets) => datasets,
-                Err(error) => {
-                    warnings.push(error);
-                    Vec::new()
-                }
-            },
+        let mut datasets = match storage.datasets {
+            Ok(datasets) => datasets,
             Err(error) => {
-                warnings.push(format!("{METHOD_DATASET_QUERY} failed: {error}"));
+                warnings.push(error);
                 Vec::new()
             }
         };
@@ -125,11 +135,57 @@ impl TrueNasConnector {
             }
         };
 
+        warnings.extend(self.populate_snapshot_counts(&mut datasets).await);
+
+        let host = map_host_readings_from_pools(system, &pools)?;
+        let inventory = InventoryReadings {
+            host,
+            pools,
+            datasets,
+            active_alert_count,
+            warnings,
+        };
+        self.remember_targets(inventory.sub_targets());
+        Ok(inventory)
+    }
+
+    async fn list_sub_targets_live(&self) -> Result<Vec<SubTarget>, ConnectorError> {
+        let storage = self.query_storage_inventory().await;
+        let pools = storage.pools.map_err(internal_error)?;
+        let datasets = storage.datasets.map_err(internal_error)?;
+        let targets = sub_targets(&pools, &datasets);
+        self.remember_targets(targets.clone());
+        Ok(targets)
+    }
+
+    /// Reads pools and datasets once for every consumer of storage inventory.
+    ///
+    /// Keeping the concurrent calls and response mapping here prevents status,
+    /// sub-target discovery, and resource browsing from growing subtly
+    /// different query shapes (or one of them regressing into per-item calls).
+    async fn query_storage_inventory(&self) -> StorageInventoryResults {
+        let (pools, datasets) = tokio::join!(
+            self.client.call(METHOD_POOL_QUERY, json!([])),
+            self.client
+                .call(METHOD_DATASET_QUERY, dataset_query_params()),
+        );
+        StorageInventoryResults {
+            pools: pools
+                .map_err(|error| format!("{METHOD_POOL_QUERY} failed: {error}"))
+                .and_then(map_pool_readings),
+            datasets: datasets
+                .map_err(|error| format!("{METHOD_DATASET_QUERY} failed: {error}"))
+                .and_then(map_dataset_readings),
+        }
+    }
+
+    async fn populate_snapshot_counts(&self, datasets: &mut [DatasetReadings]) -> Vec<String> {
         let counts = join_all(datasets.iter().map(|dataset| {
             self.client
                 .call(METHOD_SNAPSHOT_COUNT, json!([dataset.path.as_str()]))
         }))
         .await;
+        let mut warnings = Vec::new();
         for (dataset, count) in datasets.iter_mut().zip(counts) {
             match count {
                 Ok(value) => match value.as_u64() {
@@ -145,31 +201,7 @@ impl TrueNasConnector {
                 )),
             }
         }
-
-        let host = map_host_readings_from_pools(system, &pools)?;
-        let inventory = InventoryReadings {
-            host,
-            pools,
-            datasets,
-            active_alert_count,
-            warnings,
-        };
-        self.remember_targets(inventory.sub_targets());
-        Ok(inventory)
-    }
-
-    async fn list_sub_targets_live(&self) -> Result<Vec<SubTarget>, ConnectorError> {
-        let (pools, datasets) = tokio::join!(
-            self.client.call(METHOD_POOL_QUERY, json!([])),
-            self.client
-                .call(METHOD_DATASET_QUERY, dataset_query_params()),
-        );
-        let pools = map_pool_readings(pools.map_err(connector_error)?).map_err(internal_error)?;
-        let datasets =
-            map_dataset_readings(datasets.map_err(connector_error)?).map_err(internal_error)?;
-        let targets = sub_targets(&pools, &datasets);
-        self.remember_targets(targets.clone());
-        Ok(targets)
+        warnings
     }
 
     fn remember_targets(&self, targets: Vec<SubTarget>) {
@@ -308,30 +340,169 @@ impl loom_core::connector::Connector for TrueNasConnector {
         &self,
         action_id: &str,
         target_id: Option<&str>,
-        _params: Value,
+        params: Value,
     ) -> Result<ActionResult, ConnectorError> {
-        if action_id != ACTION_START_SCRUB {
-            return Err(ConnectorError::invalid_action(action_id));
-        }
-        let Some(pool) = target_id.and_then(|target| target.strip_prefix("pool:")) else {
-            return Err(ConnectorError::invalid_action(action_id));
-        };
-        if pool.is_empty() {
-            return Err(ConnectorError::invalid_action(action_id));
-        }
+        match action_id {
+            ACTION_START_SCRUB => {
+                let Some(pool) = target_id.and_then(|target| target.strip_prefix("pool:")) else {
+                    return Err(ConnectorError::invalid_action(action_id));
+                };
+                if pool.is_empty() {
+                    return Err(ConnectorError::invalid_action(action_id));
+                }
 
-        let job_id = self
-            .client
-            .start_job(METHOD_POOL_SCRUB, json!([pool, "START"]))
-            .await
-            .map_err(connector_error)?;
-        let result = ActionResult::ok(format!(
-            "Scrub started for pool {pool}. TrueNAS is running it asynchronously; this does not mean the scrub has completed."
-        ));
-        Ok(match job_id {
-            Some(job_id) => result.with_payload(json!({ "jobId": job_id })),
-            None => result,
-        })
+                let job_id = self
+                    .client
+                    .start_job(METHOD_POOL_SCRUB, json!([pool, "START"]))
+                    .await
+                    .map_err(connector_error)?;
+                let result = ActionResult::ok(format!(
+                    "Scrub started for pool {pool}. TrueNAS is running it asynchronously; this does not mean the scrub has completed."
+                ));
+                Ok(match job_id {
+                    Some(job_id) => result.with_payload(json!({ "jobId": job_id })),
+                    None => result,
+                })
+            }
+            ACTION_CREATE_SNAPSHOT => {
+                let dataset = required_dataset_target(target_id, action_id)?;
+                let recursive = params
+                    .get("recursive")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false);
+                let name = params
+                    .get("name")
+                    .and_then(Value::as_str)
+                    .map(str::trim)
+                    .filter(|name| !name.is_empty());
+                let data = match name {
+                    Some(name) => json!({
+                        "dataset": dataset,
+                        "name": name,
+                        "recursive": recursive
+                    }),
+                    None => json!({
+                        "dataset": dataset,
+                        "naming_schema": DEFAULT_SNAPSHOT_NAMING_SCHEMA,
+                        "recursive": recursive
+                    }),
+                };
+                let created = self
+                    .client
+                    .call(METHOD_SNAPSHOT_CREATE, json!([data]))
+                    .await
+                    .map_err(connector_error)?;
+                let snapshot_id = required_string(&created, "id", METHOD_SNAPSHOT_CREATE)
+                    .map_err(internal_error)?;
+                Ok(ActionResult::ok(format!("Created snapshot {snapshot_id}."))
+                    .with_payload(json!({ "snapshotId": snapshot_id })))
+            }
+            ACTION_DELETE_SNAPSHOT | ACTION_ROLLBACK_SNAPSHOT => {
+                let dataset = required_dataset_target(target_id, action_id)?;
+                let snapshot_id = required_resource_id(action_id, &params)?;
+                if !snapshot_belongs_to_dataset(snapshot_id, dataset) {
+                    return Err(ConnectorError::InvalidParams {
+                        action_id: action_id.to_owned(),
+                        reason: format!(
+                            "snapshot `{snapshot_id}` does not belong to dataset `{dataset}`"
+                        ),
+                    });
+                }
+                if action_id == ACTION_DELETE_SNAPSHOT {
+                    self.client
+                        .call(
+                            METHOD_SNAPSHOT_DELETE,
+                            json!([snapshot_id, { "defer": false, "recursive": false }]),
+                        )
+                        .await
+                        .map_err(connector_error)?;
+                    Ok(ActionResult::ok(format!("Deleted snapshot {snapshot_id}.")))
+                } else {
+                    self.client
+                        .call(
+                            METHOD_SNAPSHOT_ROLLBACK,
+                            json!([snapshot_id, {
+                                "recursive": false,
+                                "recursive_clones": false,
+                                "force": false,
+                                "recursive_rollback": false
+                            }]),
+                        )
+                        .await
+                        .map_err(connector_error)?;
+                    Ok(ActionResult::ok(format!(
+                        "Rolled dataset {dataset} back to snapshot {snapshot_id}."
+                    )))
+                }
+            }
+            ACTION_DISMISS_ALERT => {
+                if target_id.is_some() {
+                    return Err(ConnectorError::invalid_action(action_id));
+                }
+                let alert_id = required_resource_id(action_id, &params)?;
+                self.client
+                    .call(METHOD_ALERT_DISMISS, json!([alert_id]))
+                    .await
+                    .map_err(connector_error)?;
+                Ok(ActionResult::ok("Dismissed the alert."))
+            }
+            _ => Err(ConnectorError::invalid_action(action_id)),
+        }
+    }
+
+    fn resource_kinds(&self, target_id: Option<&str>) -> Vec<ResourceKindDescriptor> {
+        match target_id {
+            None => host_resource_kinds(),
+            Some(target) if target.starts_with("dataset:") => {
+                vec![snapshots_kind(target)]
+            }
+            _ => Vec::new(),
+        }
+    }
+
+    async fn list_resource_items(
+        &self,
+        kind: &str,
+        target_id: Option<&str>,
+    ) -> Result<Vec<ResourceItem>, ConnectorError> {
+        match (kind, target_id) {
+            (RESOURCE_KIND_POOLS, None) => {
+                let storage = self.query_storage_inventory().await;
+                Ok(pool_resource_items(storage.pools.map_err(internal_error)?))
+            }
+            (RESOURCE_KIND_DATASETS, None) => {
+                let storage = self.query_storage_inventory().await;
+                let mut datasets = storage.datasets.map_err(internal_error)?;
+                let warnings = self.populate_snapshot_counts(&mut datasets).await;
+                if let Some(warning) = warnings.first() {
+                    return Err(ConnectorError::Internal(warning.clone()));
+                }
+                Ok(dataset_resource_items(datasets))
+            }
+            (RESOURCE_KIND_ALERTS, None) => {
+                let alerts = self
+                    .client
+                    .call(METHOD_ALERT_LIST, json!([]))
+                    .await
+                    .map_err(connector_error)?;
+                map_alert_resource_items(alerts).map_err(internal_error)
+            }
+            (RESOURCE_KIND_SNAPSHOTS, Some(target)) => {
+                let Some(dataset) = target.strip_prefix("dataset:") else {
+                    return Ok(Vec::new());
+                };
+                if dataset.is_empty() {
+                    return Ok(Vec::new());
+                }
+                let snapshots = self
+                    .client
+                    .call(METHOD_SNAPSHOT_QUERY, snapshot_query_params(dataset))
+                    .await
+                    .map_err(connector_error)?;
+                map_snapshot_resource_items(snapshots).map_err(internal_error)
+            }
+            _ => Ok(Vec::new()),
+        }
     }
 
     fn supports_sub_targets(&self) -> bool {
@@ -550,6 +721,150 @@ fn pool_scrub_action(target_id: &str) -> ConnectorAction {
         .disruptive()
 }
 
+fn host_resource_kinds() -> Vec<ResourceKindDescriptor> {
+    // `startScrub` deliberately does not appear as a Pools-table row action.
+    // Scrub already uses the direct sub-target convention (`target_id` is
+    // `pool:{name}`), while resource row actions address a row with
+    // `params.resourceId` and ordinarily have no target. Accepting both shapes
+    // would give `execute_action` two conventions for identical behavior.
+    // Keeping Pools browse-only leaves scrub in the pool detail view, where
+    // its existing target-scoped contract remains unambiguous.
+    vec![
+        ResourceKindDescriptor::new(
+            RESOURCE_KIND_POOLS,
+            "Pools",
+            vec![
+                ColumnDescriptor::new("name", "Name", ColumnValueType::Text),
+                ColumnDescriptor::new("status", "Status", ColumnValueType::Text),
+                ColumnDescriptor::new("usedBytes", "Used", ColumnValueType::Bytes),
+                ColumnDescriptor::new("freeBytes", "Free", ColumnValueType::Bytes),
+            ],
+        )
+        .applicable_to(ApplicableTarget::HostOnly),
+        ResourceKindDescriptor::new(
+            RESOURCE_KIND_DATASETS,
+            "Datasets",
+            vec![
+                ColumnDescriptor::new("path", "Path", ColumnValueType::Text),
+                ColumnDescriptor::new("pool", "Pool", ColumnValueType::Text),
+                ColumnDescriptor::new("usedBytes", "Used", ColumnValueType::Bytes),
+                ColumnDescriptor::new("availableBytes", "Available", ColumnValueType::Bytes),
+                ColumnDescriptor::new("compressionRatio", "Compression", ColumnValueType::Number),
+                ColumnDescriptor::new("snapshotCount", "Snapshots", ColumnValueType::Number),
+            ],
+        )
+        .applicable_to(ApplicableTarget::HostOnly),
+        alerts_kind(),
+    ]
+}
+
+fn snapshots_kind(target_id: &str) -> ResourceKindDescriptor {
+    ResourceKindDescriptor::new(
+        RESOURCE_KIND_SNAPSHOTS,
+        "Snapshots",
+        vec![
+            ColumnDescriptor::new("name", "Name", ColumnValueType::Text),
+            ColumnDescriptor::new("created", "Created", ColumnValueType::Timestamp),
+            ColumnDescriptor::new("usedBytes", "Used", ColumnValueType::Bytes),
+        ],
+    )
+    .applicable_to(ApplicableTarget::TargetOnly)
+    .with_row_actions(vec![
+        resource_row_action(
+            ACTION_ROLLBACK_SNAPSHOT,
+            "Rollback",
+            "Revert this dataset to the snapshot. Data written after it was created will be lost.",
+            true,
+        ),
+        resource_row_action(
+            ACTION_DELETE_SNAPSHOT,
+            "Delete",
+            "Permanently delete this snapshot.",
+            false,
+        ),
+    ])
+    .with_kind_actions(vec![ConnectorAction {
+        id: ACTION_CREATE_SNAPSHOT.to_owned(),
+        target_id: Some(target_id.to_owned()),
+        label: "Create snapshot".to_owned(),
+        description: Some(
+            "Create a snapshot now. Leave the name empty to use Loom's timestamp-based name."
+                .to_owned(),
+        ),
+        params_schema: json!({
+            "type": "object",
+            "properties": {
+                "name": {
+                    "type": "string",
+                    "title": "Name",
+                    "description": "Optional snapshot name. If blank, Loom uses a timestamp-based name."
+                },
+                "recursive": {
+                    "type": "boolean",
+                    "title": "Recursive",
+                    "description": "Also snapshot child datasets.",
+                    "default": false
+                }
+            },
+            "additionalProperties": false
+        }),
+        is_disruptive: false,
+        snapshot_data_point_ids: Vec::new(),
+    }])
+}
+
+fn alerts_kind() -> ResourceKindDescriptor {
+    ResourceKindDescriptor::new(
+        RESOURCE_KIND_ALERTS,
+        "Alerts",
+        vec![
+            ColumnDescriptor::new("level", "Level", ColumnValueType::Text),
+            ColumnDescriptor::new("message", "Message", ColumnValueType::Text),
+            ColumnDescriptor::new("created", "Created", ColumnValueType::Timestamp),
+        ],
+    )
+    .applicable_to(ApplicableTarget::HostOnly)
+    .with_row_actions(vec![resource_row_action(
+        ACTION_DISMISS_ALERT,
+        "Dismiss",
+        "Dismiss this active alert in TrueNAS.",
+        false,
+    )])
+}
+
+fn resource_row_action(
+    id: &str,
+    label: &str,
+    description: &str,
+    is_disruptive: bool,
+) -> ConnectorAction {
+    ConnectorAction {
+        id: id.to_owned(),
+        target_id: None,
+        label: label.to_owned(),
+        description: Some(description.to_owned()),
+        params_schema: json!({
+            "type": "object",
+            "properties": {
+                RESOURCE_ID_PARAM: {
+                    "type": "string",
+                    "title": "Resource",
+                    "description": "The row this action applies to."
+                }
+            },
+            "required": [RESOURCE_ID_PARAM],
+            "additionalProperties": false
+        }),
+        is_disruptive,
+        snapshot_data_point_ids: Vec::new(),
+    }
+}
+
+struct StorageInventoryResults {
+    pools: Result<Vec<PoolReadings>, String>,
+    datasets: Result<Vec<DatasetReadings>, String>,
+}
+
 #[derive(Debug, PartialEq, Eq)]
 struct HostReadings {
     version: String,
@@ -736,6 +1051,127 @@ fn dataset_query_params() -> Value {
     }])
 }
 
+fn snapshot_query_params(dataset: &str) -> Value {
+    json!([
+        [["dataset", "=", dataset]],
+        {
+            "extra": { "properties": ["creation", "used"] },
+            "order_by": ["-createtxg"]
+        }
+    ])
+}
+
+fn pool_resource_items(pools: Vec<PoolReadings>) -> Vec<ResourceItem> {
+    pools
+        .into_iter()
+        .map(|pool| {
+            ResourceItem::new(pool.name.clone())
+                .with_field("targetId", pool_target_id(&pool.name))
+                .with_field("name", pool.name)
+                .with_field("status", pool.status)
+                .with_field("usedBytes", pool.used_bytes)
+                .with_field("freeBytes", pool.free_bytes)
+        })
+        .collect()
+}
+
+fn dataset_resource_items(datasets: Vec<DatasetReadings>) -> Vec<ResourceItem> {
+    datasets
+        .into_iter()
+        .map(|dataset| {
+            let pool = dataset
+                .path
+                .split('/')
+                .next()
+                .unwrap_or_default()
+                .to_owned();
+            let mut item = ResourceItem::new(dataset.path.clone())
+                .with_field("targetId", dataset_target_id(&dataset.path))
+                .with_field("path", dataset.path)
+                .with_field("pool", pool)
+                .with_field("usedBytes", dataset.used_bytes)
+                .with_field("availableBytes", dataset.available_bytes)
+                .with_field("compressionRatio", dataset.compression_ratio);
+            if let Some(snapshot_count) = dataset.snapshot_count {
+                item = item.with_field("snapshotCount", snapshot_count);
+            }
+            item
+        })
+        .collect()
+}
+
+fn map_snapshot_resource_items(value: Value) -> Result<Vec<ResourceItem>, String> {
+    value
+        .as_array()
+        .ok_or_else(|| format!("{METHOD_SNAPSHOT_QUERY} did not return an array"))?
+        .iter()
+        .map(|snapshot| {
+            let id = required_string(snapshot, "id", METHOD_SNAPSHOT_QUERY)?.to_owned();
+            let name = required_string(snapshot, "snapshot_name", METHOD_SNAPSHOT_QUERY)?;
+            let properties = snapshot.get("properties").ok_or_else(|| {
+                format!("{METHOD_SNAPSHOT_QUERY} returned no `properties` object")
+            })?;
+            let creation = snapshot_property_u64(properties, "creation")?;
+            let created = DateTime::<Utc>::from_timestamp(
+                i64::try_from(creation).map_err(|_| {
+                    format!("{METHOD_SNAPSHOT_QUERY} returned an out-of-range creation timestamp")
+                })?,
+                0,
+            )
+            .ok_or_else(|| {
+                format!("{METHOD_SNAPSHOT_QUERY} returned an invalid creation timestamp")
+            })?
+            .to_rfc3339();
+            let used_bytes = snapshot_property_u64(properties, "used")?;
+            Ok(ResourceItem::new(id)
+                .with_field("name", name)
+                .with_field("created", created)
+                .with_field("usedBytes", used_bytes))
+        })
+        .collect()
+}
+
+fn snapshot_property_u64(properties: &Value, key: &str) -> Result<u64, String> {
+    let property = properties
+        .get(key)
+        .ok_or_else(|| format!("{METHOD_SNAPSHOT_QUERY} returned no `{key}` snapshot property"))?;
+    property
+        .get("parsed")
+        .and_then(value_as_u64)
+        .or_else(|| property.get("rawvalue").and_then(value_as_u64))
+        .ok_or_else(|| {
+            format!("{METHOD_SNAPSHOT_QUERY} returned no numeric `{key}` snapshot property")
+        })
+}
+
+fn value_as_u64(value: &Value) -> Option<u64> {
+    value
+        .as_u64()
+        .or_else(|| value.as_str().and_then(|value| value.parse().ok()))
+}
+
+fn map_alert_resource_items(value: Value) -> Result<Vec<ResourceItem>, String> {
+    value
+        .as_array()
+        .ok_or_else(|| format!("{METHOD_ALERT_LIST} did not return an array"))?
+        .iter()
+        .filter(|alert| alert.get("dismissed").and_then(Value::as_bool) == Some(false))
+        .map(|alert| {
+            let uuid = required_string(alert, "uuid", METHOD_ALERT_LIST)?;
+            Ok(ResourceItem::new(uuid)
+                .with_field("level", required_string(alert, "level", METHOD_ALERT_LIST)?)
+                .with_field(
+                    "message",
+                    required_string(alert, "text", METHOD_ALERT_LIST)?,
+                )
+                .with_field(
+                    "created",
+                    required_string(alert, "datetime", METHOD_ALERT_LIST)?,
+                ))
+        })
+        .collect()
+}
+
 fn map_active_alert_count(value: Value) -> Result<u64, String> {
     let alerts = value
         .as_array()
@@ -763,6 +1199,37 @@ fn pool_target_id(name: &str) -> String {
 
 fn dataset_target_id(path: &str) -> String {
     format!("dataset:{path}")
+}
+
+fn required_dataset_target<'a>(
+    target_id: Option<&'a str>,
+    action_id: &str,
+) -> Result<&'a str, ConnectorError> {
+    let Some(dataset) = target_id.and_then(|target| target.strip_prefix("dataset:")) else {
+        return Err(ConnectorError::invalid_action(action_id));
+    };
+    if dataset.is_empty() {
+        return Err(ConnectorError::invalid_action(action_id));
+    }
+    Ok(dataset)
+}
+
+fn required_resource_id<'a>(action_id: &str, params: &'a Value) -> Result<&'a str, ConnectorError> {
+    params
+        .get(RESOURCE_ID_PARAM)
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| ConnectorError::InvalidParams {
+            action_id: action_id.to_owned(),
+            reason: format!("`{RESOURCE_ID_PARAM}` must be a non-empty string"),
+        })
+}
+
+fn snapshot_belongs_to_dataset(snapshot_id: &str, dataset: &str) -> bool {
+    snapshot_id
+        .strip_prefix(dataset)
+        .is_some_and(|suffix| suffix.starts_with('@') && suffix.len() > 1)
 }
 
 fn pool_health(status: &str) -> HealthState {
@@ -984,6 +1451,155 @@ mod tests {
         assert_eq!(datasets[0].used_bytes, 4096);
         assert_eq!(datasets[0].available_bytes, 8192);
         assert_eq!(datasets[0].compression_ratio, 1.25);
+    }
+
+    #[test]
+    fn pool_resource_rows_map_capacity_and_target_identity() {
+        let rows = pool_resource_items(
+            map_pool_readings(json!([{
+                "name": "tank",
+                "status": "ONLINE",
+                "size": 1000,
+                "allocated": 400,
+                "free": 600
+            }]))
+            .unwrap(),
+        );
+
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].id, "tank");
+        assert_eq!(rows[0].fields.get("targetId"), Some(&json!("pool:tank")));
+        assert_eq!(rows[0].fields.get("name"), Some(&json!("tank")));
+        assert_eq!(rows[0].fields.get("status"), Some(&json!("ONLINE")));
+        assert_eq!(rows[0].fields.get("usedBytes"), Some(&json!(400)));
+        assert_eq!(rows[0].fields.get("freeBytes"), Some(&json!(600)));
+    }
+
+    #[test]
+    fn dataset_resource_rows_map_properties_count_and_target_identity() {
+        let rows = dataset_resource_items(vec![DatasetReadings {
+            path: "tank/apps".to_owned(),
+            used_bytes: 4096,
+            available_bytes: 8192,
+            compression_ratio: 1.25,
+            snapshot_count: Some(3),
+        }]);
+
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].id, "tank/apps");
+        assert_eq!(
+            rows[0].fields.get("targetId"),
+            Some(&json!("dataset:tank/apps"))
+        );
+        assert_eq!(rows[0].fields.get("pool"), Some(&json!("tank")));
+        assert_eq!(rows[0].fields.get("usedBytes"), Some(&json!(4096)));
+        assert_eq!(rows[0].fields.get("snapshotCount"), Some(&json!(3)));
+    }
+
+    #[test]
+    fn snapshot_resource_rows_map_requested_properties() {
+        let rows = map_snapshot_resource_items(json!([{
+            "id": "tank/apps@before-upgrade",
+            "snapshot_name": "before-upgrade",
+            "dataset": "tank/apps",
+            "createtxg": "123",
+            "properties": {
+                "creation": {
+                    "value": "Wed Jul  3 09:46 2024",
+                    "rawvalue": "1720000000",
+                    "parsed": 1720000000,
+                    "source": "NONE"
+                },
+                "used": {
+                    "value": "2 KiB",
+                    "rawvalue": "2048",
+                    "parsed": 2048,
+                    "source": "NONE"
+                }
+            }
+        }]))
+        .expect("documented pool.snapshot.query shape");
+
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].id, "tank/apps@before-upgrade");
+        assert_eq!(rows[0].fields.get("name"), Some(&json!("before-upgrade")));
+        assert_eq!(rows[0].fields.get("usedBytes"), Some(&json!(2048)));
+        assert_eq!(
+            rows[0].fields.get("created"),
+            Some(&json!("2024-07-03T09:46:40+00:00"))
+        );
+    }
+
+    #[test]
+    fn alert_resource_rows_keep_only_active_alerts() {
+        let rows = map_alert_resource_items(json!([
+            {
+                "uuid": "active-id",
+                "level": "WARNING",
+                "text": "Pool space is low",
+                "datetime": "2026-09-03T10:00:00+00:00",
+                "dismissed": false
+            },
+            {
+                "uuid": "dismissed-id",
+                "level": "INFO",
+                "text": "Already handled",
+                "datetime": "2026-09-02T10:00:00+00:00",
+                "dismissed": true
+            }
+        ]))
+        .expect("documented alert.list shape");
+
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].id, "active-id");
+        assert_eq!(rows[0].fields.get("level"), Some(&json!("WARNING")));
+        assert_eq!(
+            rows[0].fields.get("message"),
+            Some(&json!("Pool space is low"))
+        );
+    }
+
+    #[test]
+    fn resource_kinds_are_conditioned_by_target_kind() {
+        let host: Vec<_> = host_resource_kinds()
+            .into_iter()
+            .map(|kind| kind.kind)
+            .collect();
+        assert_eq!(
+            host,
+            vec![
+                RESOURCE_KIND_POOLS,
+                RESOURCE_KIND_DATASETS,
+                RESOURCE_KIND_ALERTS
+            ]
+        );
+
+        let dataset = snapshots_kind("dataset:tank/apps");
+        assert_eq!(dataset.kind, RESOURCE_KIND_SNAPSHOTS);
+        assert_eq!(
+            dataset.kind_actions[0].target_id.as_deref(),
+            Some("dataset:tank/apps")
+        );
+        assert!(dataset
+            .row_actions
+            .iter()
+            .any(|action| { action.id == ACTION_ROLLBACK_SNAPSHOT && action.is_disruptive }));
+    }
+
+    #[test]
+    fn snapshot_ids_cannot_escape_the_scoped_dataset() {
+        assert!(snapshot_belongs_to_dataset(
+            "tank/apps@before-upgrade",
+            "tank/apps"
+        ));
+        assert!(!snapshot_belongs_to_dataset(
+            "tank/apps-child@before-upgrade",
+            "tank/apps"
+        ));
+        assert!(!snapshot_belongs_to_dataset(
+            "tank/other@before-upgrade",
+            "tank/apps"
+        ));
     }
 
     #[test]

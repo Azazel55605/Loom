@@ -6,15 +6,17 @@
 //! `LOOM_TEST_TRUENAS_ALLOW_INSECURE_CERT=1` only for a self-signed test system.
 
 use loom_connector_truenas::{
-    TrueNasClient, TrueNasConnector, ACTION_START_SCRUB, DATA_POINT_ACTIVE_ALERT_COUNT,
-    DATA_POINT_AVAILABLE_BYTES, DATA_POINT_CAPACITY_PERCENT, DATA_POINT_COMPRESSION_RATIO,
-    DATA_POINT_FREE_CAPACITY_BYTES, DATA_POINT_POOL_COUNT, DATA_POINT_POOL_STORAGE_BREAKDOWN,
-    DATA_POINT_SNAPSHOT_COUNT, DATA_POINT_STATUS, DATA_POINT_SYSTEM_UPTIME,
-    DATA_POINT_TOTAL_CAPACITY_BYTES, DATA_POINT_TRUENAS_VERSION, DATA_POINT_USED_BYTES,
-    DATA_POINT_USED_CAPACITY_BYTES,
+    TrueNasClient, TrueNasConnector, ACTION_CREATE_SNAPSHOT, ACTION_DELETE_SNAPSHOT,
+    ACTION_START_SCRUB, DATA_POINT_ACTIVE_ALERT_COUNT, DATA_POINT_AVAILABLE_BYTES,
+    DATA_POINT_CAPACITY_PERCENT, DATA_POINT_COMPRESSION_RATIO, DATA_POINT_FREE_CAPACITY_BYTES,
+    DATA_POINT_POOL_COUNT, DATA_POINT_POOL_STORAGE_BREAKDOWN, DATA_POINT_SNAPSHOT_COUNT,
+    DATA_POINT_STATUS, DATA_POINT_SYSTEM_UPTIME, DATA_POINT_TOTAL_CAPACITY_BYTES,
+    DATA_POINT_TRUENAS_VERSION, DATA_POINT_USED_BYTES, DATA_POINT_USED_CAPACITY_BYTES,
+    RESOURCE_KIND_ALERTS, RESOURCE_KIND_DATASETS, RESOURCE_KIND_POOLS, RESOURCE_KIND_SNAPSHOTS,
 };
 use loom_core::connector::{Connector, HealthState};
 use serde_json::{json, Value};
+use uuid::Uuid;
 
 #[tokio::test]
 async fn a_real_truenas_answers_core_ping() {
@@ -103,6 +105,87 @@ async fn a_real_truenas_lists_and_reads_pool_and_dataset_targets() {
         );
         assert!(status.target_health.contains_key(&dataset.id));
     }
+}
+
+#[tokio::test]
+async fn a_real_truenas_lists_host_resources_in_batches() {
+    let test_name = "a_real_truenas_lists_host_resources_in_batches";
+    let Some(connector) = live_connector(test_name).await else {
+        return;
+    };
+
+    let pools = connector
+        .list_resource_items(RESOURCE_KIND_POOLS, None)
+        .await
+        .expect("the live TrueNAS should list pool resources");
+    let datasets = connector
+        .list_resource_items(RESOURCE_KIND_DATASETS, None)
+        .await
+        .expect("the live TrueNAS should list dataset resources");
+    let alerts = connector
+        .list_resource_items(RESOURCE_KIND_ALERTS, None)
+        .await
+        .expect("the live TrueNAS should list active alerts");
+
+    assert!(!pools.is_empty(), "the live TrueNAS should have a pool row");
+    assert!(
+        !datasets.is_empty(),
+        "the live TrueNAS should have a dataset row"
+    );
+    eprintln!(
+        "{test_name}: pools={}, datasets={}, activeAlerts={}, firstPool={}, firstDataset={}",
+        pools.len(),
+        datasets.len(),
+        alerts.len(),
+        pools[0].id,
+        datasets[0].id
+    );
+}
+
+#[tokio::test]
+#[ignore = "writes a real snapshot; run manually with LOOM_TEST_TRUENAS_SNAPSHOT_DATASET set to a disposable dataset"]
+async fn a_real_truenas_can_create_and_delete_a_snapshot_when_explicitly_requested() {
+    let test_name = "a_real_truenas_can_create_and_delete_a_snapshot_when_explicitly_requested";
+    let connector = live_connector(test_name)
+        .await
+        .expect("live TrueNAS variables are required for the manual snapshot test");
+    let dataset = std::env::var("LOOM_TEST_TRUENAS_SNAPSHOT_DATASET")
+        .expect("LOOM_TEST_TRUENAS_SNAPSHOT_DATASET must name an explicitly disposable dataset");
+    let target = format!("dataset:{dataset}");
+    let name = format!("loom-contract-test-{}", Uuid::new_v4().simple());
+
+    let created = connector
+        .execute_action(
+            ACTION_CREATE_SNAPSHOT,
+            Some(&target),
+            json!({ "name": name, "recursive": false }),
+        )
+        .await
+        .expect("the live TrueNAS should create the test snapshot");
+    let snapshot_id = created
+        .payload
+        .as_ref()
+        .and_then(|payload| payload.get("snapshotId"))
+        .and_then(Value::as_str)
+        .expect("createSnapshot should return the created id")
+        .to_owned();
+
+    let rows = connector
+        .list_resource_items(RESOURCE_KIND_SNAPSHOTS, Some(&target))
+        .await
+        .expect("the created snapshot should be listable");
+    assert!(rows.iter().any(|row| row.id == snapshot_id));
+
+    let deleted = connector
+        .execute_action(
+            ACTION_DELETE_SNAPSHOT,
+            Some(&target),
+            json!({ "resourceId": snapshot_id }),
+        )
+        .await
+        .expect("the live TrueNAS should delete the test snapshot");
+    assert!(deleted.success);
+    eprintln!("{test_name}: created and deleted {snapshot_id}");
 }
 
 #[tokio::test]

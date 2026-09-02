@@ -219,15 +219,16 @@ export function ConnectorDetailModal({
         ? null
         : (browsableKinds[0]?.kind ?? "history");
 
-  // A container the reader picked out of the host's log table, if any. The
-  // nested modal below is that container's own detail view — the same component
-  // a dashboard tile opens, so there is one detail view rather than two.
-  //
-  // This cannot recurse: the only kind with clickable rows is `logs`, which is
-  // `hostOnly`, so a modal opened for a target has no log table to click in.
-  const [logTarget, setLogTarget] = React.useState<string | null>(null);
+  // A sub-target picked from a host resource table. The nested modal below is
+  // the same component a dashboard tile opens, so there is one detail view.
+  // Host-only tables cannot appear again inside their target modal, so this
+  // cannot recurse.
+  const [nestedTarget, setNestedTarget] = React.useState<{
+    targetId: string;
+    focusLogs: boolean;
+  } | null>(null);
   React.useEffect(() => {
-    if (!open) setLogTarget(null);
+    if (!open) setNestedTarget(null);
   }, [open]);
 
   const boundActions = new Set(
@@ -315,7 +316,9 @@ export function ConnectorDetailModal({
                           instanceId={instance.id}
                           targetId={placement.targetId}
                           descriptor={kind}
-                          onOpenTarget={setLogTarget}
+                          onOpenTarget={(targetId) =>
+                            setNestedTarget({ targetId, focusLogs: kind.kind === "logs" })
+                          }
                           // The same rule the widgets follow: a viewer without
                           // `connectors.control`, or a connector that cannot be
                           // reached, gets buttons that say why before the click.
@@ -352,14 +355,14 @@ export function ConnectorDetailModal({
           )}
         </div>
       </DialogContent>
-      {logTarget === null ? null : (
+      {nestedTarget === null ? null : (
         <ConnectorDetailModal
-          placement={targetPlacement(placement, logTarget)}
+          placement={targetPlacement(placement, nestedTarget.targetId, nestedTarget.focusLogs)}
           open
           onOpenChange={(next) => {
-            if (!next) setLogTarget(null);
+            if (!next) setNestedTarget(null);
           }}
-          focus="logs"
+          focus={nestedTarget.focusLogs ? "logs" : null}
         />
       )}
     </Dialog>
@@ -375,26 +378,26 @@ export function ConnectorDetailModal({
  * be placed before its log could be read would make the table a list of things
  * you mostly cannot open.
  *
- * The one binding is the log pane, because "open this row" means "show me this
- * container's log" and nothing else was asked for. Everything else the
- * container can do still appears: `ConnectorDetailModal` builds its identity,
- * status and action list from the connector's own descriptors filtered by
- * `targetId`, so the container's start/stop/restart controls arrive under
- * "Other actions" without this having to guess at a layout. Guessing at one is
- * what `default_layout_for` exists for, and it lives in the connector — the
- * backend does not publish a per-target layout, and inventing an approximation
- * here would be a second, worse copy of it.
+ * A log row gets the one log binding it explicitly asks to open. Other
+ * navigable resource rows (TrueNAS pools and datasets) get no invented widget
+ * layout: their target-scoped resource kinds and actions still appear, while
+ * guessing a connector-specific dashboard layout here would create a second,
+ * worse copy of `default_layout_for` in shared UI.
  */
-function targetPlacement(host: DashboardPlacement, targetId: string): DashboardPlacement {
+function targetPlacement(
+  host: DashboardPlacement,
+  targetId: string,
+  includeLog: boolean,
+): DashboardPlacement {
   return {
     ...host,
     // A distinct id so React does not reconcile the nested modal's subtree with
     // the host's, and so any keyed cache below it stays separate.
     id: `${host.id}:${targetId}`,
     targetId,
-    widgetBindings: [
-      { display: { dataPointId: LOG_DATA_POINT_ID, widgetType: "logStream", config: {} } },
-    ],
+    widgetBindings: includeLog
+      ? [{ display: { dataPointId: LOG_DATA_POINT_ID, widgetType: "logStream", config: {} } }]
+      : [],
   };
 }
 

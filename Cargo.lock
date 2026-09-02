@@ -1268,9 +1268,10 @@ dependencies = [
 
 [[package]]
 name = "loom-connector-truenas"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "async-trait",
+ "chrono",
  "futures-util",
  "loom-core",
  "rustls",
