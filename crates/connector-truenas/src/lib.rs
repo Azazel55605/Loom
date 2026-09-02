@@ -32,7 +32,11 @@ use tokio::{
 };
 use tokio_tungstenite::{
     connect_async_tls_with_config,
-    tungstenite::{self, Message},
+    tungstenite::{
+        self,
+        protocol::{frame::coding::CloseCode, CloseFrame},
+        Message,
+    },
     Connector, MaybeTlsStream, WebSocketStream,
 };
 use uuid::Uuid;
@@ -449,20 +453,7 @@ async fn direct_call(socket: &mut Socket, method: &str, params: Value) -> RpcRes
                     .await
                     .map_err(connection_error)?,
                 Some(Ok(Message::Close(frame))) => {
-                    let detail = frame.map_or_else(
-                        || "without a close frame".to_owned(),
-                        |frame| {
-                            let reason = frame.reason.trim();
-                            if reason.is_empty() {
-                                format!("with close code {} and no reason", frame.code)
-                            } else {
-                                format!("with close code {}: {reason}", frame.code)
-                            }
-                        },
-                    );
-                    return Err(TrueNasError::ConnectionFailed(format!(
-                        "TrueNAS closed the WebSocket while waiting for `{method}` {detail}"
-                    )));
+                    return Err(closed_call_error(method, frame));
                 }
                 None => {
                     return Err(TrueNasError::ConnectionFailed(format!(
@@ -476,6 +467,38 @@ async fn direct_call(socket: &mut Socket, method: &str, params: Value) -> RpcRes
     })
     .await
     .map_err(|_| TrueNasError::Timeout)?
+}
+
+fn closed_call_error(method: &str, frame: Option<CloseFrame>) -> TrueNasError {
+    let Some(frame) = frame else {
+        return TrueNasError::ConnectionFailed(format!(
+            "TrueNAS closed the WebSocket while waiting for `{method}` without a close frame"
+        ));
+    };
+    let reason = frame.reason.trim();
+
+    // TrueNAS checks its System > Advanced Settings > Allowed IP Addresses
+    // list after the WebSocket upgrade so clients receive this policy close
+    // instead of an opaque HTTP 403. The relevant source address is Loom's
+    // backend (or its NAT/proxy), which can differ from a workstation where a
+    // manual test succeeded.
+    if frame.code == CloseCode::Policy
+        && reason.eq_ignore_ascii_case("You are not allowed to access this resource")
+    {
+        return TrueNasError::AuthFailed(
+            "TrueNAS denied API access for the Loom backend's source address. Add the backend address or subnet under System > Advanced Settings > Allowed IP Addresses, or leave that list empty to allow all API clients"
+                .to_owned(),
+        );
+    }
+
+    let detail = if reason.is_empty() {
+        format!("with close code {} and no reason", frame.code)
+    } else {
+        format!("with close code {}: {reason}", frame.code)
+    };
+    TrueNasError::ConnectionFailed(format!(
+        "TrueNAS closed the WebSocket while waiting for `{method}` {detail}"
+    ))
 }
 
 fn correlated_result(payload: &[u8], expected_id: Uuid) -> Result<Option<RpcResult>, TrueNasError> {
@@ -760,6 +783,23 @@ mod tests {
                 message: "permission denied".to_owned(),
             })
         );
+    }
+
+    #[test]
+    fn truenas_ip_allowlist_close_is_an_actionable_access_error() {
+        let error = closed_call_error(
+            "auth.login_ex",
+            Some(CloseFrame {
+                code: CloseCode::Policy,
+                reason: "You are not allowed to access this resource".into(),
+            }),
+        );
+
+        let TrueNasError::AuthFailed(reason) = error else {
+            panic!("the policy close must not be reported as a network outage");
+        };
+        assert!(reason.contains("Allowed IP Addresses"));
+        assert!(reason.contains("backend"));
     }
 
     #[tokio::test]
