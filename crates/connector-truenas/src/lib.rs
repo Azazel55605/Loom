@@ -448,7 +448,27 @@ async fn direct_call(socket: &mut Socket, method: &str, params: Value) -> RpcRes
                     .send(Message::Pong(payload))
                     .await
                     .map_err(connection_error)?,
-                Some(Ok(Message::Close(_))) | None => return Err(TrueNasError::Disconnected),
+                Some(Ok(Message::Close(frame))) => {
+                    let detail = frame.map_or_else(
+                        || "without a close frame".to_owned(),
+                        |frame| {
+                            let reason = frame.reason.trim();
+                            if reason.is_empty() {
+                                format!("with close code {} and no reason", frame.code)
+                            } else {
+                                format!("with close code {}: {reason}", frame.code)
+                            }
+                        },
+                    );
+                    return Err(TrueNasError::ConnectionFailed(format!(
+                        "TrueNAS closed the WebSocket while waiting for `{method}` {detail}"
+                    )));
+                }
+                None => {
+                    return Err(TrueNasError::ConnectionFailed(format!(
+                        "the TrueNAS WebSocket ended while waiting for `{method}` without a close frame"
+                    )));
+                }
                 Some(Err(error)) => return Err(connection_error(error)),
                 Some(Ok(_)) => {}
             }
