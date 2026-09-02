@@ -1,17 +1,19 @@
-//! Loom's minimal host-level connector and TLS-only JSON-RPC transport for TrueNAS.
+//! Loom's host, pool, and dataset connector and TLS-only JSON-RPC transport for TrueNAS.
 //!
 //! [`TrueNasClient`] establishes an authenticated, reconnecting WebSocket and
 //! correlates concurrent RPC calls. [`TrueNasConnector`] builds the first
-//! useful connector surface on it: host version and aggregate pool capacity.
+//! useful connector surface on it: host capacity plus pool and dataset targets.
 
 mod config;
 mod connector;
 
 pub use config::{config_schema, TrueNasConnectorConfig};
 pub use connector::{
-    TrueNasConnector, DATA_POINT_FREE_CAPACITY_BYTES, DATA_POINT_POOL_COUNT,
-    DATA_POINT_TOTAL_CAPACITY_BYTES, DATA_POINT_TRUENAS_VERSION, DATA_POINT_USED_CAPACITY_BYTES,
-    DISPLAY_NAME, ICON, TYPE_ID,
+    TrueNasConnector, ACTION_START_SCRUB, DATA_POINT_AVAILABLE_BYTES, DATA_POINT_CAPACITY_PERCENT,
+    DATA_POINT_COMPRESSION_RATIO, DATA_POINT_FREE_BYTES, DATA_POINT_FREE_CAPACITY_BYTES,
+    DATA_POINT_POOL_COUNT, DATA_POINT_SNAPSHOT_COUNT, DATA_POINT_STATUS,
+    DATA_POINT_TOTAL_CAPACITY_BYTES, DATA_POINT_TRUENAS_VERSION, DATA_POINT_USED_BYTES,
+    DATA_POINT_USED_CAPACITY_BYTES, DISPLAY_NAME, ICON, TYPE_ID,
 };
 
 use std::{collections::HashMap, fmt, sync::Arc, time::Duration};
@@ -52,7 +54,13 @@ const OUTGOING_CAPACITY: usize = 128;
 
 type Socket = WebSocketStream<MaybeTlsStream<TcpStream>>;
 type RpcResult = Result<Value, TrueNasError>;
-type PendingRequests = Arc<Mutex<HashMap<Uuid, oneshot::Sender<RpcResult>>>>;
+type JobStartResult = Result<Option<u64>, TrueNasError>;
+type PendingRequests = Arc<Mutex<HashMap<Uuid, PendingWaiter>>>;
+
+enum PendingWaiter {
+    Call(oneshot::Sender<RpcResult>),
+    JobStart(oneshot::Sender<JobStartResult>),
+}
 
 /// A transport failure kept distinct from TrueNAS's own RPC failures.
 #[derive(Debug, Error, PartialEq, Eq)]
@@ -244,7 +252,10 @@ impl TrueNasClient {
         let id = Uuid::new_v4();
         let payload = rpc_request(id, method, params);
         let (response_tx, response_rx) = oneshot::channel();
-        self.pending.lock().await.insert(id, response_tx);
+        self.pending
+            .lock()
+            .await
+            .insert(id, PendingWaiter::Call(response_tx));
 
         if self
             .outgoing
@@ -264,6 +275,67 @@ impl TrueNasClient {
                 Err(TrueNasError::Timeout)
             }
         }
+    }
+
+    /// Starts a TrueNAS job and returns once the server announces the job.
+    ///
+    /// Job method responses arrive only after the work finishes. TrueNAS
+    /// instead identifies a newly started job through the `core.get_jobs`
+    /// event, whose `message_ids` includes this call's JSON-RPC id. Returning
+    /// that event keeps long-running operations from looking like timeouts.
+    /// `None` is possible only when a very short job completes before its
+    /// start event is observed; the successful method response still proves
+    /// that TrueNAS accepted it.
+    pub async fn start_job(
+        &self,
+        method: &str,
+        params: Value,
+    ) -> Result<Option<u64>, TrueNasError> {
+        let subscription = self
+            .call("core.subscribe", json!(["core.get_jobs"]))
+            .await?
+            .as_str()
+            .ok_or_else(|| {
+                TrueNasError::ConnectionFailed(
+                    "core.subscribe did not return a subscription identifier".to_owned(),
+                )
+            })?
+            .to_owned();
+        if self.connection_state() != ConnectionState::Connected {
+            return Err(TrueNasError::Disconnected);
+        }
+
+        let id = Uuid::new_v4();
+        let payload = rpc_request(id, method, params);
+        let (response_tx, response_rx) = oneshot::channel();
+        self.pending
+            .lock()
+            .await
+            .insert(id, PendingWaiter::JobStart(response_tx));
+
+        if self
+            .outgoing
+            .send(OutgoingCall { id, payload })
+            .await
+            .is_err()
+        {
+            self.pending.lock().await.remove(&id);
+            return Err(TrueNasError::Disconnected);
+        }
+
+        let result = match time::timeout(CALL_TIMEOUT, response_rx).await {
+            Ok(Ok(result)) => result,
+            Ok(Err(_)) => Err(TrueNasError::Disconnected),
+            Err(_) => {
+                self.pending.lock().await.remove(&id);
+                Err(TrueNasError::Timeout)
+            }
+        };
+        // The event was needed only to identify this one job. Best-effort
+        // cleanup avoids accumulating duplicate subscriptions on a long-lived
+        // connector; a lost connection drops its subscriptions anyway.
+        let _ = self.call("core.unsubscribe", json!([subscription])).await;
+        result
     }
 
     /// Returns the latest connection state without waiting for a change.
@@ -638,26 +710,79 @@ async fn dispatch_response(payload: &[u8], pending: &PendingRequests) -> Result<
     let message: Value = serde_json::from_slice(payload).map_err(|error| {
         TrueNasError::ConnectionFailed(format!("TrueNAS sent malformed JSON: {error}"))
     })?;
+    if let Some((job_id, message_ids)) = started_job(&message) {
+        let mut pending = pending.lock().await;
+        for id in message_ids {
+            if matches!(pending.get(&id), Some(PendingWaiter::JobStart(_))) {
+                let Some(PendingWaiter::JobStart(waiter)) = pending.remove(&id) else {
+                    continue;
+                };
+                let _ = waiter.send(Ok(Some(job_id)));
+            }
+        }
+        return Ok(());
+    }
+
     let Some(id) = response_id(&message) else {
         return Ok(());
     };
     let Some(waiter) = pending.lock().await.remove(&id) else {
         return Ok(());
     };
-    let _ = waiter.send(result_from_message(&message));
+    match waiter {
+        PendingWaiter::Call(waiter) => {
+            let _ = waiter.send(result_from_message(&message));
+        }
+        PendingWaiter::JobStart(waiter) => {
+            let result = result_from_message(&message).map(|_| None);
+            let _ = waiter.send(result);
+        }
+    }
     Ok(())
+}
+
+fn started_job(message: &Value) -> Option<(u64, Vec<Uuid>)> {
+    if message.get("method").and_then(Value::as_str) != Some("collection_update")
+        || message
+            .pointer("/params/collection")
+            .and_then(Value::as_str)
+            != Some("core.get_jobs")
+    {
+        return None;
+    }
+    let fields = message.pointer("/params/fields")?;
+    let job_id = fields.get("id")?.as_u64()?;
+    let message_ids = fields
+        .get("message_ids")?
+        .as_array()?
+        .iter()
+        .filter_map(Value::as_str)
+        .filter_map(|id| Uuid::parse_str(id).ok())
+        .collect();
+    Some((job_id, message_ids))
 }
 
 async fn fail_all_pending(pending: &PendingRequests) {
     let waiters = std::mem::take(&mut *pending.lock().await);
     for (_, waiter) in waiters {
-        let _ = waiter.send(Err(TrueNasError::Disconnected));
+        fail_waiter(waiter);
     }
 }
 
 async fn fail_one_pending(id: Uuid, pending: &PendingRequests) {
     if let Some(waiter) = pending.lock().await.remove(&id) {
-        let _ = waiter.send(Err(TrueNasError::Disconnected));
+        fail_waiter(waiter);
+    }
+}
+
+fn fail_waiter(waiter: PendingWaiter) {
+    match waiter {
+        PendingWaiter::Call(waiter) => {
+            let _ = waiter.send(Err(TrueNasError::Disconnected));
+        }
+        PendingWaiter::JobStart(waiter) => {
+            let _ = waiter.send(Err(TrueNasError::Disconnected));
+        }
     }
 }
 
@@ -746,8 +871,14 @@ mod tests {
         let pending = Arc::new(Mutex::new(HashMap::new()));
         let (wanted_tx, wanted_rx) = oneshot::channel();
         let (other_tx, mut other_rx) = oneshot::channel();
-        pending.lock().await.insert(wanted, wanted_tx);
-        pending.lock().await.insert(other, other_tx);
+        pending
+            .lock()
+            .await
+            .insert(wanted, PendingWaiter::Call(wanted_tx));
+        pending
+            .lock()
+            .await
+            .insert(other, PendingWaiter::Call(other_tx));
 
         dispatch_response(
             json!({"jsonrpc":"2.0", "id":wanted, "result":"pong"})
@@ -761,6 +892,56 @@ mod tests {
         assert_eq!(wanted_rx.await.unwrap().unwrap(), "pong");
         assert!(matches!(
             other_rx.try_recv(),
+            Err(oneshot::error::TryRecvError::Empty)
+        ));
+    }
+
+    #[tokio::test]
+    async fn a_job_event_resolves_only_its_matching_start_waiter() {
+        let wanted = Uuid::new_v4();
+        let other = Uuid::new_v4();
+        let ordinary = Uuid::new_v4();
+        let pending = Arc::new(Mutex::new(HashMap::new()));
+        let (wanted_tx, wanted_rx) = oneshot::channel();
+        let (other_tx, mut other_rx) = oneshot::channel();
+        let (ordinary_tx, mut ordinary_rx) = oneshot::channel();
+        pending
+            .lock()
+            .await
+            .insert(wanted, PendingWaiter::JobStart(wanted_tx));
+        pending
+            .lock()
+            .await
+            .insert(other, PendingWaiter::JobStart(other_tx));
+        pending
+            .lock()
+            .await
+            .insert(ordinary, PendingWaiter::Call(ordinary_tx));
+
+        dispatch_response(
+            json!({
+                "jsonrpc": "2.0",
+                "method": "collection_update",
+                "params": {
+                    "msg": "added",
+                    "collection": "core.get_jobs",
+                    "fields": { "id": 42, "message_ids": [wanted.to_string(), ordinary.to_string()] }
+                }
+            })
+            .to_string()
+            .as_bytes(),
+            &pending,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(wanted_rx.await.unwrap().unwrap(), Some(42));
+        assert!(matches!(
+            other_rx.try_recv(),
+            Err(oneshot::error::TryRecvError::Empty)
+        ));
+        assert!(matches!(
+            ordinary_rx.try_recv(),
             Err(oneshot::error::TryRecvError::Empty)
         ));
     }
@@ -808,7 +989,10 @@ mod tests {
         let mut receivers = Vec::new();
         for _ in 0..3 {
             let (tx, rx) = oneshot::channel();
-            pending.lock().await.insert(Uuid::new_v4(), tx);
+            pending
+                .lock()
+                .await
+                .insert(Uuid::new_v4(), PendingWaiter::Call(tx));
             receivers.push(rx);
         }
 

@@ -943,7 +943,7 @@ is created, not here.
 | --- | --- | --- | --- |
 | `debug` | A fixture that contacts nothing. Permanent — see `crates/core/src/connector/debug.rs`. | How it should pretend to behave. | Parsing alone; there is nothing to reach. |
 | `docker` | One Docker daemon connection and its host-level aggregate view. Containers are addressable sub-targets of that instance. | Required `dockerHost` (`unix://` or `tcp://`) only. | A real daemon connection and ping. |
-| `truenas` | One TrueNAS host and its host-level version and aggregate pool-capacity view. | Required bare `host`, required API-key owner `username`, sensitive `apiKey`, and optional `allowInsecureCert` (default `false`). | A mandatory-TLS WebSocket connection and `auth.login_ex` API-key authentication. |
+| `truenas` | One TrueNAS host with an aggregate host view plus addressable pool and dataset sub-targets. | Required bare `host`, required API-key owner `username`, sensitive `apiKey`, and optional `allowInsecureCert` (default `false`). | A mandatory-TLS WebSocket connection and `auth.login_ex` API-key authentication. |
 
 The TrueNAS schema rejects schemes and paths in `host`; Loom owns the fixed
 `wss://` scheme and `/api/current` JSON-RPC path. `apiKey` carries
@@ -954,8 +954,16 @@ for self-signed homelab deployments without permitting plaintext transport.
 the current `auth.login_ex` `API_KEY_PLAIN` flow. Stored configurations created
 before the username field was introduced retain the deprecated key-only fallback;
 new configurations require the username.
-The minimal connector publishes `poolCount`, `totalCapacityBytes`,
-`usedCapacityBytes`, `freeCapacityBytes`, and `truenasVersion`. It deliberately
+The host view publishes `poolCount`, `totalCapacityBytes`,
+`usedCapacityBytes`, `freeCapacityBytes`, and `truenasVersion`. Each pool is an
+addressable `pool:{name}` target publishing `status`, `usedBytes`, `freeBytes`,
+and `capacityPercent`, with a disruptive `startScrub` action. A successful
+action result means TrueNAS accepted and started its background scrub job; it
+does not mean the scrub has completed. Each dataset is an addressable
+`dataset:{path}` target publishing `usedBytes`, `availableBytes`,
+`compressionRatio`, and `snapshotCount`, with no actions in this pass. Full
+snapshot browsing and management remain deferred to the resource-browser
+surface. The connector deliberately
 does not mislabel `system.info.physmem` (installed RAM) or `loadavg` as memory
 or CPU utilization.
 
