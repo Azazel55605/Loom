@@ -1,8 +1,18 @@
-//! TLS-only JSON-RPC 2.0 transport for TrueNAS.
+//! Loom's minimal host-level connector and TLS-only JSON-RPC transport for TrueNAS.
 //!
-//! This crate intentionally stops at the transport boundary. It establishes an
-//! authenticated, reconnecting WebSocket and correlates concurrent RPC calls;
-//! it does not implement Loom's `Connector` trait yet.
+//! [`TrueNasClient`] establishes an authenticated, reconnecting WebSocket and
+//! correlates concurrent RPC calls. [`TrueNasConnector`] builds the first
+//! useful connector surface on it: host version and aggregate pool capacity.
+
+mod config;
+mod connector;
+
+pub use config::{config_schema, TrueNasConnectorConfig};
+pub use connector::{
+    TrueNasConnector, DATA_POINT_FREE_CAPACITY_BYTES, DATA_POINT_POOL_COUNT,
+    DATA_POINT_TOTAL_CAPACITY_BYTES, DATA_POINT_TRUENAS_VERSION, DATA_POINT_USED_CAPACITY_BYTES,
+    DISPLAY_NAME, ICON, TYPE_ID,
+};
 
 use std::{collections::HashMap, fmt, sync::Arc, time::Duration};
 

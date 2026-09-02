@@ -868,6 +868,39 @@ the instances they may see are on `/connector-instances`, which asks only for
     },
     "discoverableType": null,
     "discoveryTargetField": null
+  },
+  {
+    "typeId": "truenas",
+    "displayName": "TrueNAS",
+    "icon": "brand:truenas",
+    "configSchema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "title": "TrueNAS connection",
+      "type": "object",
+      "properties": {
+        "host": {
+          "type": "string",
+          "minLength": 1,
+          "description": "TrueNAS hostname or IP address, without a scheme. Loom always connects with encrypted wss:// transport."
+        },
+        "apiKey": {
+          "type": "string",
+          "minLength": 1,
+          "x-loom-sensitive": true,
+          "description": "API key generated from the TrueNAS top-toolbar Settings > API Keys screen."
+        },
+        "allowInsecureCert": {
+          "type": "boolean",
+          "default": false,
+          "description": "Accept a self-signed or otherwise untrusted certificate. TLS encryption remains mandatory; this never enables an unencrypted connection."
+        }
+      },
+      "required": ["host", "apiKey"],
+      "additionalProperties": false
+    },
+    "setupGuide": null,
+    "discoverableType": null,
+    "discoveryTargetField": null
   }
 ]
 ```
@@ -888,8 +921,8 @@ to the connector's factory, which is the only thing that knows what the keys
 mean. A configuration that satisfies the schema's shape can still be refused
 (see [`POST /connector-instances`](#post-connector-instances)).
 
-Today the array holds two: the debug fixture and the unified Docker
-connector. It was an array from day one so that registering a real connector
+Today the array holds three: the debug fixture, the unified Docker connector,
+and the minimal host-level TrueNAS connector. It was an array from day one so that registering a real connector
 type is an insertion rather than a reshape of this response, which is exactly
 what adding Docker turned out to be.
 
@@ -905,6 +938,17 @@ is created, not here.
 | --- | --- | --- | --- |
 | `debug` | A fixture that contacts nothing. Permanent — see `crates/core/src/connector/debug.rs`. | How it should pretend to behave. | Parsing alone; there is nothing to reach. |
 | `docker` | One Docker daemon connection and its host-level aggregate view. Containers are addressable sub-targets of that instance. | Required `dockerHost` (`unix://` or `tcp://`) only. | A real daemon connection and ping. |
+| `truenas` | One TrueNAS host and its host-level version and aggregate pool-capacity view. | Required bare `host`, sensitive `apiKey`, and optional `allowInsecureCert` (default `false`). | A mandatory-TLS WebSocket connection and API-key authentication. |
+
+The TrueNAS schema rejects schemes and paths in `host`; Loom owns the fixed
+`wss://` scheme and `/api/current` JSON-RPC path. `apiKey` carries
+`"x-loom-sensitive": true`, so it follows the encrypted-at-rest and
+redact-on-read contract. `allowInsecureCert` opts out of certificate validation
+for self-signed homelab deployments without permitting plaintext transport.
+The minimal connector publishes `poolCount`, `totalCapacityBytes`,
+`usedCapacityBytes`, `freeCapacityBytes`, and `truenasVersion`. It deliberately
+does not mislabel `system.info.physmem` (installed RAM) or `loadavg` as memory
+or CPU utilization.
 
 **Creating a `docker` instance actually connects.** `POST
 /connector-instances` opens and pings the endpoint before writing a row. An

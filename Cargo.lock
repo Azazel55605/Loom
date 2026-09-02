@@ -1268,8 +1268,9 @@ dependencies = [
 
 [[package]]
 name = "loom-connector-truenas"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
+ "async-trait",
  "futures-util",
  "loom-core",
  "rustls",
@@ -1309,6 +1310,7 @@ dependencies = [
  "image",
  "jsonwebtoken",
  "loom-connector-docker",
+ "loom-connector-truenas",
  "loom-core",
  "rand 0.8.7",
  "serde",

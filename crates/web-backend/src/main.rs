@@ -1369,7 +1369,11 @@ mod tests {
         assert_eq!(status, StatusCode::OK);
 
         let types = body.as_array().expect("array");
-        assert_eq!(types.len(), 2, "the catalog should contain one Docker type");
+        assert_eq!(
+            types.len(),
+            3,
+            "the catalog should contain Debug, Docker, and TrueNAS"
+        );
         assert!(types.iter().all(|entry| {
             entry["typeId"] != "docker-host" && entry["typeId"] != "docker-container"
         }));
@@ -1433,6 +1437,16 @@ mod tests {
                 .any(|toggle| toggle["envVar"] == "CONTAINERS")));
         assert_eq!(docker["discoverableType"], serde_json::Value::Null);
         assert_eq!(docker["discoveryTargetField"], serde_json::Value::Null);
+
+        let truenas = by_id("truenas");
+        assert_eq!(truenas["displayName"], "TrueNAS");
+        assert_eq!(truenas["icon"], "brand:truenas");
+        assert_eq!(
+            truenas["configSchema"]["properties"]["apiKey"]["x-loom-sensitive"],
+            true
+        );
+        assert_eq!(truenas["setupGuide"], serde_json::Value::Null);
+        assert_eq!(truenas["discoverableType"], serde_json::Value::Null);
     }
 
     #[tokio::test]

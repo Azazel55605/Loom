@@ -31,7 +31,7 @@ dependencies are fetched by Cargo on first build; no separate step.
 | --- | --- | --- |
 | core (library) | `pnpm build:core` | Compiled rlib inside `target/release/`. No standalone artifact — Core is a library and never runs on its own. |
 | connector-docker (library) | `pnpm build:connector-docker` | Compiled rlib inside `target/release/`. Like Core, a library: it is linked into web-backend, which is what decides that this build has a Docker connector in it. |
-| connector-truenas (transport library) | `pnpm build:connector-truenas` | Compiled rlib inside `target/release/`. Transport-only for now: connector behavior and backend registration are intentionally deferred. |
+| connector-truenas | `pnpm build:connector-truenas` | Compiled rlib inside `target/release/`. TLS-only JSON-RPC transport plus the minimal host-level TrueNAS connector. |
 | web-backend | `pnpm build:web-backend` | `target/release/loom-web-backend` binary |
 | web-frontend | `pnpm build:web-frontend` | `apps/web-frontend/dist/` static site |
 | desktop | `pnpm build:desktop` | Platform installers in `apps/desktop/src-tauri/target/release/bundle/` |

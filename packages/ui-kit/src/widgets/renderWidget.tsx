@@ -106,7 +106,11 @@ export function renderWidget({
       label: descriptor.label,
       unit: descriptor.unit,
       value: statusDetails[dataPointId],
-      config,
+      // Some bounded readings derive their upper bound from another reading
+      // in the same atomic status snapshot (for example used bytes relative
+      // to total bytes). Keep that relationship declarative in the connector
+      // layout rather than teaching a primitive about connector-specific ids.
+      config: resolveStatusConfig(config, statusDetails),
       className,
     };
 
@@ -208,6 +212,19 @@ export function renderWidget({
   // is the same sentence for all of them and it comes from the *connector's*
   // state, not the widget's.
   return <Unavailable reason={unavailableReason}>{control}</Unavailable>;
+}
+
+function resolveStatusConfig(
+  config: unknown,
+  statusDetails: Record<string, unknown>,
+): unknown {
+  const source = asObject(config);
+  const maxDataPointId = source.maxDataPointId;
+  if (typeof maxDataPointId !== "string") return config;
+
+  const max = statusDetails[maxDataPointId];
+  if (typeof max !== "number" || !Number.isFinite(max)) return config;
+  return { ...source, max };
 }
 
 /**

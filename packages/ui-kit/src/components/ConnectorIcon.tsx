@@ -54,6 +54,7 @@ const FALLBACK_ICON = "server";
  */
 const BRAND_ICONS: Record<string, () => Promise<{ default: string }>> = {
   docker: () => import("../assets/icons/brand/docker.svg?raw"),
+  truenas: () => import("../assets/icons/brand/truenas.svg?raw"),
 };
 
 /** Resolved brand markup, so only the first render of a given brand waits. */

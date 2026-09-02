@@ -15,6 +15,7 @@ use std::pin::Pin;
 use std::sync::Arc;
 
 use loom_connector_docker::DockerConnector;
+use loom_connector_truenas::TrueNasConnector;
 use loom_core::connector::debug::DebugConnector;
 use loom_core::connector::{Connector, ConnectorError, SetupGuide};
 use serde_json::Value;
@@ -78,8 +79,8 @@ pub type ConnectorTypeRegistry = Arc<HashMap<&'static str, ConnectorTypeRegistra
 
 /// The types compiled into this build.
 ///
-/// Two today: the debug fixture and the unified Docker connector. Further
-/// integrations (a reverse proxy, a hypervisor) register here alongside them,
+/// Three today: the debug fixture, Docker, and TrueNAS. Further integrations
+/// (a reverse proxy, a hypervisor) register here alongside them,
 /// and nothing else in the backend has to change when they do — that is the
 /// point of the indirection.
 pub fn builtin_registry() -> ConnectorTypeRegistry {
@@ -147,6 +148,30 @@ pub fn builtin_registry() -> ConnectorTypeRegistry {
             // Containers are addressable sub-targets of this one connection,
             // not proposals for separate connector instances.
             setup_guide: Some(loom_connector_docker::setup_guide()),
+            discoverable_type: None,
+            discovery_target_field: None,
+        },
+    );
+
+    // Like Docker, a TrueNAS connector must contact its configured service to
+    // exist, so every descriptor needed before construction comes from shared
+    // crate-level constants/functions rather than a fake default instance.
+    types.insert(
+        loom_connector_truenas::TYPE_ID,
+        ConnectorTypeRegistration {
+            type_id: loom_connector_truenas::TYPE_ID,
+            display_name: loom_connector_truenas::DISPLAY_NAME,
+            icon: Some(loom_connector_truenas::ICON.to_owned()),
+            factory: |config| {
+                Box::pin(async move {
+                    TrueNasConnector::from_config_value(config)
+                        .await
+                        .map(|connector| Box::new(connector) as Box<dyn Connector>)
+                })
+            },
+            connection_test_factory: None,
+            schema: loom_connector_truenas::config_schema(),
+            setup_guide: None,
             discoverable_type: None,
             discovery_target_field: None,
         },
@@ -226,6 +251,25 @@ mod tests {
         // not claim it unconditionally.
         assert!(registration.discoverable_type.is_none());
         assert!(registration.discovery_target_field.is_none());
+    }
+
+    #[test]
+    fn the_truenas_type_is_registered_with_an_encrypted_api_key_schema() {
+        let registry = builtin_registry();
+        let registration = registry
+            .get(loom_connector_truenas::TYPE_ID)
+            .expect("the TrueNAS type must be registered");
+
+        assert_eq!(registration.type_id, "truenas");
+        assert_eq!(registration.display_name, "TrueNAS");
+        assert_eq!(registration.icon.as_deref(), Some("brand:truenas"));
+        assert_eq!(
+            registration.schema["properties"]["apiKey"]["x-loom-sensitive"],
+            true
+        );
+        assert!(registration.setup_guide.is_none());
+        assert!(registration.connection_test_factory.is_none());
+        assert!(registration.discoverable_type.is_none());
     }
 
     #[tokio::test]

@@ -3,11 +3,12 @@ name = "loom-connector-truenas"
 description = "TLS-only JSON-RPC-over-WebSocket transport for TrueNAS."
 edition.workspace = true
 license.workspace = true
-version = "0.1.0"
+version = "0.1.1"
 repository.workspace = true
 rust-version.workspace = true
 
 [dependencies]
+async-trait.workspace = true
 futures-util = { workspace = true, features = ["sink"] }
 loom-core.workspace = true
 rustls.workspace = true

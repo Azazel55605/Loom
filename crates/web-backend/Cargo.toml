@@ -13,6 +13,7 @@ path = "src/main.rs"
 
 [dependencies]
 loom-connector-docker.workspace = true
+loom-connector-truenas.workspace = true
 loom-core.workspace = true
 aes-gcm.workspace = true
 argon2.workspace = true
