@@ -85,9 +85,26 @@ impl TrueNasConnector {
             self.client
                 .call(METHOD_DATASET_QUERY, dataset_query_params()),
         );
+        // Host identity and pool health are the connector's availability
+        // boundary. Dataset telemetry enriches that reading, but an API key
+        // without DATASET_READ (or one inaccessible dataset) must not make an
+        // otherwise reachable TrueNAS host look offline.
         let system = system.map_err(|error| error.to_string())?;
         let pools = map_pool_readings(pools.map_err(|error| error.to_string())?)?;
-        let mut datasets = map_dataset_readings(datasets.map_err(|error| error.to_string())?)?;
+        let mut warnings = Vec::new();
+        let mut datasets = match datasets {
+            Ok(value) => match map_dataset_readings(value) {
+                Ok(datasets) => datasets,
+                Err(error) => {
+                    warnings.push(error);
+                    Vec::new()
+                }
+            },
+            Err(error) => {
+                warnings.push(format!("{METHOD_DATASET_QUERY} failed: {error}"));
+                Vec::new()
+            }
+        };
 
         let counts = join_all(datasets.iter().map(|dataset| {
             self.client
@@ -95,12 +112,19 @@ impl TrueNasConnector {
         }))
         .await;
         for (dataset, count) in datasets.iter_mut().zip(counts) {
-            dataset.snapshot_count = count
-                .map_err(|error| error.to_string())?
-                .as_u64()
-                .ok_or_else(|| {
-                    format!("{METHOD_SNAPSHOT_COUNT} did not return an unsigned integer")
-                })?;
+            match count {
+                Ok(value) => match value.as_u64() {
+                    Some(count) => dataset.snapshot_count = Some(count),
+                    None => warnings.push(format!(
+                        "{METHOD_SNAPSHOT_COUNT} returned no unsigned integer for `{}`",
+                        dataset.path
+                    )),
+                },
+                Err(error) => warnings.push(format!(
+                    "{METHOD_SNAPSHOT_COUNT} failed for `{}`: {error}",
+                    dataset.path
+                )),
+            }
         }
 
         let host = map_host_readings_from_pools(system, &pools)?;
@@ -108,6 +132,7 @@ impl TrueNasConnector {
             host,
             pools,
             datasets,
+            warnings,
         };
         self.remember_targets(inventory.sub_targets());
         Ok(inventory)
@@ -187,10 +212,25 @@ impl loom_core::connector::Connector for TrueNasConnector {
                     DATA_POINT_COMPRESSION_RATIO,
                     json!(dataset.compression_ratio),
                 ),
-                (DATA_POINT_SNAPSHOT_COUNT, json!(dataset.snapshot_count)),
             ] {
                 set_detail(&mut details, Some(&target_id), id, value);
             }
+            if let Some(snapshot_count) = dataset.snapshot_count {
+                set_detail(
+                    &mut details,
+                    Some(&target_id),
+                    DATA_POINT_SNAPSHOT_COUNT,
+                    json!(snapshot_count),
+                );
+            }
+        }
+        if !inventory.warnings.is_empty() {
+            set_detail(
+                &mut details,
+                None,
+                "error",
+                json!(inventory.warnings.join("; ")),
+            );
         }
 
         Ok(ConnectorStatus::new(inventory.health(), details))
@@ -440,7 +480,7 @@ struct DatasetReadings {
     used_bytes: u64,
     available_bytes: u64,
     compression_ratio: f64,
-    snapshot_count: u64,
+    snapshot_count: Option<u64>,
 }
 
 #[derive(Debug, PartialEq)]
@@ -448,6 +488,7 @@ struct InventoryReadings {
     host: HostReadings,
     pools: Vec<PoolReadings>,
     datasets: Vec<DatasetReadings>,
+    warnings: Vec<String>,
 }
 
 impl InventoryReadings {
@@ -456,11 +497,14 @@ impl InventoryReadings {
     }
 
     fn health(&self) -> HealthState {
-        self.pools
-            .iter()
-            .fold(HealthState::Healthy, |overall, pool| {
-                worse_health(overall, pool_health(&pool.status))
-            })
+        let initial = if self.warnings.is_empty() {
+            HealthState::Healthy
+        } else {
+            HealthState::Degraded
+        };
+        self.pools.iter().fold(initial, |overall, pool| {
+            worse_health(overall, pool_health(&pool.status))
+        })
     }
 }
 
@@ -537,7 +581,7 @@ fn map_dataset_readings(value: Value) -> Result<Vec<DatasetReadings>, String> {
                 used_bytes: dataset_property_u64(dataset, "used")?,
                 available_bytes: dataset_property_u64(dataset, "available")?,
                 compression_ratio: dataset_property_number(dataset, "compressratio")?,
-                snapshot_count: 0,
+                snapshot_count: None,
             })
         })
         .collect()
@@ -825,7 +869,7 @@ mod tests {
             used_bytes: 10,
             available_bytes: 90,
             compression_ratio: 1.1,
-            snapshot_count: 2,
+            snapshot_count: Some(2),
         }];
 
         assert_eq!(
@@ -847,5 +891,55 @@ mod tests {
             connector_error(TrueNasError::ConnectionFailed("refused".to_owned())),
             ConnectorError::Unreachable { .. }
         ));
+    }
+
+    #[test]
+    fn optional_dataset_failures_degrade_but_do_not_mark_the_host_down() {
+        let inventory = InventoryReadings {
+            host: HostReadings {
+                version: "25.10".to_owned(),
+                pool_count: 1,
+                total_capacity_bytes: 100,
+                used_capacity_bytes: 25,
+                free_capacity_bytes: 75,
+            },
+            pools: vec![PoolReadings {
+                name: "tank".to_owned(),
+                status: "ONLINE".to_owned(),
+                size_bytes: 100,
+                used_bytes: 25,
+                free_bytes: 75,
+                capacity_percent: 25.0,
+            }],
+            datasets: Vec::new(),
+            warnings: vec!["pool.dataset.query failed: permission denied".to_owned()],
+        };
+
+        assert_eq!(inventory.health(), HealthState::Degraded);
+    }
+
+    #[test]
+    fn a_failed_pool_still_marks_the_connector_down_when_telemetry_is_partial() {
+        let inventory = InventoryReadings {
+            host: HostReadings {
+                version: "25.10".to_owned(),
+                pool_count: 1,
+                total_capacity_bytes: 100,
+                used_capacity_bytes: 25,
+                free_capacity_bytes: 75,
+            },
+            pools: vec![PoolReadings {
+                name: "tank".to_owned(),
+                status: "FAULTED".to_owned(),
+                size_bytes: 100,
+                used_bytes: 25,
+                free_bytes: 75,
+                capacity_percent: 25.0,
+            }],
+            datasets: Vec::new(),
+            warnings: vec!["snapshot count unavailable".to_owned()],
+        };
+
+        assert_eq!(inventory.health(), HealthState::Down);
     }
 }
