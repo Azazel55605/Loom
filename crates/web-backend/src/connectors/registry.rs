@@ -267,6 +267,9 @@ mod tests {
             registration.schema["properties"]["apiKey"]["x-loom-sensitive"],
             true
         );
+        assert!(registration.schema["required"]
+            .as_array()
+            .is_some_and(|required| required.iter().any(|field| field == "username")));
         assert!(registration.setup_guide.is_none());
         assert!(registration.connection_test_factory.is_none());
         assert!(registration.discoverable_type.is_none());

@@ -1445,6 +1445,9 @@ mod tests {
             truenas["configSchema"]["properties"]["apiKey"]["x-loom-sensitive"],
             true
         );
+        assert!(truenas["configSchema"]["required"]
+            .as_array()
+            .is_some_and(|required| required.iter().any(|field| field == "username")));
         assert_eq!(truenas["setupGuide"], serde_json::Value::Null);
         assert_eq!(truenas["discoverableType"], serde_json::Value::Null);
     }

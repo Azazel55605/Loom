@@ -39,10 +39,25 @@ impl TrueNasConnector {
     /// Validates configuration and proves the WSS/authentication boundary.
     pub async fn from_config_value(value: Value) -> Result<Self, ConnectorError> {
         let config = TrueNasConnectorConfig::from_value(value)?;
-        let client =
-            TrueNasClient::connect(&config.host, &config.api_key, config.allow_insecure_cert)
+        let client = match config.username.as_deref() {
+            Some(username) => {
+                TrueNasClient::connect_with_username(
+                    &config.host,
+                    username,
+                    &config.api_key,
+                    config.allow_insecure_cert,
+                )
                 .await
-                .map_err(connector_error)?;
+            }
+            // Compatibility for connector rows stored before `username` was
+            // added. New submissions cannot take this path because the
+            // published schema requires the field.
+            None => {
+                TrueNasClient::connect(&config.host, &config.api_key, config.allow_insecure_cert)
+                    .await
+            }
+        }
+        .map_err(connector_error)?;
 
         Ok(Self { config, client })
     }

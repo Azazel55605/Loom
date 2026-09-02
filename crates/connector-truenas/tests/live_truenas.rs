@@ -1,8 +1,8 @@
 //! Opt-in connectivity proof against a real TrueNAS system.
 //!
 //! Set `LOOM_TEST_TRUENAS_HOST` and `LOOM_TEST_TRUENAS_API_KEY` to enable it.
-//! `LOOM_TEST_TRUENAS_USERNAME` selects the preferred `auth.login_ex` path;
-//! without it, the stable key-only compatibility method is used. Set
+//! `LOOM_TEST_TRUENAS_USERNAME` selects the preferred `auth.login_ex` path for
+//! the transport test and is required by the connector test. Set
 //! `LOOM_TEST_TRUENAS_ALLOW_INSECURE_CERT=1` only for a self-signed test system.
 
 use loom_connector_truenas::{
@@ -61,13 +61,18 @@ async fn a_real_truenas_maps_host_level_connector_readings() {
         eprintln!("SKIPPING {test_name}: LOOM_TEST_TRUENAS_API_KEY is not set");
         return;
     };
+    let Ok(username) = std::env::var("LOOM_TEST_TRUENAS_USERNAME") else {
+        eprintln!("SKIPPING {test_name}: LOOM_TEST_TRUENAS_USERNAME is not set");
+        return;
+    };
     let allow_insecure_cert =
         std::env::var("LOOM_TEST_TRUENAS_ALLOW_INSECURE_CERT").as_deref() == Ok("1");
 
-    // The connector's public schema deliberately needs only the key, matching
-    // the compatibility authentication path exposed by `TrueNasClient`.
+    // Exercise the same current username-plus-key path published by the
+    // connector schema and used by the real add-instance dialog.
     let connector = match TrueNasConnector::from_config_value(json!({
         "host": host,
+        "username": username,
         "apiKey": api_key,
         "allowInsecureCert": allow_insecure_cert
     }))

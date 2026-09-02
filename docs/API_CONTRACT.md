@@ -883,6 +883,11 @@ the instances they may see are on `/connector-instances`, which asks only for
           "minLength": 1,
           "description": "TrueNAS hostname or IP address, without a scheme. Loom always connects with encrypted wss:// transport."
         },
+        "username": {
+          "type": "string",
+          "minLength": 1,
+          "description": "TrueNAS username that owns the API key. This is required by the current auth.login_ex API-key authentication flow."
+        },
         "apiKey": {
           "type": "string",
           "minLength": 1,
@@ -895,7 +900,7 @@ the instances they may see are on `/connector-instances`, which asks only for
           "description": "Accept a self-signed or otherwise untrusted certificate. TLS encryption remains mandatory; this never enables an unencrypted connection."
         }
       },
-      "required": ["host", "apiKey"],
+      "required": ["host", "username", "apiKey"],
       "additionalProperties": false
     },
     "setupGuide": null,
@@ -938,13 +943,17 @@ is created, not here.
 | --- | --- | --- | --- |
 | `debug` | A fixture that contacts nothing. Permanent — see `crates/core/src/connector/debug.rs`. | How it should pretend to behave. | Parsing alone; there is nothing to reach. |
 | `docker` | One Docker daemon connection and its host-level aggregate view. Containers are addressable sub-targets of that instance. | Required `dockerHost` (`unix://` or `tcp://`) only. | A real daemon connection and ping. |
-| `truenas` | One TrueNAS host and its host-level version and aggregate pool-capacity view. | Required bare `host`, sensitive `apiKey`, and optional `allowInsecureCert` (default `false`). | A mandatory-TLS WebSocket connection and API-key authentication. |
+| `truenas` | One TrueNAS host and its host-level version and aggregate pool-capacity view. | Required bare `host`, required API-key owner `username`, sensitive `apiKey`, and optional `allowInsecureCert` (default `false`). | A mandatory-TLS WebSocket connection and `auth.login_ex` API-key authentication. |
 
 The TrueNAS schema rejects schemes and paths in `host`; Loom owns the fixed
 `wss://` scheme and `/api/current` JSON-RPC path. `apiKey` carries
 `"x-loom-sensitive": true`, so it follows the encrypted-at-rest and
 redact-on-read contract. `allowInsecureCert` opts out of certificate validation
 for self-signed homelab deployments without permitting plaintext transport.
+`username` identifies the account that owns the API key and is sent with it via
+the current `auth.login_ex` `API_KEY_PLAIN` flow. Stored configurations created
+before the username field was introduced retain the deprecated key-only fallback;
+new configurations require the username.
 The minimal connector publishes `poolCount`, `totalCapacityBytes`,
 `usedCapacityBytes`, `freeCapacityBytes`, and `truenasVersion`. It deliberately
 does not mislabel `system.info.physmem` (installed RAM) or `loadavg` as memory
