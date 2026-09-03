@@ -57,6 +57,33 @@ async fn a_real_truenas_answers_core_ping() {
 }
 
 #[tokio::test]
+async fn a_real_truenas_reports_setup_capabilities_without_writes() {
+    let test_name = "a_real_truenas_reports_setup_capabilities_without_writes";
+    let Some(connector) = live_connector(test_name).await else {
+        return;
+    };
+
+    let result = connector.test_connection().await;
+    assert!(
+        result.reachable,
+        "the live TrueNAS connection test should be reachable: {:?}",
+        result.message
+    );
+    assert_eq!(result.capabilities.len(), 6);
+    for capability in result.capabilities {
+        eprintln!(
+            "{test_name}: {}={}{}",
+            capability.key,
+            capability.available,
+            capability
+                .note
+                .map(|note| format!(" ({note})"))
+                .unwrap_or_default()
+        );
+    }
+}
+
+#[tokio::test]
 async fn a_real_truenas_lists_and_reads_pool_and_dataset_targets() {
     let test_name = "a_real_truenas_lists_and_reads_pool_and_dataset_targets";
     let Some(connector) = live_connector(test_name).await else {

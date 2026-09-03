@@ -1,16 +1,20 @@
 //! TrueNAS host, pool, and dataset connector surface.
 
-use std::{collections::HashMap, sync::Mutex};
+use std::{
+    collections::{HashMap, HashSet},
+    sync::Mutex,
+};
 
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use futures_util::future::join_all;
 use loom_core::connector::{
-    details::set_detail, ActionResult, ActionWidgetType, ApplicableTarget, ChartType,
-    ColumnDescriptor, ColumnValueType, ConnectorAction, ConnectorError, ConnectorMetadata,
-    ConnectorStatus, DataPointDescriptor, DataPointValueType, DisplayField, DisplayWidgetType,
-    HealthState, NetworkTarget, ResourceItem, ResourceKindDescriptor, SubTarget, WidgetBinding,
-    WidgetLayout,
+    details::set_detail, ActionResult, ActionWidgetType, ApplicableTarget, CapabilityRequirement,
+    CapabilityStatus, ChartType, ColumnDescriptor, ColumnValueType, ConnectionTestResult,
+    ConnectorAction, ConnectorError, ConnectorMetadata, ConnectorStatus, DataPointDescriptor,
+    DataPointValueType, DisplayField, DisplayWidgetType, HealthState, NetworkTarget, ResourceItem,
+    ResourceKindDescriptor, SetupGuide, SetupGuideToggle, SetupGuideVariant, SubTarget,
+    WidgetBinding, WidgetLayout,
 };
 use serde_json::{json, Map, Value};
 
@@ -46,6 +50,15 @@ pub const RESOURCE_KIND_DATASETS: &str = "datasets";
 pub const RESOURCE_KIND_SNAPSHOTS: &str = "snapshots";
 pub const RESOURCE_KIND_ALERTS: &str = "alerts";
 
+pub const CAPABILITY_READ_POOLS: &str = "read-pools";
+pub const CAPABILITY_READ_DATASETS: &str = "read-datasets";
+pub const CAPABILITY_READ_ALERTS: &str = "read-alerts";
+pub const CAPABILITY_MANAGE_SNAPSHOTS: &str = "manage-snapshot-actions";
+pub const CAPABILITY_TRIGGER_SCRUB: &str = "trigger-scrub";
+pub const CAPABILITY_DISMISS_ALERTS: &str = "dismiss-alerts";
+
+const METHOD_CORE_PING: &str = "core.ping";
+const METHOD_AUTH_ME: &str = "auth.me";
 const METHOD_SYSTEM_INFO: &str = "system.info";
 const METHOD_POOL_QUERY: &str = "pool.query";
 const METHOD_DATASET_QUERY: &str = "pool.dataset.query";
@@ -59,6 +72,130 @@ const METHOD_ALERT_LIST: &str = "alert.list";
 const METHOD_ALERT_DISMISS: &str = "alert.dismiss";
 const RESOURCE_ID_PARAM: &str = "resourceId";
 const DEFAULT_SNAPSHOT_NAMING_SCHEMA: &str = "loom-%Y-%m-%d_%H-%M-%S";
+
+const ROLE_POOL_READ: &str = "POOL_READ";
+const ROLE_DATASET_READ: &str = "DATASET_READ";
+const ROLE_ALERT_LIST_READ: &str = "ALERT_LIST_READ";
+const ROLE_SNAPSHOT_WRITE: &str = "SNAPSHOT_WRITE";
+const ROLE_SNAPSHOT_DELETE: &str = "SNAPSHOT_DELETE";
+const ROLE_POOL_WRITE: &str = "POOL_WRITE";
+const ROLE_ALERT_LIST_WRITE: &str = "ALERT_LIST_WRITE";
+const ROLE_FULL_ADMIN: &str = "FULL_ADMIN";
+
+fn setup_toggle(
+    key: &str,
+    role: &str,
+    label: &str,
+    description: &str,
+    default: bool,
+) -> SetupGuideToggle {
+    SetupGuideToggle {
+        key: key.to_owned(),
+        env_var: role.to_owned(),
+        label: label.to_owned(),
+        description: description.to_owned(),
+        default,
+        recommended: default,
+    }
+}
+
+fn capability_requirement(
+    key: &str,
+    label: &str,
+    required_toggle_keys: &[&str],
+) -> CapabilityRequirement {
+    CapabilityRequirement {
+        capability_key: key.to_owned(),
+        label: label.to_owned(),
+        required_toggle_keys: required_toggle_keys
+            .iter()
+            .map(|key| (*key).to_owned())
+            .collect(),
+    }
+}
+
+/// Type-level instructions for creating a user-linked TrueNAS API key with
+/// only the effective RBAC roles needed by the selected Loom features.
+pub fn setup_guide() -> SetupGuide {
+    SetupGuide {
+        variants: vec![SetupGuideVariant {
+            id: "api-key".to_owned(),
+            label: "Connect via API key".to_owned(),
+            description: "In TrueNAS, open the top-right account/settings menu, choose My API Keys, then Add API Key. Alternatively, go to Credentials > Users, select the account, and choose Add/View API Keys. API keys inherit the associated user's privileges: create a dedicated user/group and assign its privilege under Credentials > Groups > Privileges when you want limited access. TLS is mandatory because API keys are password-equivalent, and TrueNAS can automatically revoke a key used over an unencrypted connection. Loom never offers plaintext transport: allowInsecureCert accepts an untrusted or self-signed certificate but the connection remains encrypted."
+                .to_owned(),
+            template: "TrueNAS API-key checklist\n\nHost: {{host}}\nAPI-key owner: {{username}}\nTransport: encrypted WSS only\nBaseline role required for host verification: READONLY_ADMIN\n\nSelected feature roles (1 = include, 0 = omit):\nPOOL_READ — pools: {{POOL_READ}}\nDATASET_READ — datasets: {{DATASET_READ}}\nALERT_LIST_READ — alerts: {{ALERT_LIST_READ}}\nSNAPSHOT_WRITE + SNAPSHOT_DELETE — snapshot management: {{SNAPSHOT_MANAGE}}\nPOOL_WRITE — trigger pool scrubs: {{POOL_WRITE}}\nALERT_LIST_WRITE — dismiss alerts: {{ALERT_LIST_WRITE}}\n\nREADONLY_ADMIN includes the read roles above; their switches document the individual endpoint requirements. The API key itself has no separate allowlist: roles belong to the associated user's group privilege. The API key value is entered in the Configuration tab and is never repeated in this guide."
+                .to_owned(),
+            toggles: vec![
+                setup_toggle(
+                    "readPools",
+                    ROLE_POOL_READ,
+                    "Read pools",
+                    "Grant POOL_READ so Loom can list pools and read capacity and health.",
+                    true,
+                ),
+                setup_toggle(
+                    "readDatasets",
+                    ROLE_DATASET_READ,
+                    "Read datasets",
+                    "Grant DATASET_READ so Loom can list datasets and their storage properties.",
+                    true,
+                ),
+                setup_toggle(
+                    "readAlerts",
+                    ROLE_ALERT_LIST_READ,
+                    "Read alerts",
+                    "Grant ALERT_LIST_READ so Loom can list active TrueNAS alerts.",
+                    true,
+                ),
+                setup_toggle(
+                    "manageSnapshots",
+                    "SNAPSHOT_MANAGE",
+                    "Manage snapshots",
+                    "Grant SNAPSHOT_WRITE and SNAPSHOT_DELETE so Loom can list, create, roll back, and delete snapshots.",
+                    false,
+                ),
+                setup_toggle(
+                    "triggerScrub",
+                    ROLE_POOL_WRITE,
+                    "Trigger pool scrubs",
+                    "Grant POOL_WRITE so Loom can start a scrub for a pool.",
+                    false,
+                ),
+                setup_toggle(
+                    "dismissAlerts",
+                    ROLE_ALERT_LIST_WRITE,
+                    "Dismiss alerts",
+                    "Grant ALERT_LIST_WRITE so Loom can dismiss an active alert.",
+                    false,
+                ),
+            ],
+            capability_requirements: vec![
+                capability_requirement(CAPABILITY_READ_POOLS, "Read pools", &["readPools"]),
+                capability_requirement(
+                    CAPABILITY_READ_DATASETS,
+                    "Read datasets",
+                    &["readDatasets"],
+                ),
+                capability_requirement(CAPABILITY_READ_ALERTS, "Read alerts", &["readAlerts"]),
+                capability_requirement(
+                    CAPABILITY_MANAGE_SNAPSHOTS,
+                    "Manage snapshots",
+                    &["manageSnapshots"],
+                ),
+                capability_requirement(
+                    CAPABILITY_TRIGGER_SCRUB,
+                    "Trigger pool scrubs",
+                    &["triggerScrub"],
+                ),
+                capability_requirement(
+                    CAPABILITY_DISMISS_ALERTS,
+                    "Dismiss alerts",
+                    &["dismissAlerts"],
+                ),
+            ],
+        }],
+    }
+}
 
 /// One configured and authenticated TrueNAS host.
 #[derive(Debug)]
@@ -325,6 +462,34 @@ impl loom_core::connector::Connector for TrueNasConnector {
         Ok(status)
     }
 
+    async fn test_connection(&self) -> ConnectionTestResult {
+        match self.client.call(METHOD_CORE_PING, json!([])).await {
+            Ok(Value::String(response)) if response == "pong" => {}
+            Ok(response) => {
+                return unreachable_connection(format!(
+                    "{METHOD_CORE_PING} returned {response} instead of `pong`"
+                ));
+            }
+            Err(error) => {
+                return unreachable_connection(format!("{METHOD_CORE_PING} failed: {error}"));
+            }
+        }
+
+        if let Err(error) = self.client.call(METHOD_SYSTEM_INFO, json!([])).await {
+            return unreachable_connection(format!("{METHOD_SYSTEM_INFO} failed: {error}"));
+        }
+
+        let (pools, datasets, alerts, session) = tokio::join!(
+            self.client.call(METHOD_POOL_QUERY, json!([])),
+            self.client
+                .call(METHOD_DATASET_QUERY, dataset_query_params()),
+            self.client.call(METHOD_ALERT_LIST, json!([])),
+            self.client.call(METHOD_AUTH_ME, json!([])),
+        );
+
+        connection_test_from_results(pools, datasets, alerts, session)
+    }
+
     async fn actions(&self) -> Vec<ConnectorAction> {
         let Ok(targets) = self.list_sub_targets_live().await else {
             return Vec::new();
@@ -515,6 +680,10 @@ impl loom_core::connector::Connector for TrueNasConnector {
 
     fn config_schema(&self) -> Value {
         crate::config_schema()
+    }
+
+    fn setup_guide(&self) -> Option<SetupGuide> {
+        Some(setup_guide())
     }
 
     fn metadata(&self) -> ConnectorMetadata {
@@ -1300,6 +1469,161 @@ fn unavailable_status(reason: &str) -> ConnectorStatus {
         .with_target_health(String::new(), HealthState::Down)
 }
 
+fn unreachable_connection(message: String) -> ConnectionTestResult {
+    ConnectionTestResult {
+        reachable: false,
+        capabilities: Vec::new(),
+        message: Some(message),
+    }
+}
+
+fn connection_test_from_results(
+    pools: Result<Value, TrueNasError>,
+    datasets: Result<Value, TrueNasError>,
+    alerts: Result<Value, TrueNasError>,
+    session: Result<Value, TrueNasError>,
+) -> ConnectionTestResult {
+    let mut capabilities = vec![
+        probed_read_capability(
+            CAPABILITY_READ_POOLS,
+            "Read pools",
+            METHOD_POOL_QUERY,
+            pools,
+        ),
+        probed_read_capability(
+            CAPABILITY_READ_DATASETS,
+            "Read datasets",
+            METHOD_DATASET_QUERY,
+            datasets,
+        ),
+        probed_read_capability(
+            CAPABILITY_READ_ALERTS,
+            "Read alerts",
+            METHOD_ALERT_LIST,
+            alerts,
+        ),
+    ];
+
+    match session
+        .map_err(|error| format!("{METHOD_AUTH_ME} failed: {error}"))
+        .and_then(|value| effective_roles(&value))
+    {
+        Ok(roles) => {
+            capabilities.extend([
+                role_capability(
+                    CAPABILITY_MANAGE_SNAPSHOTS,
+                    "Manage snapshots",
+                    &roles,
+                    &[ROLE_SNAPSHOT_WRITE, ROLE_SNAPSHOT_DELETE],
+                ),
+                role_capability(
+                    CAPABILITY_TRIGGER_SCRUB,
+                    "Trigger pool scrubs",
+                    &roles,
+                    &[ROLE_POOL_WRITE],
+                ),
+                role_capability(
+                    CAPABILITY_DISMISS_ALERTS,
+                    "Dismiss alerts",
+                    &roles,
+                    &[ROLE_ALERT_LIST_WRITE],
+                ),
+            ]);
+        }
+        Err(error) => {
+            capabilities.extend([
+                unavailable_capability(CAPABILITY_MANAGE_SNAPSHOTS, "Manage snapshots", &error),
+                unavailable_capability(CAPABILITY_TRIGGER_SCRUB, "Trigger pool scrubs", &error),
+                unavailable_capability(CAPABILITY_DISMISS_ALERTS, "Dismiss alerts", &error),
+            ]);
+        }
+    }
+
+    ConnectionTestResult {
+        reachable: true,
+        capabilities,
+        message: Some(
+            "Connected over encrypted WSS. Read capabilities were probed directly; write capabilities were derived from auth.me effective roles without performing writes."
+                .to_owned(),
+        ),
+    }
+}
+
+fn probed_read_capability(
+    key: &str,
+    label: &str,
+    method: &str,
+    result: Result<Value, TrueNasError>,
+) -> CapabilityStatus {
+    match result {
+        Ok(_) => CapabilityStatus {
+            key: key.to_owned(),
+            label: label.to_owned(),
+            available: true,
+            note: None,
+        },
+        Err(error) => unavailable_capability(key, label, &format!("{method} failed: {error}")),
+    }
+}
+
+fn effective_roles(auth_me: &Value) -> Result<HashSet<String>, String> {
+    auth_me
+        .pointer("/privilege/roles")
+        .and_then(Value::as_array)
+        .ok_or_else(|| format!("{METHOD_AUTH_ME} returned no `privilege.roles` array"))?
+        .iter()
+        .map(|role| {
+            role.as_str()
+                .map(str::to_owned)
+                .ok_or_else(|| format!("{METHOD_AUTH_ME} returned a non-string role"))
+        })
+        .collect()
+}
+
+fn role_capability(
+    key: &str,
+    label: &str,
+    roles: &HashSet<String>,
+    required_roles: &[&str],
+) -> CapabilityStatus {
+    let missing = if roles.contains(ROLE_FULL_ADMIN) {
+        Vec::new()
+    } else {
+        required_roles
+            .iter()
+            .filter(|role| !roles.contains(**role))
+            .copied()
+            .collect::<Vec<_>>()
+    };
+    if missing.is_empty() {
+        CapabilityStatus {
+            key: key.to_owned(),
+            label: label.to_owned(),
+            available: true,
+            note: None,
+        }
+    } else {
+        unavailable_capability(
+            key,
+            label,
+            &format!(
+                "The authenticated TrueNAS user lacks effective role{} {}.",
+                if missing.len() == 1 { "" } else { "s" },
+                missing.join(" and ")
+            ),
+        )
+    }
+}
+
+fn unavailable_capability(key: &str, label: &str, note: &str) -> CapabilityStatus {
+    CapabilityStatus {
+        key: key.to_owned(),
+        label: label.to_owned(),
+        available: false,
+        note: Some(note.to_owned()),
+    }
+}
+
 fn connector_error(error: TrueNasError) -> ConnectorError {
     match error {
         TrueNasError::AuthFailed(reason) => ConnectorError::AuthFailed { reason },
@@ -1321,6 +1645,121 @@ fn internal_error(error: String) -> ConnectorError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn capability<'a>(result: &'a ConnectionTestResult, key: &str) -> &'a CapabilityStatus {
+        result
+            .capabilities
+            .iter()
+            .find(|capability| capability.key == key)
+            .unwrap_or_else(|| panic!("connection test omitted capability {key}"))
+    }
+
+    #[test]
+    fn setup_guide_describes_user_linked_roles_and_mandatory_tls() {
+        let guide = setup_guide();
+        assert_eq!(guide.variants.len(), 1);
+        let variant = &guide.variants[0];
+        assert_eq!(variant.id, "api-key");
+        assert!(variant.description.contains("My API Keys"));
+        assert!(variant.description.contains("Credentials > Users"));
+        assert!(variant
+            .description
+            .contains("Credentials > Groups > Privileges"));
+        assert!(variant.description.contains("TLS is mandatory"));
+        assert!(variant.description.contains("automatically revoke"));
+        assert!(variant.description.contains("connection remains encrypted"));
+        assert!(!variant.template.contains("{{apiKey}}"));
+
+        let toggle_keys = variant
+            .toggles
+            .iter()
+            .map(|toggle| toggle.key.as_str())
+            .collect::<HashSet<_>>();
+        assert_eq!(toggle_keys.len(), 6);
+        for requirement in &variant.capability_requirements {
+            assert!(requirement
+                .required_toggle_keys
+                .iter()
+                .all(|key| toggle_keys.contains(key.as_str())));
+        }
+    }
+
+    #[test]
+    fn capability_test_combines_live_reads_with_effective_roles() {
+        let result = connection_test_from_results(
+            Ok(json!([])),
+            Err(TrueNasError::RpcError {
+                code: -32001,
+                message: "permission denied".to_owned(),
+            }),
+            Ok(json!([])),
+            Ok(json!({
+                "privilege": {
+                    "roles": [
+                        ROLE_POOL_READ,
+                        ROLE_ALERT_LIST_READ,
+                        ROLE_SNAPSHOT_WRITE,
+                        ROLE_SNAPSHOT_DELETE,
+                        ROLE_ALERT_LIST_WRITE
+                    ]
+                }
+            })),
+        );
+
+        assert!(result.reachable);
+        assert!(capability(&result, CAPABILITY_READ_POOLS).available);
+        let datasets = capability(&result, CAPABILITY_READ_DATASETS);
+        assert!(!datasets.available);
+        assert!(datasets
+            .note
+            .as_deref()
+            .is_some_and(|note| note.contains(METHOD_DATASET_QUERY)));
+        assert!(capability(&result, CAPABILITY_READ_ALERTS).available);
+        assert!(capability(&result, CAPABILITY_MANAGE_SNAPSHOTS).available);
+        assert!(!capability(&result, CAPABILITY_TRIGGER_SCRUB).available);
+        assert!(capability(&result, CAPABILITY_DISMISS_ALERTS).available);
+    }
+
+    #[test]
+    fn full_admin_is_recognized_without_guessing_at_individual_roles() {
+        let result = connection_test_from_results(
+            Ok(json!([])),
+            Ok(json!([])),
+            Ok(json!([])),
+            Ok(json!({ "privilege": { "roles": [ROLE_FULL_ADMIN] } })),
+        );
+
+        for key in [
+            CAPABILITY_MANAGE_SNAPSHOTS,
+            CAPABILITY_TRIGGER_SCRUB,
+            CAPABILITY_DISMISS_ALERTS,
+        ] {
+            assert!(capability(&result, key).available);
+        }
+    }
+
+    #[test]
+    fn malformed_role_introspection_never_claims_write_access() {
+        let result = connection_test_from_results(
+            Ok(json!([])),
+            Ok(json!([])),
+            Ok(json!([])),
+            Ok(json!({ "privilege": {} })),
+        );
+
+        for key in [
+            CAPABILITY_MANAGE_SNAPSHOTS,
+            CAPABILITY_TRIGGER_SCRUB,
+            CAPABILITY_DISMISS_ALERTS,
+        ] {
+            let status = capability(&result, key);
+            assert!(!status.available);
+            assert!(status
+                .note
+                .as_deref()
+                .is_some_and(|note| note.contains("privilege.roles")));
+        }
+    }
 
     #[test]
     fn documented_responses_map_to_host_data_points() {

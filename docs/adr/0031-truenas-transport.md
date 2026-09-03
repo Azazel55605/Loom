@@ -49,6 +49,22 @@ documentation on 2026-09-02:
   states that API keys are password-equivalent, require SSL/TLS transport, and
   are automatically revoked when submitted by insecure HTTP transport. This is
   authoritative documentation, not only a community report.
+- In stable 25.10, an API key has no independent role allowlist. It is linked
+  to a user and inherits that user's effective RBAC privileges. Limited access
+  is configured on the user's group privilege under **Credentials > Groups >
+  Privileges**; keys are created from the top-right account/settings menu at
+  **My API Keys > Add API Key** (or through **Credentials > Users > user >
+  Add/View API Keys**). The read-only `auth.me` method returns the current
+  session, including its effective `privilege.roles`, so Loom can determine
+  write capability without exercising a write. See the
+  [25.10 RBAC reference](https://api.truenas.com/v25.10/rbac.html) and
+  [API-key UI guide](https://www.truenas.com/docs/scale/toptoolbar/settings/apikeysscreen/).
+- The methods used by the connector document these roles:
+  `READONLY_ADMIN` for `system.info`, `POOL_READ` for `pool.query`,
+  `DATASET_READ` for `pool.dataset.query`, `ALERT_LIST_READ` for
+  `alert.list`, `SNAPSHOT_WRITE` and `SNAPSHOT_DELETE` for the complete
+  snapshot-management surface, `POOL_WRITE` for scrub control, and
+  `ALERT_LIST_WRITE` for alert dismissal.
 
 The future TrueNAS 26/27 SCRAM API-key mechanism is deliberately not guessed at
 here. It requires a username and a multi-step exchange and should be added from
@@ -95,5 +111,6 @@ instead of accumulating an unbounded offline queue.
   should carry a username in connector configuration and prefer the
   username-aware constructor; SCRAM remains future work tied to stable-version
   documentation.
-- Data points, sub-targets, setup guides, actions, backend registration, and all
-  `Connector` trait implementation are deliberately out of scope.
+- Setup capability checks may probe the read methods directly. Mutating
+  capabilities must be derived from `auth.me`'s effective roles and never
+  tested by performing a scrub, snapshot mutation, or alert dismissal.

@@ -1448,7 +1448,18 @@ mod tests {
         assert!(truenas["configSchema"]["required"]
             .as_array()
             .is_some_and(|required| required.iter().any(|field| field == "username")));
-        assert_eq!(truenas["setupGuide"], serde_json::Value::Null);
+        let variants = truenas["setupGuide"]["variants"]
+            .as_array()
+            .expect("TrueNAS should publish setup help");
+        assert_eq!(variants.len(), 1);
+        assert_eq!(variants[0]["id"], "api-key");
+        assert_eq!(
+            variants[0]["capabilityRequirements"]
+                .as_array()
+                .expect("TrueNAS guide should map capabilities")
+                .len(),
+            6
+        );
         assert_eq!(truenas["discoverableType"], serde_json::Value::Null);
     }
 

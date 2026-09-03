@@ -79,7 +79,7 @@ pub fn config_schema() -> Value {
                 "type": "string",
                 "minLength": 1,
                 "x-loom-sensitive": true,
-                "description": "API key generated from the TrueNAS top-toolbar Settings > API Keys screen."
+                "description": "API key generated from the TrueNAS top-right account/settings menu > My API Keys screen."
             },
             "allowInsecureCert": {
                 "type": "boolean",

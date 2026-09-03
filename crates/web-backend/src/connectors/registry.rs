@@ -171,7 +171,7 @@ pub fn builtin_registry() -> ConnectorTypeRegistry {
             },
             connection_test_factory: None,
             schema: loom_connector_truenas::config_schema(),
-            setup_guide: None,
+            setup_guide: Some(loom_connector_truenas::setup_guide()),
             discoverable_type: None,
             discovery_target_field: None,
         },
@@ -270,7 +270,9 @@ mod tests {
         assert!(registration.schema["required"]
             .as_array()
             .is_some_and(|required| required.iter().any(|field| field == "username")));
-        assert!(registration.setup_guide.is_none());
+        let guide = registration.setup_guide.as_ref().expect("setup guide");
+        assert_eq!(guide.variants.len(), 1);
+        assert_eq!(guide.variants[0].id, "api-key");
         assert!(registration.connection_test_factory.is_none());
         assert!(registration.discoverable_type.is_none());
     }

@@ -892,7 +892,7 @@ the instances they may see are on `/connector-instances`, which asks only for
           "type": "string",
           "minLength": 1,
           "x-loom-sensitive": true,
-          "description": "API key generated from the TrueNAS top-toolbar Settings > API Keys screen."
+          "description": "API key generated from the TrueNAS top-right account/settings menu > My API Keys screen."
         },
         "allowInsecureCert": {
           "type": "boolean",
@@ -903,7 +903,32 @@ the instances they may see are on `/connector-instances`, which asks only for
       "required": ["host", "username", "apiKey"],
       "additionalProperties": false
     },
-    "setupGuide": null,
+    "setupGuide": {
+      "variants": [
+        {
+          "id": "api-key",
+          "label": "Connect via API key",
+          "description": "Open the top-right account/settings menu > My API Keys > Add API Key. The key inherits its associated user's RBAC privileges. TLS is mandatory; allowInsecureCert relaxes certificate validation only.",
+          "template": "TrueNAS API-key checklist\n\nHost: {{host}}\nAPI-key owner: {{username}}\nTransport: encrypted WSS only\nBaseline role required for host verification: READONLY_ADMIN\n\nSelected feature roles (1 = include, 0 = omit):\nPOOL_READ — pools: {{POOL_READ}}\nDATASET_READ — datasets: {{DATASET_READ}}\nALERT_LIST_READ — alerts: {{ALERT_LIST_READ}}\nSNAPSHOT_WRITE + SNAPSHOT_DELETE — snapshot management: {{SNAPSHOT_MANAGE}}\nPOOL_WRITE — trigger pool scrubs: {{POOL_WRITE}}\nALERT_LIST_WRITE — dismiss alerts: {{ALERT_LIST_WRITE}}",
+          "toggles": [
+            { "key": "readPools", "envVar": "POOL_READ", "label": "Read pools", "description": "Grant POOL_READ so Loom can list pools and read capacity and health.", "default": true, "recommended": true },
+            { "key": "readDatasets", "envVar": "DATASET_READ", "label": "Read datasets", "description": "Grant DATASET_READ so Loom can list datasets and their storage properties.", "default": true, "recommended": true },
+            { "key": "readAlerts", "envVar": "ALERT_LIST_READ", "label": "Read alerts", "description": "Grant ALERT_LIST_READ so Loom can list active TrueNAS alerts.", "default": true, "recommended": true },
+            { "key": "manageSnapshots", "envVar": "SNAPSHOT_MANAGE", "label": "Manage snapshots", "description": "Grant SNAPSHOT_WRITE and SNAPSHOT_DELETE so Loom can list, create, roll back, and delete snapshots.", "default": false, "recommended": false },
+            { "key": "triggerScrub", "envVar": "POOL_WRITE", "label": "Trigger pool scrubs", "description": "Grant POOL_WRITE so Loom can start a scrub for a pool.", "default": false, "recommended": false },
+            { "key": "dismissAlerts", "envVar": "ALERT_LIST_WRITE", "label": "Dismiss alerts", "description": "Grant ALERT_LIST_WRITE so Loom can dismiss an active alert.", "default": false, "recommended": false }
+          ],
+          "capabilityRequirements": [
+            { "capabilityKey": "read-pools", "label": "Read pools", "requiredToggleKeys": ["readPools"] },
+            { "capabilityKey": "read-datasets", "label": "Read datasets", "requiredToggleKeys": ["readDatasets"] },
+            { "capabilityKey": "read-alerts", "label": "Read alerts", "requiredToggleKeys": ["readAlerts"] },
+            { "capabilityKey": "manage-snapshot-actions", "label": "Manage snapshots", "requiredToggleKeys": ["manageSnapshots"] },
+            { "capabilityKey": "trigger-scrub", "label": "Trigger pool scrubs", "requiredToggleKeys": ["triggerScrub"] },
+            { "capabilityKey": "dismiss-alerts", "label": "Dismiss alerts", "requiredToggleKeys": ["dismissAlerts"] }
+          ]
+        }
+      ]
+    },
     "discoverableType": null,
     "discoveryTargetField": null
   }
@@ -954,6 +979,33 @@ for self-signed homelab deployments without permitting plaintext transport.
 the current `auth.login_ex` `API_KEY_PLAIN` flow. Stored configurations created
 before the username field was introduced retain the deprecated key-only fallback;
 new configurations require the username.
+
+Current TrueNAS 25.10 API keys are user-linked rather than independently
+scoped: each key receives the effective RBAC roles of its associated user.
+Create and assign limited access through the user's group privilege under
+**Credentials > Groups > Privileges**; create the key itself through the
+top-right account/settings menu at **My API Keys > Add API Key**, or through
+**Credentials > Users > user > Add/View API Keys**. `auth.me` is a safe
+read-only introspection call and returns the session's effective
+`privilege.roles`, so Loom uses it to report write capability without
+performing a scrub, snapshot mutation, or alert dismissal.
+
+The setup connection test requires `core.ping` to return `"pong"` and
+`system.info` to succeed; current TrueNAS requires `READONLY_ADMIN` for the
+latter. It then genuinely probes `pool.query`, `pool.dataset.query`, and
+`alert.list`. Write availability is derived from `auth.me`: snapshot
+management requires both `SNAPSHOT_WRITE` and `SNAPSHOT_DELETE`, scrub
+requires `POOL_WRITE`, and alert dismissal requires `ALERT_LIST_WRITE`.
+`FULL_ADMIN` is recognized as granting all three. If role introspection is
+missing or malformed, Loom conservatively reports writes unavailable rather
+than attempting one.
+
+TrueNAS documents API keys as password-equivalent and requires encrypted
+transport; a key used for an insecure HTTP authentication attempt can be
+automatically revoked. Loom therefore has no `ws://` mode.
+`allowInsecureCert` only accepts a self-signed or otherwise untrusted
+certificate while retaining encrypted `wss://` transport.
+
 The host view publishes `poolCount`, `totalCapacityBytes`,
 `usedCapacityBytes`, `freeCapacityBytes`, and `truenasVersion`. Each pool is an
 addressable `pool:{name}` target publishing `status`, `usedBytes`, `freeBytes`,
@@ -961,9 +1013,10 @@ and `capacityPercent`, with a disruptive `startScrub` action. A successful
 action result means TrueNAS accepted and started its background scrub job; it
 does not mean the scrub has completed. Each dataset is an addressable
 `dataset:{path}` target publishing `usedBytes`, `availableBytes`,
-`compressionRatio`, and `snapshotCount`, with no actions in this pass. Full
-snapshot browsing and management remain deferred to the resource-browser
-surface. The connector deliberately
+`compressionRatio`, and `snapshotCount`. Dataset detail exposes snapshot
+browsing plus create, rollback, and delete actions; the host resource browser
+also lists pools, datasets, and active alerts, with alert dismissal where
+permitted. The connector deliberately
 does not mislabel `system.info.physmem` (installed RAM) or `loadavg` as memory
 or CPU utilization.
 
