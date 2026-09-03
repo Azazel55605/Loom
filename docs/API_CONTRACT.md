@@ -962,7 +962,18 @@ the instances they may see are on `/connector-instances`, which asks only for
       "required": ["baseUrl", "password"],
       "additionalProperties": false
     },
-    "setupGuide": null,
+    "setupGuide": {
+      "variants": [
+        {
+          "id": "application-password",
+          "label": "Connect via application password",
+          "description": "Generate a dedicated application password under Settings > Web interface / API and enter it in Loom's Password field.",
+          "template": "",
+          "toggles": [],
+          "capabilityRequirements": []
+        }
+      ]
+    },
     "discoverableType": null,
     "discoveryTargetField": null
   }
@@ -1013,9 +1024,36 @@ the failed request retried. Its `setBlocking` action permanently enables or
 disables blocking through `POST /api/dns/blocking` with `timer: null`. Pi-hole
 `allowInsecureCert` relaxes certificate validation for self-signed or otherwise
 untrusted homelab HTTPS endpoints while retaining encrypted transport. It is
-off by default and applies only to this configured connector instance. Pi-hole
-setup guides, capability checks, resource kinds, and sub-targets remain
-deliberately absent in this minimal pass.
+off by default and applies only to this configured connector instance.
+
+Its setup guide points to **Settings > Web interface / API > Configure app
+password**. The application password is separately revocable, is shown only
+once, and lets automation authenticate when 2FA would otherwise require a TOTP.
+The live connection test authenticates first, then actually reads statistics,
+the domain collection, and top clients. Those three results are reported
+individually; once authentication succeeds, `setBlocking`, `addDomain`,
+`removeDomain`, and `toggleDomainEnabled` are reported available because
+Pi-hole application-password sessions have no per-operation permission model.
+
+### Pi-hole resource kinds
+
+Both kinds are host-only; Pi-hole has no Loom sub-targets.
+
+| Kind | Columns | Actions | Source |
+| --- | --- | --- | --- |
+| `domains` | `domain` (text), `type` (`allow`/`deny` text), `comment` (text), `enabled` (bool) | Row: `toggleDomainEnabled`, `removeDomain`. Kind: `addDomain` with `domain`, `listType`, and optional `comment`. | `GET /api/domains`; exact entries only. Mutations use `/api/domains/{type}/exact[/{domain}]`. |
+| `clients` | `client` (resolved hostname when present, otherwise IP), `queryCount` (number) | Read-only. | `GET /api/stats/top_clients`; each row maps `name`/`ip` and `count`. |
+
+The Pi-hole API's combined domain response also contains `kind: "regex"`
+entries. They are deliberately not flattened into this four-column exact-domain
+kind: without exposing pattern kind, an exact and regex entry can look
+identical, and an edit could silently change semantics. Regex-domain management
+needs its own explicit UI contract if added later. `ResourceItem.id` is the
+Pi-hole database id; row actions resolve that id against a fresh domain listing
+before building the type/kind/domain item URL, so the opaque browser id never
+needs to contain an unescaped domain. The verified upstream mapping and this
+exact-only boundary are recorded in
+[`adr/0033-pihole-v6-resource-api.md`](adr/0033-pihole-v6-resource-api.md).
 
 The TrueNAS schema rejects schemes and paths in `host`; Loom owns the fixed
 `wss://` scheme and `/api/current` JSON-RPC path. `apiKey` carries

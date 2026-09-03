@@ -133,17 +133,19 @@ export function SetupGuideVariantPanel({
         </section>
       ) : null}
 
-      <section className="flex flex-col gap-3" aria-label="Rendered setup instructions">
-        <pre className="max-h-72 overflow-auto whitespace-pre-wrap break-words rounded-md border bg-muted/40 p-3 text-xs">
-          <code>{rendered}</code>
-        </pre>
-        <div className="flex justify-end">
-          <Button type="button" variant="outline" size="sm" onClick={() => void copy()}>
-            <Clipboard data-icon="inline-start" aria-hidden="true" />
-            Copy
-          </Button>
-        </div>
-      </section>
+      {rendered.trim() !== "" ? (
+        <section className="flex flex-col gap-3" aria-label="Rendered setup instructions">
+          <pre className="max-h-72 overflow-auto whitespace-pre-wrap break-words rounded-md border bg-muted/40 p-3 text-xs">
+            <code>{rendered}</code>
+          </pre>
+          <div className="flex justify-end">
+            <Button type="button" variant="outline" size="sm" onClick={() => void copy()}>
+              <Clipboard data-icon="inline-start" aria-hidden="true" />
+              Copy
+            </Button>
+          </div>
+        </section>
+      ) : null}
 
       <section className="flex flex-col gap-3 border-t border-border pt-4" aria-label="Live connection test">
         <div className="flex flex-wrap items-center justify-between gap-3">

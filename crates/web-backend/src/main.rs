@@ -1473,7 +1473,10 @@ mod tests {
             pihole["configSchema"]["properties"]["allowInsecureCert"]["default"],
             false
         );
-        assert_eq!(pihole["setupGuide"], serde_json::Value::Null);
+        assert_eq!(
+            pihole["setupGuide"]["variants"][0]["id"],
+            "application-password"
+        );
         assert_eq!(pihole["discoverableType"], serde_json::Value::Null);
     }
 
@@ -1957,6 +1960,27 @@ mod tests {
         assert_eq!(status, StatusCode::OK, "Docker check failed: {docker:#}");
         assert_eq!(docker["reachable"], false);
         assert!(docker["message"]
+            .as_str()
+            .is_some_and(|message| message.contains("127.0.0.1:1")));
+
+        // Pi-hole likewise authenticates during normal construction. Its
+        // setup-test factory defers that request so transport/auth failures are
+        // returned in the standard connection-test result instead of as a 400.
+        let (status, pihole) = send(
+            &app.router,
+            post_json_auth(
+                "/connector-types/pihole/test-connection",
+                &access,
+                serde_json::json!({
+                    "baseUrl": "http://127.0.0.1:1",
+                    "password": "not-a-real-password"
+                }),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "Pi-hole check failed: {pihole:#}");
+        assert_eq!(pihole["reachable"], false);
+        assert!(pihole["message"]
             .as_str()
             .is_some_and(|message| message.contains("127.0.0.1:1")));
 

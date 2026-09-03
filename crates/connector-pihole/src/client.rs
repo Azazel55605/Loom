@@ -1,6 +1,6 @@
 use std::{error::Error as _, fmt, sync::Arc, time::Duration};
 
-use reqwest::{Method, StatusCode};
+use reqwest::{Method, StatusCode, Url};
 use serde::Deserialize;
 use serde_json::{json, Value};
 use thiserror::Error;
@@ -54,30 +54,42 @@ impl PiHoleClient {
         password: &str,
         allow_insecure_cert: bool,
     ) -> Result<Self, PiHoleError> {
+        let client = Self::new_with_certificate_policy(base_url, password, allow_insecure_cert)?;
+        client.authenticate().await?;
+        Ok(client)
+    }
+
+    /// Constructs a candidate without contacting Pi-hole. The setup test uses
+    /// this so authentication failures become a structured `reachable: false`
+    /// result instead of preventing the test connector from being built.
+    pub(crate) fn new_with_certificate_policy(
+        base_url: &str,
+        password: &str,
+        allow_insecure_cert: bool,
+    ) -> Result<Self, PiHoleError> {
         let http = reqwest::Client::builder()
             .timeout(REQUEST_TIMEOUT)
             .danger_accept_invalid_certs(allow_insecure_cert)
             .build()
             .map_err(|error| PiHoleError::ConnectionFailed(error.to_string()))?;
-        Self::connect_with_http(base_url, password, http).await
+        Ok(Self::with_http(base_url, password, http))
     }
 
-    async fn connect_with_http(
-        base_url: &str,
-        password: &str,
-        http: reqwest::Client,
-    ) -> Result<Self, PiHoleError> {
-        let client = Self {
+    fn with_http(base_url: &str, password: &str, http: reqwest::Client) -> Self {
+        Self {
             base_url: Arc::from(base_url.trim_end_matches('/')),
             password: Arc::from(password),
             http,
             sid: Arc::new(RwLock::new(String::new())),
             auth_gate: Arc::new(Mutex::new(())),
-        };
-        let _gate = client.auth_gate.lock().await;
-        client.authenticate_locked().await?;
+        }
+    }
+
+    pub(crate) async fn authenticate(&self) -> Result<(), PiHoleError> {
+        let _gate = self.auth_gate.lock().await;
+        self.authenticate_locked().await?;
         drop(_gate);
-        Ok(client)
+        Ok(())
     }
 
     pub(crate) async fn get_json(&self, path: &str) -> Result<Value, PiHoleError> {
@@ -88,15 +100,49 @@ impl PiHoleClient {
         self.request_json(Method::POST, path, Some(body)).await
     }
 
+    pub(crate) async fn post_json_segments(
+        &self,
+        segments: &[&str],
+        body: Value,
+    ) -> Result<Value, PiHoleError> {
+        self.request_json_at(Method::POST, self.endpoint_segments(segments)?, Some(body))
+            .await
+    }
+
+    pub(crate) async fn put_json_segments(
+        &self,
+        segments: &[&str],
+        body: Value,
+    ) -> Result<Value, PiHoleError> {
+        self.request_json_at(Method::PUT, self.endpoint_segments(segments)?, Some(body))
+            .await
+    }
+
+    pub(crate) async fn delete_segments(&self, segments: &[&str]) -> Result<(), PiHoleError> {
+        self.request_json_at(Method::DELETE, self.endpoint_segments(segments)?, None)
+            .await
+            .map(|_| ())
+    }
+
     async fn request_json(
         &self,
         method: Method,
         path: &str,
         body: Option<Value>,
     ) -> Result<Value, PiHoleError> {
+        self.request_json_at(method, self.endpoint(path), body)
+            .await
+    }
+
+    async fn request_json_at(
+        &self,
+        method: Method,
+        endpoint: String,
+        body: Option<Value>,
+    ) -> Result<Value, PiHoleError> {
         let attempted_sid = self.sid.read().await.clone();
         let response = self
-            .send(method.clone(), path, body.as_ref(), &attempted_sid)
+            .send(method.clone(), &endpoint, body.as_ref(), &attempted_sid)
             .await?;
 
         if response.status() != StatusCode::UNAUTHORIZED {
@@ -112,7 +158,7 @@ impl PiHoleClient {
         }
         let refreshed_sid = self.sid.read().await.clone();
         let retried = self
-            .send(method, path, body.as_ref(), &refreshed_sid)
+            .send(method, &endpoint, body.as_ref(), &refreshed_sid)
             .await?;
         if retried.status() == StatusCode::UNAUTHORIZED {
             let message = response_message(retried).await;
@@ -174,14 +220,11 @@ impl PiHoleClient {
     async fn send(
         &self,
         method: Method,
-        path: &str,
+        endpoint: &str,
         body: Option<&Value>,
         sid: &str,
     ) -> Result<reqwest::Response, PiHoleError> {
-        let mut request = self
-            .http
-            .request(method, self.endpoint(path))
-            .header(SID_HEADER, sid);
+        let mut request = self.http.request(method, endpoint).header(SID_HEADER, sid);
         if let Some(body) = body {
             request = request.json(body);
         }
@@ -190,6 +233,24 @@ impl PiHoleClient {
 
     fn endpoint(&self, path: &str) -> String {
         format!("{}/api/{}", self.base_url, path.trim_start_matches('/'))
+    }
+
+    fn endpoint_segments(&self, segments: &[&str]) -> Result<String, PiHoleError> {
+        let mut url = Url::parse(&format!("{}/api/", self.base_url)).map_err(|error| {
+            PiHoleError::ConnectionFailed(format!("the configured Pi-hole URL is invalid: {error}"))
+        })?;
+        {
+            let mut path = url.path_segments_mut().map_err(|()| {
+                PiHoleError::ConnectionFailed(
+                    "the configured Pi-hole URL cannot contain path segments".to_owned(),
+                )
+            })?;
+            path.pop_if_empty();
+            for segment in segments {
+                path.push(segment);
+            }
+        }
+        Ok(url.to_string())
     }
 }
 
@@ -224,13 +285,23 @@ async fn decode_json(response: reqwest::Response) -> Result<Value, PiHoleError> 
             message: response_message(response).await,
         });
     }
-    response
-        .json()
+    if status == StatusCode::NO_CONTENT {
+        return Ok(Value::Null);
+    }
+    let bytes = response
+        .bytes()
         .await
         .map_err(|error| PiHoleError::ApiError {
             status: status.as_u16(),
-            message: format!("response was not valid JSON: {error}"),
-        })
+            message: format!("could not read the response body: {error}"),
+        })?;
+    if bytes.is_empty() {
+        return Ok(Value::Null);
+    }
+    serde_json::from_slice(&bytes).map_err(|error| PiHoleError::ApiError {
+        status: status.as_u16(),
+        message: format!("response was not valid JSON: {error}"),
+    })
 }
 
 async fn response_message(response: reqwest::Response) -> String {
@@ -331,6 +402,23 @@ mod tests {
         assert!(requests[3]
             .to_ascii_lowercase()
             .contains("x-ftl-sid: second"));
+    }
+
+    #[test]
+    fn resource_path_segments_are_percent_encoded_independently() {
+        let client = PiHoleClient::new_with_certificate_policy(
+            "https://pi.hole:8443/proxy",
+            "not-a-real-password",
+            false,
+        )
+        .expect("client builder");
+        let endpoint = client
+            .endpoint_segments(&["domains", "deny", "exact", "path/with space.example"])
+            .expect("encoded endpoint");
+        assert_eq!(
+            endpoint,
+            "https://pi.hole:8443/proxy/api/domains/deny/exact/path%2Fwith%20space.example"
+        );
     }
 
     async fn spawn_server(
