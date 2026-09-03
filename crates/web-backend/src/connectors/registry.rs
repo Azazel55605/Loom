@@ -15,6 +15,7 @@ use std::pin::Pin;
 use std::sync::Arc;
 
 use loom_connector_docker::DockerConnector;
+use loom_connector_pihole::PiHoleConnector;
 use loom_connector_truenas::TrueNasConnector;
 use loom_core::connector::debug::DebugConnector;
 use loom_core::connector::{Connector, ConnectorError, SetupGuide};
@@ -79,7 +80,7 @@ pub type ConnectorTypeRegistry = Arc<HashMap<&'static str, ConnectorTypeRegistra
 
 /// The types compiled into this build.
 ///
-/// Three today: the debug fixture, Docker, and TrueNAS. Further integrations
+/// Four today: the debug fixture, Docker, TrueNAS, and Pi-hole. Further integrations
 /// (a reverse proxy, a hypervisor) register here alongside them,
 /// and nothing else in the backend has to change when they do — that is the
 /// point of the indirection.
@@ -172,6 +173,29 @@ pub fn builtin_registry() -> ConnectorTypeRegistry {
             connection_test_factory: None,
             schema: loom_connector_truenas::config_schema(),
             setup_guide: Some(loom_connector_truenas::setup_guide()),
+            discoverable_type: None,
+            discovery_target_field: None,
+        },
+    );
+
+    // Pi-hole also authenticates during construction, while all type-level
+    // descriptors remain available without contacting the configured host.
+    types.insert(
+        loom_connector_pihole::TYPE_ID,
+        ConnectorTypeRegistration {
+            type_id: loom_connector_pihole::TYPE_ID,
+            display_name: loom_connector_pihole::DISPLAY_NAME,
+            icon: Some(loom_connector_pihole::ICON.to_owned()),
+            factory: |config| {
+                Box::pin(async move {
+                    PiHoleConnector::from_config_value(config)
+                        .await
+                        .map(|connector| Box::new(connector) as Box<dyn Connector>)
+                })
+            },
+            connection_test_factory: None,
+            schema: loom_connector_pihole::config_schema(),
+            setup_guide: None,
             discoverable_type: None,
             discovery_target_field: None,
         },
@@ -273,6 +297,25 @@ mod tests {
         let guide = registration.setup_guide.as_ref().expect("setup guide");
         assert_eq!(guide.variants.len(), 1);
         assert_eq!(guide.variants[0].id, "api-key");
+        assert!(registration.connection_test_factory.is_none());
+        assert!(registration.discoverable_type.is_none());
+    }
+
+    #[test]
+    fn the_pihole_type_is_registered_with_an_encrypted_password_schema() {
+        let registry = builtin_registry();
+        let registration = registry
+            .get(loom_connector_pihole::TYPE_ID)
+            .expect("the Pi-hole type must be registered");
+
+        assert_eq!(registration.type_id, "pihole");
+        assert_eq!(registration.display_name, "Pi-hole");
+        assert_eq!(registration.icon.as_deref(), Some("brand:pihole"));
+        assert_eq!(
+            registration.schema["properties"]["password"]["x-loom-sensitive"],
+            true
+        );
+        assert!(registration.setup_guide.is_none());
         assert!(registration.connection_test_factory.is_none());
         assert!(registration.discoverable_type.is_none());
     }

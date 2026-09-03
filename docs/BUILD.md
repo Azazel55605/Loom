@@ -31,6 +31,7 @@ dependencies are fetched by Cargo on first build; no separate step.
 | --- | --- | --- |
 | core (library) | `pnpm build:core` | Compiled rlib inside `target/release/`. No standalone artifact — Core is a library and never runs on its own. |
 | connector-docker (library) | `pnpm build:connector-docker` | Compiled rlib inside `target/release/`. Like Core, a library: it is linked into web-backend, which is what decides that this build has a Docker connector in it. |
+| connector-pihole | `pnpm build:connector-pihole` | Compiled rlib inside `target/release/`. Pi-hole v6 session-authenticated REST client and host-level connector. |
 | connector-truenas | `pnpm build:connector-truenas` | Compiled rlib inside `target/release/`. TLS-only JSON-RPC transport plus the minimal host-level TrueNAS connector. |
 | web-backend | `pnpm build:web-backend` | `target/release/loom-web-backend` binary |
 | web-frontend | `pnpm build:web-frontend` | `apps/web-frontend/dist/` static site |
@@ -38,7 +39,7 @@ dependencies are fetched by Cargo on first build; no separate step.
 | mobile | `pnpm build:mobile` | Unsigned arm64 debug APK under `apps/mobile/src-tauri/gen/android/app/build/outputs/` |
 
 The Cargo packages are named `loom-core`, `loom-connector-docker`,
-`loom-connector-truenas`, and `loom-web-backend` — a crate named `core` would
+`loom-connector-pihole`, `loom-connector-truenas`, and `loom-web-backend` — a crate named `core` would
 collide with Rust's built-in `core`, and the `loom-` prefix is carried through for consistency. The
 `pnpm build:*` scripts already use the correct names; prefer them over
 hand-written `cargo` commands.

@@ -931,6 +931,34 @@ the instances they may see are on `/connector-instances`, which asks only for
     },
     "discoverableType": null,
     "discoveryTargetField": null
+  },
+  {
+    "typeId": "pihole",
+    "displayName": "Pi-hole",
+    "icon": "brand:pihole",
+    "configSchema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "title": "Pi-hole connection",
+      "type": "object",
+      "properties": {
+        "baseUrl": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Your Pi-hole's address; include the HTTP or HTTPS scheme."
+        },
+        "password": {
+          "type": "string",
+          "minLength": 1,
+          "x-loom-sensitive": true,
+          "description": "A Pi-hole password; an application password is recommended."
+        }
+      },
+      "required": ["baseUrl", "password"],
+      "additionalProperties": false
+    },
+    "setupGuide": null,
+    "discoverableType": null,
+    "discoveryTargetField": null
   }
 ]
 ```
@@ -951,8 +979,8 @@ to the connector's factory, which is the only thing that knows what the keys
 mean. A configuration that satisfies the schema's shape can still be refused
 (see [`POST /connector-instances`](#post-connector-instances)).
 
-Today the array holds three: the debug fixture, the unified Docker connector,
-and the minimal host-level TrueNAS connector. It was an array from day one so that registering a real connector
+Today the array holds four: the debug fixture, the unified Docker connector,
+the TrueNAS connector, and the minimal host-level Pi-hole connector. It was an array from day one so that registering a real connector
 type is an insertion rather than a reshape of this response, which is exactly
 what adding Docker turned out to be.
 
@@ -968,7 +996,17 @@ is created, not here.
 | --- | --- | --- | --- |
 | `debug` | A fixture that contacts nothing. Permanent — see `crates/core/src/connector/debug.rs`. | How it should pretend to behave. | Parsing alone; there is nothing to reach. |
 | `docker` | One Docker daemon connection and its host-level aggregate view. Containers are addressable sub-targets of that instance. | Required `dockerHost` (`unix://` or `tcp://`) only. | A real daemon connection and ping. |
+| `pihole` | One Pi-hole v6 instance with host-level statistics and DNS blocking control. | Required `baseUrl` including `http://` or `https://`, plus sensitive `password`; an application password is recommended. | `POST /api/auth`, retaining `session.sid` for `X-FTL-SID` authentication. |
 | `truenas` | One TrueNAS host with an aggregate host view plus addressable pool and dataset sub-targets. | Required bare `host`, required API-key owner `username`, sensitive `apiKey`, and optional `allowInsecureCert` (default `false`). | A mandatory-TLS WebSocket connection and `auth.login_ex` API-key authentication. |
+
+The Pi-hole connector publishes `queriesToday`, `queriesBlockedToday`,
+`blockPercentage`, `domainsOnBlocklist`, `uniqueClients`, `blockingEnabled`,
+and `queriesHistory`. One poll fetches `/api/stats/summary`, `/api/history`, and
+`/api/dns/blocking` concurrently; an expired SID is reauthenticated once and
+the failed request retried. Its `setBlocking` action permanently enables or
+disables blocking through `POST /api/dns/blocking` with `timer: null`. Pi-hole
+setup guides, capability checks, resource kinds, and sub-targets remain
+deliberately absent in this minimal pass.
 
 The TrueNAS schema rejects schemes and paths in `host`; Loom owns the fixed
 `wss://` scheme and `/api/current` JSON-RPC path. `apiKey` carries

@@ -4,7 +4,11 @@ import { Label } from "@loom/ui-kit/components/ui/label";
 import { Skeleton } from "@loom/ui-kit/components/ui/skeleton";
 import { Switch } from "@loom/ui-kit/components/ui/switch";
 import { cn } from "@loom/ui-kit/lib/utils";
-import { configString, type ActionWidgetProps } from "@loom/ui-kit/widgets/types";
+import {
+  configOptionalBoolean,
+  configString,
+  type ActionWidgetProps,
+} from "@loom/ui-kit/widgets/types";
 
 export function ActionToggleSkeleton({ className }: { className?: string }) {
   return <div className={cn("flex items-center justify-between gap-3", className)}><Skeleton className="h-4 w-24" /><Skeleton className="h-6 w-11 rounded-full" /></div>;
@@ -20,14 +24,10 @@ export function ActionToggleSkeleton({ className }: { className?: string }) {
  * swallow — a toggle that stayed on after a failed request would be lying about
  * the state of a service.
  *
- * **It shows what this widget last set, not what the service is.** An action
- * binding names an action and nothing else — that is the whole point of the
- * `Display`/`Action` split — so there is no data point behind this switch to
- * read a starting position from, and it begins unchecked on every mount. To see
- * the real state, bind a `StatusDot` to the connector's boolean data point
- * alongside it. Closing that gap means letting an action binding reference a
- * data point, which is a connector-contract change and deliberately not
- * invented here.
+ * A binding may opt into a reported starting/current state with
+ * `config.stateDataPointId`. `renderWidget` resolves that boolean reading into
+ * `config.currentValue`; stale status frames do not undo an optimistic press,
+ * while the next genuinely changed reading reconciles the switch.
  *
  * The parameter name defaults to `value`, matching the widget contract, and can
  * be overridden per binding with `config.paramName` for an action that spells
@@ -42,10 +42,20 @@ export function ActionToggleWidget({
   disabled,
   className,
 }: ActionWidgetProps) {
-  const [checked, setChecked] = React.useState(false);
+  const reportedChecked = configOptionalBoolean(config, "currentValue");
+  const [checked, setChecked] = React.useState(reportedChecked ?? false);
   const [pending, setPending] = React.useState(false);
+  const lastAppliedReport = React.useRef(reportedChecked);
   const paramName = configString(config, "paramName", "value");
   const id = React.useId();
+
+  React.useEffect(() => {
+    if (pending || reportedChecked === undefined || reportedChecked === lastAppliedReport.current) {
+      return;
+    }
+    lastAppliedReport.current = reportedChecked;
+    setChecked(reportedChecked);
+  }, [pending, reportedChecked]);
 
   async function change(next: boolean) {
     const previous = checked;

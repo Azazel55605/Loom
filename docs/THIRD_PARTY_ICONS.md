@@ -63,6 +63,7 @@ a bundle. Adding a connector type adds its icon here; nothing else does.
 | Icon | File | Referenced by | Upstream path |
 | --- | --- | --- | --- |
 | Docker | `docker.svg` | The `docker` connector type (`crates/connector-docker`), as `brand:docker` | [`svg/docker.svg`](https://github.com/homarr-labs/dashboard-icons/blob/main/svg/docker.svg) |
+| Pi-hole | `pihole.svg` | The `pihole` connector type (`crates/connector-pihole`), as `brand:pihole` | [`svg/pi-hole.svg`](https://github.com/homarr-labs/dashboard-icons/blob/main/svg/pi-hole.svg) |
 | TrueNAS | `truenas.svg` | The `truenas` connector type (`crates/connector-truenas`), as `brand:truenas` | [`svg/truenas.svg`](https://github.com/homarr-labs/dashboard-icons/blob/main/svg/truenas.svg) |
 
 The debug fixture deliberately uses the `lucide:` path instead — it is not a

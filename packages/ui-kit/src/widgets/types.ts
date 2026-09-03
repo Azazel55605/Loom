@@ -74,6 +74,12 @@ export function configString(config: unknown, key: string, fallback: string): st
   return typeof value === "string" && value.length > 0 ? value : fallback;
 }
 
+/** A boolean from `config[key]`, or `undefined` when none is present. */
+export function configOptionalBoolean(config: unknown, key: string): boolean | undefined {
+  const value = record(config)[key];
+  return typeof value === "boolean" ? value : undefined;
+}
+
 /** A list of strings from `config[key]`, dropping any non-string entries. */
 export function configStringArray(config: unknown, key: string): string[] {
   const value = record(config)[key];

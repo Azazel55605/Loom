@@ -181,7 +181,10 @@ export function renderWidget({
     paramsSchema: action.paramsSchema,
     // The action's own parameter name, when it takes exactly one, so a binding
     // does not have to restate it. An explicit `config.paramName` still wins.
-    config: { paramName: soleParameterName(action) ?? "value", ...asObject(config) },
+    config: resolveActionConfig(
+      { paramName: soleParameterName(action) ?? "value", ...asObject(config) },
+      statusDetails,
+    ),
     onExecute,
     disabled: disabled === true || unavailableReason != null,
     className,
@@ -212,6 +215,17 @@ export function renderWidget({
   // is the same sentence for all of them and it comes from the *connector's*
   // state, not the widget's.
   return <Unavailable reason={unavailableReason}>{control}</Unavailable>;
+}
+
+function resolveActionConfig(
+  config: Record<string, unknown>,
+  statusDetails: Record<string, unknown>,
+): Record<string, unknown> {
+  const stateDataPointId = config.stateDataPointId;
+  if (typeof stateDataPointId !== "string") return config;
+
+  const currentValue = statusDetails[stateDataPointId];
+  return typeof currentValue === "boolean" ? { ...config, currentValue } : config;
 }
 
 function resolveStatusConfig(

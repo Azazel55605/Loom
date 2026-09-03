@@ -1259,6 +1259,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "loom-connector-pihole"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "chrono",
+ "loom-connector-test-kit",
+ "loom-core",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "thiserror",
+ "tokio",
+]
+
+[[package]]
 name = "loom-connector-test-kit"
 version = "0.1.0"
 dependencies = [
@@ -1311,6 +1326,7 @@ dependencies = [
  "image",
  "jsonwebtoken",
  "loom-connector-docker",
+ "loom-connector-pihole",
  "loom-connector-truenas",
  "loom-core",
  "rand 0.8.7",

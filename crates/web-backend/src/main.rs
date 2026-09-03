@@ -1371,8 +1371,8 @@ mod tests {
         let types = body.as_array().expect("array");
         assert_eq!(
             types.len(),
-            3,
-            "the catalog should contain Debug, Docker, and TrueNAS"
+            4,
+            "the catalog should contain Debug, Docker, TrueNAS, and Pi-hole"
         );
         assert!(types.iter().all(|entry| {
             entry["typeId"] != "docker-host" && entry["typeId"] != "docker-container"
@@ -1461,6 +1461,16 @@ mod tests {
             6
         );
         assert_eq!(truenas["discoverableType"], serde_json::Value::Null);
+
+        let pihole = by_id("pihole");
+        assert_eq!(pihole["displayName"], "Pi-hole");
+        assert_eq!(pihole["icon"], "brand:pihole");
+        assert_eq!(
+            pihole["configSchema"]["properties"]["password"]["x-loom-sensitive"],
+            true
+        );
+        assert_eq!(pihole["setupGuide"], serde_json::Value::Null);
+        assert_eq!(pihole["discoverableType"], serde_json::Value::Null);
     }
 
     #[tokio::test]

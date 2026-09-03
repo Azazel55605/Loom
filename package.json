@@ -5,6 +5,7 @@
     "build": "pnpm -r --if-present build",
     "build:core": "cargo build --release --package loom-core",
     "build:connector-docker": "cargo build --release --package loom-connector-docker",
+    "build:connector-pihole": "cargo build --release --package loom-connector-pihole",
     "build:connector-truenas": "cargo build --release --package loom-connector-truenas",
     "build:desktop": "pnpm --filter desktop tauri build",
     "build:mobile": "pnpm --filter mobile android:configure && node scripts/run-with-java-21.mjs pnpm --filter mobile tauri android build --debug --target aarch64 --apk",

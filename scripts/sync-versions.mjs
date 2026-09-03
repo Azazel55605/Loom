@@ -38,6 +38,7 @@ const TARGETS = {
   // which revision of an integration produced a reading, and an integration is
   // revised far more often than Loom is released. See docs/API_CONTRACT.md.
   "connector-docker": [{ path: "crates/connector-docker/Cargo.toml", kind: "cargo" }],
+  "connector-pihole": [{ path: "crates/connector-pihole/Cargo.toml", kind: "cargo" }],
   "connector-truenas": [{ path: "crates/connector-truenas/Cargo.toml", kind: "cargo" }],
   "web-backend": [{ path: "crates/web-backend/Cargo.toml", kind: "cargo" }],
   "web-frontend": [
