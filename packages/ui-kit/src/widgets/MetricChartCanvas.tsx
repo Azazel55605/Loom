@@ -261,7 +261,7 @@ function MetricChartTooltip({
       : formatEntry(primary?.value);
 
   return (
-    <div className="surface-elevated min-w-24 rounded-md border border-border px-3 py-2 text-xs text-popover-foreground shadow-md">
+    <div className="chart-tooltip surface-elevated min-w-24 rounded-md border border-border px-3 py-2 text-xs text-popover-foreground shadow-md">
       <p className="font-medium leading-none">{title}</p>
       <p className="mt-1.5 tabular-nums text-muted-foreground">{formattedValue}</p>
     </div>

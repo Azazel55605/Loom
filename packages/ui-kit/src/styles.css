@@ -211,6 +211,15 @@
       backdrop-filter: blur(var(--blur-surface));
     }
 
+    /* Chart tooltips sit directly over visually busy SVG marks, so the normal
+       elevated-surface blur needs a little more separation there. It remains
+       derived from the global preference: reduced transparency makes the
+       token 0px, while Standard and Extra scale together. */
+    .chart-tooltip {
+      -webkit-backdrop-filter: blur(calc(var(--blur-surface) * 1.5));
+      backdrop-filter: blur(calc(var(--blur-surface) * 1.5));
+    }
+
     /* Secondary inset surfaces remain solid until Extra lowers --panel-alpha. */
     .surface-panel {
       background-color: hsl(var(--muted) / var(--panel-alpha));
