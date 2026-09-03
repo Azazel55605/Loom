@@ -10,6 +10,7 @@ import {
   PieChart,
   ResponsiveContainer,
   Tooltip,
+  type TooltipContentProps,
   XAxis,
   YAxis,
 } from "recharts";
@@ -17,6 +18,7 @@ import {
 import type { ChartType } from "@loom/ui-kit/lib/api";
 import {
   configNumber,
+  configString,
   formatNumericReadingText,
   readCategoryBreakdown,
   readNumber,
@@ -38,13 +40,14 @@ export default function MetricChartCanvas({
 }: Omit<DisplayWidgetProps, "className"> & { chartType: ChartType }) {
   const formatValue = (entry: unknown) =>
     typeof entry === "number" ? formatNumericReadingText(entry, unit) : formatEntry(entry);
-  const tooltipStyle: React.CSSProperties = {
-    background: "hsl(var(--popover, var(--card)))",
-    border: "1px solid hsl(var(--border))",
-    borderRadius: "calc(var(--radius) - 4px)",
-    color: "hsl(var(--foreground))",
-    fontSize: "0.75rem",
-  };
+  const tooltipContent = React.useCallback(
+    (props: TooltipContentProps) => (
+      <MetricChartTooltip {...props} fallbackLabel={label} unit={unit} />
+    ),
+    [label, unit],
+  );
+  const horizontalBars =
+    chartType === "bar" && configString(config, "orientation", "vertical") === "horizontal";
 
   // Either a chart to draw or a reason there is nothing to draw. Kept as two
   // separate results rather than one element so the container below does not
@@ -77,10 +80,7 @@ export default function MetricChartCanvas({
             width={36}
             tickFormatter={formatValue}
           />
-          <Tooltip
-            contentStyle={tooltipStyle}
-            formatter={(entry) => [formatValue(entry), label]}
-          />
+          <Tooltip content={tooltipContent} cursor={false} />
           <Line
             type="monotone"
             dataKey="value"
@@ -120,7 +120,7 @@ export default function MetricChartCanvas({
                   />
                 ))}
               </Pie>
-              <Tooltip contentStyle={tooltipStyle} formatter={(entry) => formatValue(entry)} />
+              <Tooltip content={tooltipContent} cursor={false} />
             </PieChart>
           ),
         };
@@ -128,12 +128,34 @@ export default function MetricChartCanvas({
 
       return {
         chart: (
-          <BarChart data={categories} margin={{ top: 4, right: 8, bottom: 0, left: 0 }}>
-            <CartesianGrid strokeDasharray="3 3" className="stroke-border" vertical={false} />
-            <XAxis dataKey="label" tick={{ fontSize: 10, fill: "hsl(var(--muted-foreground))" }} tickLine={false} axisLine={false} />
-            <YAxis tick={{ fontSize: 10, fill: "hsl(var(--muted-foreground))" }} tickLine={false} axisLine={false} width={52} tickFormatter={formatValue} />
-            <Tooltip contentStyle={tooltipStyle} formatter={(entry) => formatValue(entry)} />
-            <Bar dataKey="value" isAnimationActive={false} radius={[4, 4, 0, 0]}>
+          <BarChart
+            data={categories}
+            layout={horizontalBars ? "vertical" : "horizontal"}
+            margin={{ top: 4, right: 8, bottom: 0, left: 0 }}
+          >
+            <CartesianGrid
+              strokeDasharray="3 3"
+              className="stroke-border"
+              horizontal={!horizontalBars}
+              vertical={horizontalBars}
+            />
+            {horizontalBars ? (
+              <>
+                <XAxis type="number" tick={{ fontSize: 10, fill: "hsl(var(--muted-foreground))" }} tickLine={false} axisLine={false} tickFormatter={formatValue} />
+                <YAxis type="category" dataKey="label" tick={{ fontSize: 10, fill: "hsl(var(--muted-foreground))" }} tickLine={false} axisLine={false} width={96} />
+              </>
+            ) : (
+              <>
+                <XAxis type="category" dataKey="label" tick={{ fontSize: 10, fill: "hsl(var(--muted-foreground))" }} tickLine={false} axisLine={false} />
+                <YAxis type="number" tick={{ fontSize: 10, fill: "hsl(var(--muted-foreground))" }} tickLine={false} axisLine={false} width={52} tickFormatter={formatValue} />
+              </>
+            )}
+            <Tooltip content={tooltipContent} cursor={false} />
+            <Bar
+              dataKey="value"
+              isAnimationActive={false}
+              radius={horizontalBars ? [0, 4, 4, 0] : [4, 4, 0, 0]}
+            >
               {categories.map((category, index) => (
                 <Cell
                   key={category.label}
@@ -173,10 +195,7 @@ export default function MetricChartCanvas({
             <Cell fill="hsl(var(--accent))" />
             <Cell fill="hsl(var(--muted))" />
           </Pie>
-          <Tooltip
-            contentStyle={tooltipStyle}
-            formatter={(entry) => formatValue(entry)}
-          />
+          <Tooltip content={tooltipContent} cursor={false} />
         </PieChart>
         ),
       };
@@ -184,13 +203,31 @@ export default function MetricChartCanvas({
 
     return {
       chart: (
-      <BarChart data={[{ name: label, value: reading, remainder }]} margin={{ top: 4, right: 8, bottom: 0, left: 0 }}>
-        <CartesianGrid strokeDasharray="3 3" className="stroke-border" vertical={false} />
-        <XAxis dataKey="name" tick={{ fontSize: 10, fill: "hsl(var(--muted-foreground))" }} tickLine={false} axisLine={false} />
-        <YAxis tick={{ fontSize: 10, fill: "hsl(var(--muted-foreground))" }} tickLine={false} axisLine={false} width={36} tickFormatter={formatValue} />
-        <Tooltip contentStyle={tooltipStyle} formatter={(entry) => formatValue(entry)} />
+      <BarChart
+        data={[{ name: label, value: reading, remainder }]}
+        layout={horizontalBars ? "vertical" : "horizontal"}
+        margin={{ top: 4, right: 8, bottom: 0, left: 0 }}
+      >
+        <CartesianGrid
+          strokeDasharray="3 3"
+          className="stroke-border"
+          horizontal={!horizontalBars}
+          vertical={horizontalBars}
+        />
+        {horizontalBars ? (
+          <>
+            <XAxis type="number" tick={{ fontSize: 10, fill: "hsl(var(--muted-foreground))" }} tickLine={false} axisLine={false} tickFormatter={formatValue} />
+            <YAxis type="category" dataKey="name" tick={{ fontSize: 10, fill: "hsl(var(--muted-foreground))" }} tickLine={false} axisLine={false} width={96} />
+          </>
+        ) : (
+          <>
+            <XAxis type="category" dataKey="name" tick={{ fontSize: 10, fill: "hsl(var(--muted-foreground))" }} tickLine={false} axisLine={false} />
+            <YAxis type="number" tick={{ fontSize: 10, fill: "hsl(var(--muted-foreground))" }} tickLine={false} axisLine={false} width={36} tickFormatter={formatValue} />
+          </>
+        )}
+        <Tooltip content={tooltipContent} cursor={false} />
         <Bar dataKey="value" stackId="reading" fill="hsl(var(--accent))" isAnimationActive={false} radius={[0, 0, 0, 0]} />
-        <Bar dataKey="remainder" stackId="reading" fill="hsl(var(--muted))" isAnimationActive={false} radius={[4, 4, 0, 0]} />
+        <Bar dataKey="remainder" stackId="reading" fill="hsl(var(--muted))" isAnimationActive={false} radius={horizontalBars ? [0, 4, 4, 0] : [4, 4, 0, 0]} />
       </BarChart>
       ),
     };
@@ -202,6 +239,45 @@ export default function MetricChartCanvas({
       {rendered.chart}
     </ResponsiveContainer>
   );
+}
+
+/** Recharts' stock tooltip brings its own light palette and `value :` row.
+ * Keeping the content app-owned makes charts follow the same elevated-surface
+ * treatment as Popover and DropdownMenu on every host WebView. */
+function MetricChartTooltip({
+  active,
+  payload,
+  label,
+  fallbackLabel,
+  unit,
+}: TooltipContentProps & { fallbackLabel: string; unit?: string | null }) {
+  if (!active || payload.length === 0) return null;
+
+  const primary = payload.find((entry) => entry.dataKey === "value") ?? payload[0];
+  const title = tooltipCategory(primary?.payload, label, fallbackLabel);
+  const formattedValue =
+    typeof primary?.value === "number"
+      ? formatNumericReadingText(primary.value, unit)
+      : formatEntry(primary?.value);
+
+  return (
+    <div className="surface-elevated min-w-24 rounded-md border border-border px-3 py-2 text-xs text-popover-foreground shadow-md">
+      <p className="font-medium leading-none">{title}</p>
+      <p className="mt-1.5 tabular-nums text-muted-foreground">{formattedValue}</p>
+    </div>
+  );
+}
+
+function tooltipCategory(payload: unknown, label: unknown, fallback: string): string {
+  if (typeof payload === "object" && payload !== null) {
+    const record = payload as Record<string, unknown>;
+    for (const key of ["label", "name", "time"] as const) {
+      const value = record[key];
+      if (typeof value === "string" && value.length > 0) return value;
+    }
+  }
+  if (typeof label === "string" || typeof label === "number") return String(label);
+  return fallback;
 }
 
 const CATEGORY_COLORS = [

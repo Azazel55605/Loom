@@ -329,6 +329,15 @@ function DisplayBindingFields({
     onChange({ ...binding, config: next });
   }
 
+  function setBarOrientation(orientation: "vertical" | "horizontal") {
+    const next = { ...config };
+    // Vertical bars are the backwards-compatible default, so old bindings and
+    // bindings switched back to the default need no extra persisted field.
+    if (orientation === "vertical") delete next.orientation;
+    else next.orientation = orientation;
+    onChange({ ...binding, config: next });
+  }
+
   const bounded = currentKey === "gauge" || currentKey === "progressBar";
 
   return (
@@ -420,6 +429,26 @@ function DisplayBindingFields({
                   {option.label}
                 </SelectItem>
               ))}
+            </SelectContent>
+          </Select>
+        </Field>
+      ) : null}
+
+      {currentKey === "metricChart" && chartType === "bar" ? (
+        <Field id={`${idPrefix}-orientation`} label="Bar orientation">
+          <Select
+            value={config.orientation === "horizontal" ? "horizontal" : "vertical"}
+            disabled={disabled}
+            onValueChange={(next) => {
+              if (next === "vertical" || next === "horizontal") setBarOrientation(next);
+            }}
+          >
+            <SelectTrigger id={`${idPrefix}-orientation`}>
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value="vertical">Vertical bars</SelectItem>
+              <SelectItem value="horizontal">Horizontal bars</SelectItem>
             </SelectContent>
           </Select>
         </Field>

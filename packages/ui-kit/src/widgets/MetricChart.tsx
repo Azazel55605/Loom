@@ -67,7 +67,10 @@ export function MetricChartWidget({
       <span className="whitespace-normal text-xs text-muted-foreground [overflow-wrap:anywhere]">
         {label}
       </span>
-      <div className={cn("flex-1", expanded ? "min-h-[18rem]" : "min-h-[6rem]")}>
+      {/* ResponsiveContainer's percentage height needs a definite containing
+          height. `min-height` alone is not such a basis, which made the
+          expanded modal chart measure itself to zero in some WebViews. */}
+      <div className={cn("flex-1", expanded ? "h-[18rem] min-h-[18rem]" : "min-h-[6rem]")}>
         <React.Suspense fallback={<ChartPlaceholder label="Loading chart…" />}>
           <MetricChartCanvas
             label={label}

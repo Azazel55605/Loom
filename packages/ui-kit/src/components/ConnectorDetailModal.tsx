@@ -285,9 +285,17 @@ export function ConnectorDetailModal({
           ) : (
             <div className="space-y-6">
               {reading.statusError !== undefined ? <Alert variant="destructive"><AlertCircle aria-hidden="true" /><AlertDescription>{describeConnectorError(reading.statusError)}</AlertDescription></Alert> : null}
-              <div className="grid gap-5 md:grid-cols-2">
+              <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
                 {placement.widgetBindings.map((binding, index) => (
-                  <div key={index} ref={index === focusIndex ? focusRef : undefined} className="min-w-0">{renderWidget({ binding, statusDetails, dataPoints: targetDataPoints, actions: targetActions, onExecute: runAction, disabled: !canControl, unavailableReason: availability.unavailableReason, size: "expanded", className: "min-h-[5rem]" })}</div>
+                  <div
+                    key={index}
+                    ref={index === focusIndex ? focusRef : undefined}
+                    className={expandedWidgetSpansRow(binding)
+                      ? "min-w-0 sm:col-span-2 lg:col-span-3"
+                      : "min-w-0"}
+                  >
+                    {renderWidget({ binding, statusDetails, dataPoints: targetDataPoints, actions: targetActions, onExecute: runAction, disabled: !canControl, unavailableReason: availability.unavailableReason, size: "expanded", className: "min-h-[5rem]" })}
+                  </div>
                 ))}
               </div>
               {/* Resource kinds remain descriptor-driven; History is universal
@@ -420,4 +428,12 @@ function ConnectorDetailSkeleton() {
 function formatChecked(iso: string): string {
   const date = new Date(iso);
   return Number.isNaN(date.getTime()) ? iso : date.toLocaleString();
+}
+
+/** Charts and logs need horizontal room and are much taller than scalar
+ * widgets. Giving them their own row prevents a short StatTile beside one from
+ * leaving what looks like a large missing-content hole in the expanded grid. */
+function expandedWidgetSpansRow(binding: DashboardPlacement["widgetBindings"][number]): boolean {
+  return "display" in binding &&
+    (typeof binding.display.widgetType !== "string" || binding.display.widgetType === "logStream");
 }
