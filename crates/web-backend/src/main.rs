@@ -1469,6 +1469,10 @@ mod tests {
             pihole["configSchema"]["properties"]["password"]["x-loom-sensitive"],
             true
         );
+        assert_eq!(
+            pihole["configSchema"]["properties"]["allowInsecureCert"]["default"],
+            false
+        );
         assert_eq!(pihole["setupGuide"], serde_json::Value::Null);
         assert_eq!(pihole["discoverableType"], serde_json::Value::Null);
     }

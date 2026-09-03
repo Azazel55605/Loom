@@ -37,9 +37,13 @@ impl PiHoleConnector {
     /// Validates the configuration and proves Pi-hole authentication.
     pub async fn from_config_value(value: Value) -> Result<Self, ConnectorError> {
         let config = PiHoleConnectorConfig::from_value(value)?;
-        let client = PiHoleClient::connect(&config.base_url, &config.password)
-            .await
-            .map_err(connector_error)?;
+        let client = PiHoleClient::connect_with_certificate_policy(
+            &config.base_url,
+            &config.password,
+            config.allow_insecure_cert,
+        )
+        .await
+        .map_err(connector_error)?;
         Ok(Self { config, client })
     }
 

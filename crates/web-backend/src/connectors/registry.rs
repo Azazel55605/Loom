@@ -315,6 +315,10 @@ mod tests {
             registration.schema["properties"]["password"]["x-loom-sensitive"],
             true
         );
+        assert_eq!(
+            registration.schema["properties"]["allowInsecureCert"]["default"],
+            false
+        );
         assert!(registration.setup_guide.is_none());
         assert!(registration.connection_test_factory.is_none());
         assert!(registration.discoverable_type.is_none());

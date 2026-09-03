@@ -1,4 +1,4 @@
-use std::{fmt, sync::Arc, time::Duration};
+use std::{error::Error as _, fmt, sync::Arc, time::Duration};
 
 use reqwest::{Method, StatusCode};
 use serde::Deserialize;
@@ -42,8 +42,21 @@ impl fmt::Debug for PiHoleClient {
 impl PiHoleClient {
     /// Builds an HTTP client and establishes the first Pi-hole session.
     pub async fn connect(base_url: &str, password: &str) -> Result<Self, PiHoleError> {
+        Self::connect_with_certificate_policy(base_url, password, false).await
+    }
+
+    /// Builds an HTTP client with an explicit certificate-validation policy.
+    ///
+    /// Allowing an invalid certificate only relaxes TLS peer verification; it
+    /// does not downgrade an HTTPS URL or send credentials over plaintext.
+    pub async fn connect_with_certificate_policy(
+        base_url: &str,
+        password: &str,
+        allow_insecure_cert: bool,
+    ) -> Result<Self, PiHoleError> {
         let http = reqwest::Client::builder()
             .timeout(REQUEST_TIMEOUT)
+            .danger_accept_invalid_certs(allow_insecure_cert)
             .build()
             .map_err(|error| PiHoleError::ConnectionFailed(error.to_string()))?;
         Self::connect_with_http(base_url, password, http).await
@@ -244,7 +257,29 @@ async fn response_message(response: reqwest::Response) -> String {
 }
 
 fn connection_error(error: reqwest::Error) -> PiHoleError {
-    PiHoleError::ConnectionFailed(error.to_string())
+    let mut reasons = vec![error.to_string()];
+    let mut source = error.source();
+    while let Some(cause) = source {
+        let reason = cause.to_string();
+        if !reason.is_empty() && !reasons.iter().any(|existing| existing == &reason) {
+            reasons.push(reason);
+        }
+        source = cause.source();
+    }
+
+    let certificate_was_rejected = reasons.iter().any(|reason| {
+        let reason = reason.to_ascii_lowercase();
+        reason.contains("certificate")
+            || reason.contains("unknownissuer")
+            || reason.contains("invalidpeercredential")
+    });
+    let mut message = reasons.join(": ");
+    if certificate_was_rejected {
+        message.push_str(
+            "; TLS certificate validation failed. Enable allowInsecureCert only after verifying the Pi-hole endpoint",
+        );
+    }
+    PiHoleError::ConnectionFailed(message)
 }
 
 #[cfg(test)]

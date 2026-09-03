@@ -896,6 +896,7 @@ the instances they may see are on `/connector-instances`, which asks only for
         },
         "allowInsecureCert": {
           "type": "boolean",
+          "title": "Accept untrusted certificate",
           "default": false,
           "description": "Accept a self-signed or otherwise untrusted certificate. TLS encryption remains mandatory; this never enables an unencrypted connection."
         }
@@ -951,6 +952,11 @@ the instances they may see are on `/connector-instances`, which asks only for
           "minLength": 1,
           "x-loom-sensitive": true,
           "description": "A Pi-hole password; an application password is recommended."
+        },
+        "allowInsecureCert": {
+          "type": "boolean",
+          "default": false,
+          "description": "Accept an untrusted HTTPS certificate while retaining encrypted transport."
         }
       },
       "required": ["baseUrl", "password"],
@@ -996,7 +1002,7 @@ is created, not here.
 | --- | --- | --- | --- |
 | `debug` | A fixture that contacts nothing. Permanent — see `crates/core/src/connector/debug.rs`. | How it should pretend to behave. | Parsing alone; there is nothing to reach. |
 | `docker` | One Docker daemon connection and its host-level aggregate view. Containers are addressable sub-targets of that instance. | Required `dockerHost` (`unix://` or `tcp://`) only. | A real daemon connection and ping. |
-| `pihole` | One Pi-hole v6 instance with host-level statistics and DNS blocking control. | Required `baseUrl` including `http://` or `https://`, plus sensitive `password`; an application password is recommended. | `POST /api/auth`, retaining `session.sid` for `X-FTL-SID` authentication. |
+| `pihole` | One Pi-hole v6 instance with host-level statistics and DNS blocking control. | Required `baseUrl` including `http://` or `https://`, sensitive `password`, and optional `allowInsecureCert` (default `false`); an application password is recommended. | `POST /api/auth`, retaining `session.sid` for `X-FTL-SID` authentication. |
 | `truenas` | One TrueNAS host with an aggregate host view plus addressable pool and dataset sub-targets. | Required bare `host`, required API-key owner `username`, sensitive `apiKey`, and optional `allowInsecureCert` (default `false`). | A mandatory-TLS WebSocket connection and `auth.login_ex` API-key authentication. |
 
 The Pi-hole connector publishes `queriesToday`, `queriesBlockedToday`,
@@ -1005,6 +1011,9 @@ and `queriesHistory`. One poll fetches `/api/stats/summary`, `/api/history`, and
 `/api/dns/blocking` concurrently; an expired SID is reauthenticated once and
 the failed request retried. Its `setBlocking` action permanently enables or
 disables blocking through `POST /api/dns/blocking` with `timer: null`. Pi-hole
+`allowInsecureCert` relaxes certificate validation for self-signed or otherwise
+untrusted homelab HTTPS endpoints while retaining encrypted transport. It is
+off by default and applies only to this configured connector instance. Pi-hole
 setup guides, capability checks, resource kinds, and sub-targets remain
 deliberately absent in this minimal pass.
 

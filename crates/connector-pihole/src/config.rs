@@ -9,6 +9,8 @@ use serde_json::{json, Value};
 pub struct PiHoleConnectorConfig {
     pub base_url: String,
     pub password: String,
+    #[serde(default)]
+    pub allow_insecure_cert: bool,
 }
 
 impl PiHoleConnectorConfig {
@@ -82,6 +84,12 @@ pub fn config_schema() -> Value {
                 "minLength": 1,
                 "x-loom-sensitive": true,
                 "description": "Your Pi-hole password, or — recommended — an application password generated under Settings in the Pi-hole web interface, so your real admin password never leaves Pi-hole itself."
+            },
+            "allowInsecureCert": {
+                "type": "boolean",
+                "title": "Accept untrusted certificate",
+                "default": false,
+                "description": "Accept a self-signed, expired, hostname-mismatched, or otherwise untrusted HTTPS certificate. HTTPS encryption remains enabled. Only enable this after verifying the Pi-hole endpoint."
             }
         },
         "required": ["baseUrl", "password"],
@@ -98,6 +106,7 @@ mod tests {
         let schema = config_schema();
         assert_eq!(schema["properties"]["password"]["x-loom-sensitive"], true);
         assert!(schema["properties"]["baseUrl"]["x-loom-sensitive"].is_null());
+        assert_eq!(schema["properties"]["allowInsecureCert"]["default"], false);
         assert_eq!(schema["required"], json!(["baseUrl", "password"]));
     }
 
@@ -110,6 +119,7 @@ mod tests {
         .expect("valid config");
 
         assert_eq!(config.base_url, "https://pi.hole:8443");
+        assert!(!config.allow_insecure_cert);
         assert_eq!(
             config.network_target(),
             Some(NetworkTarget::new("pi.hole", 8443))
@@ -127,5 +137,17 @@ mod tests {
             .expect("unsafe or incomplete URL must be rejected");
             assert!(matches!(error, ConnectorError::InvalidConfig { .. }));
         }
+    }
+
+    #[test]
+    fn config_accepts_an_explicit_untrusted_certificate_policy() {
+        let config = PiHoleConnectorConfig::from_value(json!({
+            "baseUrl": "https://pi.hole",
+            "password": "not-a-real-password",
+            "allowInsecureCert": true
+        }))
+        .expect("valid config");
+
+        assert!(config.allow_insecure_cert);
     }
 }

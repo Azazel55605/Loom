@@ -1,7 +1,8 @@
 //! Opt-in checks against a real Pi-hole v6 instance.
 //!
 //! Set `LOOM_TEST_PIHOLE_BASE_URL` and `LOOM_TEST_PIHOLE_PASSWORD` to enable
-//! the read-only test. The blocking test is ignored and additionally requires
+//! the read-only test. For a deliberately untrusted HTTPS certificate, also
+//! set `LOOM_TEST_PIHOLE_ALLOW_INSECURE_CERT=1`. The blocking test is ignored and additionally requires
 //! `LOOM_TEST_PIHOLE_ALLOW_TOGGLE=1` because it changes DNS policy, even though
 //! it restores the original state before making assertions.
 
@@ -92,9 +93,12 @@ async fn live_connector(test_name: &str) -> Option<PiHoleConnector> {
         eprintln!("SKIPPING {test_name}: LOOM_TEST_PIHOLE_PASSWORD is not set");
         return None;
     };
+    let allow_insecure_cert =
+        std::env::var("LOOM_TEST_PIHOLE_ALLOW_INSECURE_CERT").as_deref() == Ok("1");
     match PiHoleConnector::from_config_value(json!({
         "baseUrl": base_url,
-        "password": password
+        "password": password,
+        "allowInsecureCert": allow_insecure_cert
     }))
     .await
     {
