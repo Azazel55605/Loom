@@ -10,10 +10,13 @@
 use std::collections::HashSet;
 
 use loom_connector_unifi_network::{
-    UniFiNetworkConnector, ACTION_AUTHORIZE_GUEST, ACTION_CREATE_VOUCHER, ACTION_CYCLE_POE,
-    ACTION_RESTART, ACTION_REVOKE_VOUCHER, DATA_POINT_CLIENT_COUNT, DATA_POINT_DEVICE_COUNT,
-    DATA_POINT_MODEL, DATA_POINT_ONLINE_DEVICE_COUNT, DATA_POINT_STATE, DATA_POINT_UPTIME,
-    RESOURCE_KIND_CLIENTS, RESOURCE_KIND_PORTS, RESOURCE_KIND_VOUCHERS,
+    UniFiNetworkConnector, ACTION_ADOPT, ACTION_AUTHORIZE_GUEST, ACTION_CREATE_VOUCHER,
+    ACTION_CYCLE_POE, ACTION_RESTART, ACTION_REVOKE_VOUCHER, ACTION_UNAUTHORIZE_GUEST,
+    DATA_POINT_CLIENT_COUNT, DATA_POINT_DEVICE_COUNT, DATA_POINT_LAST_HEARTBEAT_AT,
+    DATA_POINT_LOAD_AVERAGE_15M, DATA_POINT_LOAD_AVERAGE_1M, DATA_POINT_LOAD_AVERAGE_5M,
+    DATA_POINT_MODEL, DATA_POINT_ONLINE_DEVICE_COUNT, DATA_POINT_RADIO_TX_RETRY_PERCENT,
+    DATA_POINT_STATE, DATA_POINT_UPTIME, DATA_POINT_WAN_COUNT, RESOURCE_KIND_CLIENTS,
+    RESOURCE_KIND_PENDING_DEVICES, RESOURCE_KIND_PORTS, RESOURCE_KIND_VOUCHERS, RESOURCE_KIND_WANS,
 };
 use loom_core::connector::{Connector, HealthState};
 use serde_json::{json, Value};
@@ -34,6 +37,7 @@ async fn a_real_unifi_console_reports_site_counts_and_obeys_the_contract() {
         DATA_POINT_DEVICE_COUNT,
         DATA_POINT_ONLINE_DEVICE_COUNT,
         DATA_POINT_CLIENT_COUNT,
+        DATA_POINT_WAN_COUNT,
     ] {
         assert!(
             status
@@ -76,6 +80,9 @@ async fn a_real_unifi_console_reports_site_counts_and_obeys_the_contract() {
             "the configured site returned these targets instead: {targets:#?}"
         );
     }
+    let mut saw_load_averages = false;
+    let mut saw_heartbeat = false;
+    let mut saw_radio_retries = false;
     for target in &targets {
         assert!(status
             .data_point_value_for(Some(&target.id), DATA_POINT_STATE)
@@ -87,7 +94,36 @@ async fn a_real_unifi_console_reports_site_counts_and_obeys_the_contract() {
             .data_point_value_for(Some(&target.id), DATA_POINT_UPTIME)
             .is_some_and(Value::is_string));
         assert!(status.target_health.contains_key(&target.id));
+        saw_load_averages |= [
+            DATA_POINT_LOAD_AVERAGE_1M,
+            DATA_POINT_LOAD_AVERAGE_5M,
+            DATA_POINT_LOAD_AVERAGE_15M,
+        ]
+        .into_iter()
+        .all(|id| {
+            status
+                .data_point_value_for(Some(&target.id), id)
+                .is_some_and(Value::is_number)
+        });
+        saw_heartbeat |= status
+            .data_point_value_for(Some(&target.id), DATA_POINT_LAST_HEARTBEAT_AT)
+            .is_some_and(Value::is_string);
+        saw_radio_retries |= status
+            .data_point_value_for(Some(&target.id), DATA_POINT_RADIO_TX_RETRY_PERCENT)
+            .is_some_and(Value::is_number);
     }
+    assert!(
+        saw_load_averages,
+        "at least one live device should expose load averages"
+    );
+    assert!(
+        saw_heartbeat,
+        "at least one live device should expose a heartbeat timestamp"
+    );
+    assert!(
+        saw_radio_retries,
+        "at least one live AP should expose radio retry statistics"
+    );
 
     let clients = connector
         .list_resource_items(RESOURCE_KIND_CLIENTS, None)
@@ -111,6 +147,24 @@ async fn a_real_unifi_console_reports_site_counts_and_obeys_the_contract() {
             && row.fields.contains_key("usesRemaining")
             && row.fields.get("createdAt").is_some_and(Value::is_string)
     }));
+    let wans = connector
+        .list_resource_items(RESOURCE_KIND_WANS, None)
+        .await
+        .expect("the live site should list WAN definitions");
+    assert!(wans.iter().all(|row| {
+        row.fields.get("name").is_some_and(Value::is_string)
+            && row.fields.get("id").is_some_and(Value::is_string)
+    }));
+    let pending_devices = connector
+        .list_resource_items(RESOURCE_KIND_PENDING_DEVICES, None)
+        .await
+        .expect("the console should list pending devices, even when empty");
+    assert!(pending_devices.iter().all(|row| {
+        row.fields.get("model").is_some_and(Value::is_string)
+            && row.fields.get("macAddress").is_some_and(Value::is_string)
+            && row.fields.get("state").is_some_and(Value::is_string)
+            && row.fields.contains_key("firmwareVersion")
+    }));
     let mut port_count = 0usize;
     for target in &targets {
         let ports = connector
@@ -129,10 +183,12 @@ async fn a_real_unifi_console_reports_site_counts_and_obeys_the_contract() {
     contract_targets.extend(targets.iter().map(|target| Some(target.id.clone())));
     loom_connector_test_kit::assert_connector_contract(&connector, &contract_targets).await;
     eprintln!(
-        "{test_name}: {:#}; {} client rows, {} voucher rows, {} port rows",
+        "{test_name}: {:#}; {} client rows, {} voucher rows, {} WAN rows, {} pending-device rows, {} port rows",
         status.details,
         clients.len(),
         vouchers.len(),
+        wans.len(),
+        pending_devices.len(),
         port_count
     );
 }
@@ -214,10 +270,21 @@ async fn a_real_unifi_guest_can_be_authorized_only_with_explicit_opt_in() {
         .execute_action(
             ACTION_AUTHORIZE_GUEST,
             None,
-            json!({"resourceId": client_id, "timeLimitMinutes": 15}),
+            json!({"resourceId": &client_id, "timeLimitMinutes": 15}),
         )
         .await
         .expect("the selected guest should accept authorization");
+    assert!(result.success, "{}", result.message);
+    eprintln!("{test_name}: {}", result.message);
+
+    let result = connector
+        .execute_action(
+            ACTION_UNAUTHORIZE_GUEST,
+            None,
+            json!({"resourceId": client_id}),
+        )
+        .await
+        .expect("the selected guest should accept unauthorization");
     assert!(result.success, "{}", result.message);
     eprintln!("{test_name}: {}", result.message);
 }
@@ -249,8 +316,7 @@ async fn a_real_unifi_voucher_can_be_created_and_revoked_with_explicit_opt_in() 
             None,
             json!({
                 "name": "Loom integration test",
-                "timeLimitMinutes": 15,
-                "authorizedGuestLimit": 1
+                "timeLimitMinutes": 15
             }),
         )
         .await
@@ -278,6 +344,29 @@ async fn a_real_unifi_voucher_can_be_created_and_revoked_with_explicit_opt_in() 
         .await
         .expect("list vouchers after revocation");
     assert!(final_rows.iter().all(|voucher| voucher.id != created_id));
+}
+
+#[tokio::test]
+#[ignore = "adopts a real pending device; run manually with an explicit MAC and acknowledgement"]
+async fn a_real_pending_unifi_device_can_be_adopted_only_with_explicit_opt_in() {
+    let test_name = "a_real_pending_unifi_device_can_be_adopted_only_with_explicit_opt_in";
+    assert_eq!(
+        std::env::var("LOOM_TEST_UNIFI_NETWORK_ALLOW_ADOPTION").as_deref(),
+        Ok("1"),
+        "set LOOM_TEST_UNIFI_NETWORK_ALLOW_ADOPTION=1 only when adopting the selected device is intended"
+    );
+    let mac_address = std::env::var("LOOM_TEST_UNIFI_NETWORK_PENDING_DEVICE_MAC")
+        .expect("set LOOM_TEST_UNIFI_NETWORK_PENDING_DEVICE_MAC to a currently pending device");
+    let connector = live_connector(test_name)
+        .await
+        .expect("live UniFi Network variables are required for the manual adoption test");
+
+    let result = connector
+        .execute_action(ACTION_ADOPT, None, json!({"resourceId": mac_address}))
+        .await
+        .expect("the selected pending device should accept adoption");
+    assert!(result.success, "{}", result.message);
+    eprintln!("{test_name}: {}", result.message);
 }
 
 async fn live_connector(test_name: &str) -> Option<UniFiNetworkConnector> {

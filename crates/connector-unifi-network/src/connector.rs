@@ -32,23 +32,35 @@ pub const DATA_POINT_CPU_UTILIZATION: &str = "cpuUtilization";
 pub const DATA_POINT_MEMORY_UTILIZATION: &str = "memoryUtilization";
 pub const DATA_POINT_UPLINK_RX_RATE: &str = "uplinkRxRate";
 pub const DATA_POINT_UPLINK_TX_RATE: &str = "uplinkTxRate";
+pub const DATA_POINT_LOAD_AVERAGE_1M: &str = "loadAverage1m";
+pub const DATA_POINT_LOAD_AVERAGE_5M: &str = "loadAverage5m";
+pub const DATA_POINT_LOAD_AVERAGE_15M: &str = "loadAverage15m";
+pub const DATA_POINT_LAST_HEARTBEAT_AT: &str = "lastHeartbeatAt";
+pub const DATA_POINT_RADIO_TX_RETRY_PERCENT: &str = "radioTxRetryPercent";
+pub const DATA_POINT_WAN_COUNT: &str = "wanCount";
 pub const ACTION_RESTART: &str = "restart";
 pub const ACTION_CYCLE_POE: &str = "cyclePoe";
 pub const ACTION_AUTHORIZE_GUEST: &str = "authorizeGuest";
+pub const ACTION_UNAUTHORIZE_GUEST: &str = "unauthorizeGuest";
 pub const ACTION_CREATE_VOUCHER: &str = "createVoucher";
 pub const ACTION_REVOKE_VOUCHER: &str = "revokeVoucher";
+pub const ACTION_ADOPT: &str = "adopt";
 
 pub const RESOURCE_KIND_PORTS: &str = "ports";
 pub const RESOURCE_KIND_CLIENTS: &str = "clients";
 pub const RESOURCE_KIND_VOUCHERS: &str = "vouchers";
+pub const RESOURCE_KIND_WANS: &str = "wans";
+pub const RESOURCE_KIND_PENDING_DEVICES: &str = "pendingDevices";
 
 pub const CAPABILITY_READ_DEVICES: &str = "readDevices";
 pub const CAPABILITY_READ_CLIENTS: &str = "readClients";
 pub const CAPABILITY_RESTART: &str = ACTION_RESTART;
 pub const CAPABILITY_CYCLE_POE: &str = ACTION_CYCLE_POE;
 pub const CAPABILITY_AUTHORIZE_GUEST: &str = ACTION_AUTHORIZE_GUEST;
+pub const CAPABILITY_UNAUTHORIZE_GUEST: &str = ACTION_UNAUTHORIZE_GUEST;
 pub const CAPABILITY_CREATE_VOUCHER: &str = ACTION_CREATE_VOUCHER;
 pub const CAPABILITY_REVOKE_VOUCHER: &str = ACTION_REVOKE_VOUCHER;
+pub const CAPABILITY_ADOPT: &str = ACTION_ADOPT;
 
 const PAGE_LIMIT: usize = 200;
 const VOUCHER_PAGE_LIMIT: usize = 1_000;
@@ -139,7 +151,9 @@ impl UniFiNetworkConnector {
     }
 
     async fn read_status(&self) -> Result<PollReadings, UniFiNetworkError> {
-        let (devices, clients) = self.list_network_inventory().await?;
+        let (inventory, wans) = tokio::join!(self.list_network_inventory(), self.list_all_wans());
+        let (devices, clients) = inventory?;
+        let wans = wans?;
         self.remember_devices(devices.clone());
         self.remember_clients(clients.clone());
 
@@ -164,7 +178,7 @@ impl UniFiNetworkConnector {
         let device_readings = device_readings.await;
 
         Ok(PollReadings {
-            summary: map_site_summary(&devices, clients.len()),
+            summary: map_site_summary(&devices, clients.len(), wans.len()),
             devices: devices
                 .into_iter()
                 .zip(device_readings)
@@ -323,6 +337,20 @@ impl UniFiNetworkConnector {
         Ok(vouchers)
     }
 
+    async fn list_all_wans(&self) -> Result<Vec<WanOverview>, UniFiNetworkError> {
+        self.client
+            .fetch_all_pages::<WanOverview>(&format!("sites/{}/wans", self.site.id), PAGE_LIMIT)
+            .await
+    }
+
+    async fn list_all_pending_devices(
+        &self,
+    ) -> Result<Vec<PendingDeviceOverview>, UniFiNetworkError> {
+        self.client
+            .fetch_all_pages::<PendingDeviceOverview>("pending-devices", PAGE_LIMIT)
+            .await
+    }
+
     async fn list_sub_targets_live(&self) -> Result<Vec<SubTarget>, ConnectorError> {
         let devices = self.list_all_devices().await.map_err(connector_error)?;
         let targets = device_sub_targets(&devices);
@@ -378,6 +406,32 @@ impl loom_core::connector::Connector for UniFiNetworkConnector {
                             DATA_POINT_MEMORY_UTILIZATION,
                             statistics.memory_utilization_pct,
                         );
+                        set_optional_number(
+                            &mut details,
+                            &target_id,
+                            DATA_POINT_LOAD_AVERAGE_1M,
+                            statistics.load_average_1_min,
+                        );
+                        set_optional_number(
+                            &mut details,
+                            &target_id,
+                            DATA_POINT_LOAD_AVERAGE_5M,
+                            statistics.load_average_5_min,
+                        );
+                        set_optional_number(
+                            &mut details,
+                            &target_id,
+                            DATA_POINT_LOAD_AVERAGE_15M,
+                            statistics.load_average_15_min,
+                        );
+                        if let Some(last_heartbeat_at) = &statistics.last_heartbeat_at {
+                            set_detail(
+                                &mut details,
+                                Some(&target_id),
+                                DATA_POINT_LAST_HEARTBEAT_AT,
+                                json!(last_heartbeat_at),
+                            );
+                        }
                         if let Some(uplink) = &statistics.uplink {
                             set_optional_number(
                                 &mut details,
@@ -394,6 +448,14 @@ impl loom_core::connector::Connector for UniFiNetworkConnector {
                         }
                     }
                     if device_type(&reading.device) == DeviceType::AccessPoint {
+                        if let Some(statistics) = &reading.statistics {
+                            set_optional_number(
+                                &mut details,
+                                &target_id,
+                                DATA_POINT_RADIO_TX_RETRY_PERCENT,
+                                max_radio_tx_retry_percent(statistics),
+                            );
+                        }
                         set_detail(
                             &mut details,
                             Some(&target_id),
@@ -542,6 +604,29 @@ impl loom_core::connector::Connector for UniFiNetworkConnector {
                     "Guest network access was authorized with the requested limits.",
                 ))
             }
+            ACTION_UNAUTHORIZE_GUEST => {
+                if target_id.is_some() {
+                    return Err(ConnectorError::invalid_action(action_id));
+                }
+                let client_id = required_resource_id(action_id, &params)?;
+                let clients = self.clients_for_resources().await?;
+                if !clients.iter().any(|client| client.id == client_id) {
+                    return Err(invalid_param(
+                        action_id,
+                        "`resourceId` is not a connected client returned by this site",
+                    ));
+                }
+                self.client
+                    .post_json(
+                        &format!("sites/{}/clients/{client_id}/actions", self.site.id),
+                        guest_unauthorization_body(),
+                    )
+                    .await
+                    .map_err(connector_error)?;
+                Ok(ActionResult::ok(
+                    "Guest network access was unauthorized and the client was disconnected.",
+                ))
+            }
             ACTION_CREATE_VOUCHER => {
                 if target_id.is_some() {
                     return Err(ConnectorError::invalid_action(action_id));
@@ -576,13 +661,47 @@ impl loom_core::connector::Connector for UniFiNetworkConnector {
                     .map_err(connector_error)?;
                 Ok(ActionResult::ok("Revoked the hotspot voucher."))
             }
+            ACTION_ADOPT => {
+                if target_id.is_some() {
+                    return Err(ConnectorError::invalid_action(action_id));
+                }
+                let mac_address = required_resource_id(action_id, &params)?;
+                let pending = self
+                    .list_all_pending_devices()
+                    .await
+                    .map_err(connector_error)?;
+                if !pending
+                    .iter()
+                    .any(|device| device.mac_address.eq_ignore_ascii_case(mac_address))
+                {
+                    return Err(invalid_param(
+                        action_id,
+                        "`resourceId` is not a device currently pending adoption",
+                    ));
+                }
+                self.client
+                    .post_json(
+                        &format!("sites/{}/devices", self.site.id),
+                        device_adoption_body(mac_address),
+                    )
+                    .await
+                    .map_err(connector_error)?;
+                Ok(ActionResult::ok(
+                    "Device adoption started. The device will become selectable after the connector's sub-targets are refreshed.",
+                ))
+            }
             _ => Err(ConnectorError::invalid_action(action_id)),
         }
     }
 
     fn resource_kinds(&self, target_id: Option<&str>) -> Vec<ResourceKindDescriptor> {
         match target_id {
-            None => vec![clients_kind(), vouchers_kind()],
+            None => vec![
+                clients_kind(),
+                vouchers_kind(),
+                wans_kind(),
+                pending_devices_kind(),
+            ],
             Some(target) if device_id_from_target(target).is_some() => vec![ports_kind()],
             _ => Vec::new(),
         }
@@ -616,6 +735,14 @@ impl loom_core::connector::Connector for UniFiNetworkConnector {
             }
             (RESOURCE_KIND_VOUCHERS, None) => Ok(voucher_resource_items(
                 self.list_all_vouchers().await.map_err(connector_error)?,
+            )),
+            (RESOURCE_KIND_WANS, None) => Ok(wan_resource_items(
+                self.list_all_wans().await.map_err(connector_error)?,
+            )),
+            (RESOURCE_KIND_PENDING_DEVICES, None) => Ok(pending_device_resource_items(
+                self.list_all_pending_devices()
+                    .await
+                    .map_err(connector_error)?,
             )),
             _ => Ok(Vec::new()),
         }
@@ -676,6 +803,7 @@ impl loom_core::connector::Connector for UniFiNetworkConnector {
                 "Connected clients",
                 DataPointValueType::Number,
             ),
+            DataPointDescriptor::new(DATA_POINT_WAN_COUNT, "WANs", DataPointValueType::Number),
         ];
         descriptors.extend(devices.iter().flat_map(device_data_points));
         descriptors
@@ -686,6 +814,7 @@ impl loom_core::connector::Connector for UniFiNetworkConnector {
             WidgetBinding::display(DATA_POINT_DEVICE_COUNT, DisplayWidgetType::StatTile),
             WidgetBinding::display(DATA_POINT_ONLINE_DEVICE_COUNT, DisplayWidgetType::StatTile),
             WidgetBinding::display(DATA_POINT_CLIENT_COUNT, DisplayWidgetType::StatTile),
+            WidgetBinding::display(DATA_POINT_WAN_COUNT, DisplayWidgetType::StatTile),
         ])
     }
 
@@ -710,6 +839,16 @@ impl loom_core::connector::Connector for UniFiNetworkConnector {
                         })),
                     WidgetBinding::display(DATA_POINT_MODEL, DisplayWidgetType::StatTile),
                     WidgetBinding::display(DATA_POINT_UPTIME, DisplayWidgetType::StatTile),
+                    WidgetBinding::display(
+                        DATA_POINT_LAST_HEARTBEAT_AT,
+                        DisplayWidgetType::StatTile,
+                    ),
+                    WidgetBinding::display(DATA_POINT_LOAD_AVERAGE_1M, DisplayWidgetType::StatTile),
+                    WidgetBinding::display(DATA_POINT_LOAD_AVERAGE_5M, DisplayWidgetType::StatTile),
+                    WidgetBinding::display(
+                        DATA_POINT_LOAD_AVERAGE_15M,
+                        DisplayWidgetType::StatTile,
+                    ),
                 ];
                 match target_id.map_or(DeviceType::NetworkDevice, |target| {
                     self.device_type_for_target(target)
@@ -720,6 +859,10 @@ impl loom_core::connector::Connector for UniFiNetworkConnector {
                             DisplayWidgetType::StatTile,
                         ),
                         WidgetBinding::display(DATA_POINT_RADIOS, DisplayWidgetType::StatTile),
+                        WidgetBinding::display(
+                            DATA_POINT_RADIO_TX_RETRY_PERCENT,
+                            DisplayWidgetType::StatTile,
+                        ),
                         WidgetBinding::display(
                             DATA_POINT_CPU_UTILIZATION,
                             DisplayWidgetType::ProgressBar,
@@ -814,7 +957,30 @@ struct DeviceStatistics {
     #[serde(default)]
     memory_utilization_pct: Option<f64>,
     #[serde(default)]
+    load_average_1_min: Option<f64>,
+    #[serde(default)]
+    load_average_5_min: Option<f64>,
+    #[serde(default)]
+    load_average_15_min: Option<f64>,
+    #[serde(default)]
+    last_heartbeat_at: Option<String>,
+    #[serde(default)]
+    interfaces: DeviceInterfaceStatistics,
+    #[serde(default)]
     uplink: Option<UplinkStatistics>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct DeviceInterfaceStatistics {
+    #[serde(default)]
+    radios: Vec<RadioStatistics>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct RadioStatistics {
+    #[serde(default)]
+    tx_retries_pct: Option<f64>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -935,11 +1101,28 @@ struct VoucherOverview {
     authorized_guest_count: u64,
 }
 
+#[derive(Debug, Deserialize)]
+struct WanOverview {
+    id: String,
+    name: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct PendingDeviceOverview {
+    mac_address: String,
+    model: String,
+    state: String,
+    #[serde(default)]
+    firmware_version: Option<String>,
+}
+
 #[derive(Debug, PartialEq, Eq)]
 struct SiteSummary {
     device_count: usize,
     online_device_count: usize,
     client_count: usize,
+    wan_count: usize,
 }
 
 struct PollReadings {
@@ -973,7 +1156,11 @@ fn resolve_site(sites: &[SiteOverview], requested: &str) -> Option<SiteOverview>
         .cloned()
 }
 
-fn map_site_summary(devices: &[DeviceOverview], client_count: usize) -> SiteSummary {
+fn map_site_summary(
+    devices: &[DeviceOverview],
+    client_count: usize,
+    wan_count: usize,
+) -> SiteSummary {
     let online_device_count = devices
         .iter()
         .filter(|device| device.state.as_deref() == Some("ONLINE"))
@@ -982,7 +1169,18 @@ fn map_site_summary(devices: &[DeviceOverview], client_count: usize) -> SiteSumm
         device_count: devices.len(),
         online_device_count,
         client_count,
+        wan_count,
     }
+}
+
+fn max_radio_tx_retry_percent(statistics: &DeviceStatistics) -> Option<f64> {
+    statistics
+        .interfaces
+        .radios
+        .iter()
+        .filter_map(|radio| radio.tx_retries_pct)
+        .filter(|value| value.is_finite())
+        .reduce(f64::max)
 }
 
 fn connected_client_count(clients: &[ClientOverview], device_id: &str) -> usize {
@@ -1182,6 +1380,30 @@ fn device_data_points(device: &DeviceOverview) -> Vec<DataPointDescriptor> {
         )
         .with_unit("bps")
         .for_target(&target_id),
+        DataPointDescriptor::new(
+            DATA_POINT_LOAD_AVERAGE_1M,
+            "Load average (1 min)",
+            DataPointValueType::Number,
+        )
+        .for_target(&target_id),
+        DataPointDescriptor::new(
+            DATA_POINT_LOAD_AVERAGE_5M,
+            "Load average (5 min)",
+            DataPointValueType::Number,
+        )
+        .for_target(&target_id),
+        DataPointDescriptor::new(
+            DATA_POINT_LOAD_AVERAGE_15M,
+            "Load average (15 min)",
+            DataPointValueType::Number,
+        )
+        .for_target(&target_id),
+        DataPointDescriptor::new(
+            DATA_POINT_LAST_HEARTBEAT_AT,
+            "Last heartbeat",
+            DataPointValueType::String,
+        )
+        .for_target(&target_id),
     ];
     if device_type(device) == DeviceType::AccessPoint {
         points.extend([
@@ -1192,7 +1414,14 @@ fn device_data_points(device: &DeviceOverview) -> Vec<DataPointDescriptor> {
             )
             .for_target(&target_id),
             DataPointDescriptor::new(DATA_POINT_RADIOS, "Radios", DataPointValueType::String)
-                .for_target(target_id),
+                .for_target(&target_id),
+            DataPointDescriptor::new(
+                DATA_POINT_RADIO_TX_RETRY_PERCENT,
+                "Worst radio TX retries",
+                DataPointValueType::Number,
+            )
+            .with_unit("%")
+            .for_target(&target_id),
         ]);
     }
     points
@@ -1241,7 +1470,15 @@ fn clients_kind() -> ResourceKindDescriptor {
         ],
     )
     .applicable_to(ApplicableTarget::HostOnly)
-    .with_row_actions(vec![authorize_guest_action()])
+    .with_row_actions(vec![
+        authorize_guest_action(),
+        resource_row_action(
+            ACTION_UNAUTHORIZE_GUEST,
+            "Unauthorize guest",
+            "Revoke guest network access and disconnect this client.",
+            true,
+        ),
+    ])
 }
 
 fn vouchers_kind() -> ResourceKindDescriptor {
@@ -1263,6 +1500,38 @@ fn vouchers_kind() -> ResourceKindDescriptor {
         false,
     )])
     .with_kind_actions(vec![create_voucher_action()])
+}
+
+fn wans_kind() -> ResourceKindDescriptor {
+    ResourceKindDescriptor::new(
+        RESOURCE_KIND_WANS,
+        "WANs",
+        vec![
+            ColumnDescriptor::new("name", "Name", ColumnValueType::Text),
+            ColumnDescriptor::new("id", "Identifier", ColumnValueType::Text),
+        ],
+    )
+    .applicable_to(ApplicableTarget::HostOnly)
+}
+
+fn pending_devices_kind() -> ResourceKindDescriptor {
+    ResourceKindDescriptor::new(
+        RESOURCE_KIND_PENDING_DEVICES,
+        "Pending Devices",
+        vec![
+            ColumnDescriptor::new("model", "Model", ColumnValueType::Text),
+            ColumnDescriptor::new("macAddress", "MAC address", ColumnValueType::Text),
+            ColumnDescriptor::new("state", "State", ColumnValueType::Text),
+            ColumnDescriptor::new("firmwareVersion", "Firmware version", ColumnValueType::Text),
+        ],
+    )
+    .applicable_to(ApplicableTarget::HostOnly)
+    .with_row_actions(vec![resource_row_action(
+        ACTION_ADOPT,
+        "Adopt",
+        "Adopt this device into the configured site without bypassing its device limit.",
+        false,
+    )])
 }
 
 fn authorize_guest_action() -> ConnectorAction {
@@ -1317,7 +1586,7 @@ fn create_voucher_action() -> ConnectorAction {
         target_id: None,
         label: "Create voucher".to_owned(),
         description: Some(
-            "Create one hotspot voucher with explicit duration and usage limits.".to_owned(),
+            "Create one hotspot voucher with a duration and optional usage limits.".to_owned(),
         ),
         params_schema: json!({
             "type": "object",
@@ -1359,7 +1628,7 @@ fn create_voucher_action() -> ConnectorAction {
                     100_000
                 )
             },
-            "required": ["name", "timeLimitMinutes", "authorizedGuestLimit"],
+            "required": ["name", "timeLimitMinutes"],
             "additionalProperties": false
         }),
         is_disruptive: false,
@@ -1492,6 +1761,46 @@ fn voucher_resource_items(mut vouchers: Vec<VoucherOverview>) -> Vec<ResourceIte
         .collect()
 }
 
+fn wan_resource_items(mut wans: Vec<WanOverview>) -> Vec<ResourceItem> {
+    wans.sort_by(|left, right| {
+        left.name
+            .to_ascii_lowercase()
+            .cmp(&right.name.to_ascii_lowercase())
+    });
+    wans.into_iter()
+        .map(|wan| {
+            ResourceItem::new(wan.id.clone())
+                .with_field("name", wan.name)
+                .with_field("id", wan.id)
+        })
+        .collect()
+}
+
+fn pending_device_resource_items(mut devices: Vec<PendingDeviceOverview>) -> Vec<ResourceItem> {
+    devices.sort_by(|left, right| {
+        left.model
+            .to_ascii_lowercase()
+            .cmp(&right.model.to_ascii_lowercase())
+            .then_with(|| left.mac_address.cmp(&right.mac_address))
+    });
+    devices
+        .into_iter()
+        .map(|device| {
+            ResourceItem::new(device.mac_address.clone())
+                .with_field("model", device.model)
+                .with_field("macAddress", device.mac_address)
+                .with_field("state", device.state)
+                .with_field(
+                    "firmwareVersion",
+                    device
+                        .firmware_version
+                        .map(Value::String)
+                        .unwrap_or(Value::Null),
+                )
+        })
+        .collect()
+}
+
 fn guest_authorization_body(action_id: &str, params: &Value) -> Result<Value, ConnectorError> {
     let mut body = Map::from_iter([(
         "action".to_owned(),
@@ -1511,21 +1820,35 @@ fn guest_authorization_body(action_id: &str, params: &Value) -> Result<Value, Co
     Ok(Value::Object(body))
 }
 
+fn guest_unauthorization_body() -> Value {
+    json!({"action": "UNAUTHORIZE_GUEST_ACCESS"})
+}
+
+fn device_adoption_body(mac_address: &str) -> Value {
+    json!({
+        "macAddress": mac_address,
+        "ignoreDeviceLimit": false
+    })
+}
+
 fn voucher_creation_body(action_id: &str, params: &Value) -> Result<Value, ConnectorError> {
     let name = required_string_param(action_id, params, "name")?;
     let time_limit = required_integer_param(action_id, params, "timeLimitMinutes")?;
-    let guest_limit = required_integer_param(action_id, params, "authorizedGuestLimit")?;
     let mut body = Map::from_iter([
         ("count".to_owned(), json!(1)),
         ("name".to_owned(), json!(name)),
         ("timeLimitMinutes".to_owned(), json!(time_limit)),
-        ("authorizedGuestLimit".to_owned(), json!(guest_limit)),
     ]);
     copy_optional_integer_params(
         action_id,
         params,
         &mut body,
-        &["dataUsageLimitMBytes", "rxRateLimitKbps", "txRateLimitKbps"],
+        &[
+            "authorizedGuestLimit",
+            "dataUsageLimitMBytes",
+            "rxRateLimitKbps",
+            "txRateLimitKbps",
+        ],
     )?;
     Ok(Value::Object(body))
 }
@@ -1638,6 +1961,11 @@ fn connection_test_from_reads(
                 authenticated_note.clone(),
             ),
             available_capability(
+                CAPABILITY_UNAUTHORIZE_GUEST,
+                "Unauthorize guest clients",
+                authenticated_note.clone(),
+            ),
+            available_capability(
                 CAPABILITY_CREATE_VOUCHER,
                 "Create vouchers",
                 authenticated_note.clone(),
@@ -1645,6 +1973,11 @@ fn connection_test_from_reads(
             available_capability(
                 CAPABILITY_REVOKE_VOUCHER,
                 "Revoke vouchers",
+                authenticated_note.clone(),
+            ),
+            available_capability(
+                CAPABILITY_ADOPT,
+                "Adopt pending devices",
                 authenticated_note,
             ),
         ],
@@ -1779,6 +2112,12 @@ fn summary_details(summary: &SiteSummary) -> Value {
         DATA_POINT_CLIENT_COUNT,
         json!(summary.client_count),
     );
+    set_detail(
+        &mut details,
+        None,
+        DATA_POINT_WAN_COUNT,
+        json!(summary.wan_count),
+    );
     details
 }
 
@@ -1860,8 +2199,10 @@ mod tests {
             CAPABILITY_RESTART,
             CAPABILITY_CYCLE_POE,
             CAPABILITY_AUTHORIZE_GUEST,
+            CAPABILITY_UNAUTHORIZE_GUEST,
             CAPABILITY_CREATE_VOUCHER,
             CAPABILITY_REVOKE_VOUCHER,
+            CAPABILITY_ADOPT,
         ] {
             let write = capability(&result, key);
             assert!(write.available, "{key}");
@@ -1947,11 +2288,12 @@ mod tests {
         .expect("official client page shape");
 
         assert_eq!(
-            map_site_summary(&devices.data, clients.total_count),
+            map_site_summary(&devices.data, clients.total_count, 2),
             SiteSummary {
                 device_count: 3,
                 online_device_count: 2,
                 client_count: 14,
+                wan_count: 2,
             }
         );
     }
@@ -1968,11 +2310,12 @@ mod tests {
         .expect("real consoles may expose incomplete device metadata transiently");
 
         assert_eq!(
-            map_site_summary(&devices.data, 0),
+            map_site_summary(&devices.data, 0, 0),
             SiteSummary {
                 device_count: 2,
                 online_device_count: 1,
                 client_count: 0,
+                wan_count: 0,
             }
         );
     }
@@ -1998,9 +2341,9 @@ mod tests {
         };
 
         assert_eq!(connector.metadata().id, TYPE_ID);
-        assert_eq!(connector.data_points().len(), 3);
+        assert_eq!(connector.data_points().len(), 4);
         assert!(connector.supports_sub_targets());
-        assert_eq!(connector.resource_kinds(None).len(), 2);
+        assert_eq!(connector.resource_kinds(None).len(), 4);
         assert!(connector.setup_guide().is_some());
     }
 
@@ -2127,7 +2470,7 @@ mod tests {
         let target_id = "device:device-one";
 
         let descriptors = device_data_points(&device);
-        assert_eq!(descriptors.len(), 9);
+        assert_eq!(descriptors.len(), 14);
         assert!(descriptors
             .iter()
             .all(|descriptor| descriptor.target_id.as_deref() == Some(target_id)));
@@ -2151,12 +2494,27 @@ mod tests {
             "uptimeSec": 42,
             "cpuUtilizationPct": 12.5,
             "memoryUtilizationPct": 48.25,
+            "loadAverage1Min": 0.25,
+            "loadAverage5Min": 0.5,
+            "loadAverage15Min": 0.75,
+            "lastHeartbeatAt": "2026-09-04T15:00:00Z",
             "uplink": {"rxRateBps": 1000, "txRateBps": 2000},
-            "interfaces": {"radios": [{"frequencyGHz": "5", "txRetriesPct": 1.2}]}
+            "interfaces": {"radios": [
+                {"frequencyGHz": 2.4, "txRetriesPct": 1.2},
+                {"frequencyGHz": 5, "txRetriesPct": 3.4}
+            ]}
         }))
         .expect("official device statistics");
         assert_eq!(statistics.cpu_utilization_pct, Some(12.5));
         assert_eq!(statistics.memory_utilization_pct, Some(48.25));
+        assert_eq!(statistics.load_average_1_min, Some(0.25));
+        assert_eq!(statistics.load_average_5_min, Some(0.5));
+        assert_eq!(statistics.load_average_15_min, Some(0.75));
+        assert_eq!(
+            statistics.last_heartbeat_at.as_deref(),
+            Some("2026-09-04T15:00:00Z")
+        );
+        assert_eq!(max_radio_tx_retry_percent(&statistics), Some(3.4));
         assert_eq!(
             statistics
                 .uplink
@@ -2392,8 +2750,64 @@ mod tests {
     }
 
     #[test]
+    fn official_wan_and_pending_device_shapes_map_without_invented_fields() {
+        let wans: Page<WanOverview> = serde_json::from_value(json!({
+            "offset": 0,
+            "limit": 200,
+            "count": 2,
+            "totalCount": 2,
+            "data": [
+                {"id": "wan-two", "name": "Backup"},
+                {"id": "wan-one", "name": "Primary"}
+            ]
+        }))
+        .expect("official WAN page");
+        let wan_rows = wan_resource_items(wans.data);
+        assert_eq!(wan_rows[0].id, "wan-two");
+        assert_eq!(wan_rows[0].fields.get("name"), Some(&json!("Backup")));
+        assert_eq!(wan_rows[1].fields.get("id"), Some(&json!("wan-one")));
+
+        let pending: Page<PendingDeviceOverview> = serde_json::from_value(json!({
+            "offset": 0,
+            "limit": 200,
+            "count": 2,
+            "totalCount": 2,
+            "data": [
+                {
+                    "macAddress": "00:11:22:33:44:66",
+                    "model": "USW",
+                    "state": "PENDING_ADOPTION",
+                    "firmwareVersion": "7.1.0"
+                },
+                {
+                    "macAddress": "00:11:22:33:44:55",
+                    "model": "U7",
+                    "state": "PENDING_ADOPTION"
+                }
+            ]
+        }))
+        .expect("official pending-device page");
+        let pending_rows = pending_device_resource_items(pending.data);
+        assert_eq!(pending_rows[0].id, "00:11:22:33:44:55");
+        assert_eq!(pending_rows[0].fields.get("model"), Some(&json!("U7")));
+        assert_eq!(
+            pending_rows[0].fields.get("firmwareVersion"),
+            Some(&Value::Null)
+        );
+        assert_eq!(
+            pending_rows[1].fields.get("firmwareVersion"),
+            Some(&json!("7.1.0"))
+        );
+    }
+
+    #[test]
     fn resource_kinds_are_scoped_and_publish_only_confirmed_actions() {
-        let host = [clients_kind(), vouchers_kind()];
+        let host = [
+            clients_kind(),
+            vouchers_kind(),
+            wans_kind(),
+            pending_devices_kind(),
+        ];
         assert!(host
             .iter()
             .all(|kind| kind.applicable_target == ApplicableTarget::HostOnly));
@@ -2403,10 +2817,13 @@ mod tests {
                 .iter()
                 .map(|action| action.id.as_str())
                 .collect::<Vec<_>>(),
-            [ACTION_AUTHORIZE_GUEST]
+            [ACTION_AUTHORIZE_GUEST, ACTION_UNAUTHORIZE_GUEST]
         );
         assert_eq!(host[1].row_actions[0].id, ACTION_REVOKE_VOUCHER);
         assert_eq!(host[1].kind_actions[0].id, ACTION_CREATE_VOUCHER);
+        assert!(host[2].row_actions.is_empty());
+        assert!(host[2].kind_actions.is_empty());
+        assert_eq!(host[3].row_actions[0].id, ACTION_ADOPT);
 
         let ports = ports_kind();
         assert_eq!(ports.applicable_target, ApplicableTarget::TargetOnly);
@@ -2438,6 +2855,17 @@ mod tests {
             })
         );
         assert_eq!(
+            guest_unauthorization_body(),
+            json!({"action": "UNAUTHORIZE_GUEST_ACCESS"})
+        );
+        assert_eq!(
+            device_adoption_body("00:11:22:33:44:55"),
+            json!({
+                "macAddress": "00:11:22:33:44:55",
+                "ignoreDeviceLimit": false
+            })
+        );
+        assert_eq!(
             voucher_creation_body(
                 ACTION_CREATE_VOUCHER,
                 &json!({
@@ -2455,6 +2883,14 @@ mod tests {
                 "authorizedGuestLimit": 2,
                 "rxRateLimitKbps": 5_000
             })
+        );
+        assert_eq!(
+            voucher_creation_body(
+                ACTION_CREATE_VOUCHER,
+                &json!({"name": "Visitor", "timeLimitMinutes": 60})
+            )
+            .expect("guest limit is optional in v10.4.57"),
+            json!({"count": 1, "name": "Visitor", "timeLimitMinutes": 60})
         );
     }
 }

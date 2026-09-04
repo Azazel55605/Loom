@@ -1043,10 +1043,15 @@ also reads `/sites/{siteId}/devices/{deviceId}/statistics/latest` for every
 known device, with at most ten Integration API calls in flight across the
 connector. Device views publish the exact API `state`, `model`, a human-readable
 `uptime` derived from `uptimeSec`, CPU/memory utilization, and uplink RX/TX
-rates when those optional statistics are returned. Access points additionally
+rates when those optional statistics are returned. The same latest-statistics
+response supplies `loadAverage1m`, `loadAverage5m`, `loadAverage15m` (mapped
+from the API's `loadAverage1Min/5Min/15Min` keys) and `lastHeartbeatAt`.
+Access points additionally
 publish `connectedClientCount`, derived from the complete client collection's
 `uplinkDeviceId`, and a radio summary built from the documented standard,
-frequency, channel, and channel width fields. The current API publishes no
+frequency, channel, and channel width fields. Their `radioTxRetryPercent` is
+the maximum reported `txRetriesPct` across radios, deliberately surfacing the
+worst band rather than hiding it in an average. The current API publishes no
 per-port throughput counters, so Loom does not invent a switch aggregate.
 `frequencyGHz` accepts both the documented string form and the numeric form
 returned by some real consoles. Radio summaries preserve one compact line per
@@ -1068,20 +1073,24 @@ Device targets expose a parameterless, disruptive `restart` action. It invokes
 `POST /sites/{siteId}/devices/{deviceId}/actions` with
 `{ "action": "RESTART" }` and warns that attached clients—and potentially the
 network when restarting a gateway—will disconnect briefly.
-There is no official site-summary or WAN-status endpoint in the current local
-Network specification, so no WAN field is inferred from undocumented APIs.
+The host also publishes `wanCount` from the official read-only
+`GET /sites/{siteId}/wans` collection. Version 10.4.57 exposes only each WAN's
+`id` and `name`; Loom does not infer health or address fields absent from that
+schema.
 
 ### UniFi Network resource kinds
 
 | Kind | Scope | Columns | Actions | Official source |
 | --- | --- | --- | --- | --- |
 | `ports` | Device target only | `port`, `poeEnabled`, `linkStatus` | Row: disruptive `cyclePoe` | The device detail's `interfaces.ports`; `POST /sites/{siteId}/devices/{deviceId}/interfaces/ports/{portIdx}/actions` with `POWER_CYCLE`. The 9.4.17 schema publishes neither port names nor PoE watt draw, so Loom does not fabricate either column. |
-| `clients` | Host only | `name`, `mac`, `ipAddress`, `connectedTo`, `isGuest`, `authorized` | Row: `authorizeGuest` | The same paginated `/sites/{siteId}/clients` collection used by the host poll. Authorization posts `AUTHORIZE_GUEST_ACCESS`, with optional duration, data allowance, and RX/TX rate limits. VPN/Teleport rows legitimately have no MAC or uplink device. |
+| `clients` | Host only | `name`, `mac`, `ipAddress`, `connectedTo`, `isGuest`, `authorized` | Row: `authorizeGuest`, disruptive `unauthorizeGuest` | The same paginated `/sites/{siteId}/clients` collection used by the host poll. Authorization posts `AUTHORIZE_GUEST_ACCESS`, with optional duration, data allowance, and RX/TX rate limits. Unauthorization posts `UNAUTHORIZE_GUEST_ACCESS`, revokes access, and disconnects the guest. VPN/Teleport rows legitimately have no MAC or uplink device. |
 | `vouchers` | Host only | `code`, `expiresAt`, `usesRemaining`, `createdAt` | Row: `revokeVoucher`; kind: `createVoucher` | `GET`/`POST /sites/{siteId}/hotspot/vouchers` and `DELETE /sites/{siteId}/hotspot/vouchers/{voucherId}`. Remaining uses are the optional authorized-guest limit minus the authorized count; an unlimited voucher reports no numeric remainder. |
+| `wans` | Host only | `name`, `id` | None | Read-only paginated `GET /sites/{siteId}/wans`; the 10.4.57 response contains exactly the WAN identifier and name. |
+| `pendingDevices` | Host only | `model`, `macAddress`, `state`, `firmwareVersion` | Row: `adopt` | Paginated `GET /pending-devices`; adoption posts the row's MAC to `/sites/{siteId}/devices` with `ignoreDeviceLimit: false`. The refreshed adopted-device collection becomes authoritative after adoption. |
 
-`createVoucher` creates one voucher and requires `name`, `timeLimitMinutes`,
-and `authorizedGuestLimit`; optional parameters are `dataUsageLimitMBytes`,
-`rxRateLimitKbps`, and `txRateLimitKbps`. `authorizeGuest` takes the same four
+`createVoucher` creates one voucher and requires only `name` and
+`timeLimitMinutes`; `authorizedGuestLimit`, `dataUsageLimitMBytes`,
+`rxRateLimitKbps`, and `txRateLimitKbps` are optional. `authorizeGuest` takes the same four
 optional limit fields supported by the API. The official client action enum
 contains guest authorize/unauthorize only—there is no client block/unblock
 operation, so Loom exposes none.
@@ -1099,10 +1108,11 @@ Test Connection first performs the same site-list request used by ordinary
 construction. A transport or authentication failure returns `reachable:
 false` with the connector's real error. Once authenticated, it genuinely lists
 devices and clients and reports those read capabilities independently. Device
-restart, PoE cycling, guest authorization, and voucher create/revoke are
-reported available without being executed: the API key has no partial
-permission model from which to infer a narrower result, and a connection test
-must not disrupt a network or mutate its hotspot configuration.
+restart, PoE cycling, guest authorization/unauthorization, voucher
+create/revoke, and pending-device adoption are reported available without
+being executed: the API key has no partial permission model from which to
+infer a narrower result, and a connection test must not disrupt a network,
+adopt hardware, or mutate its hotspot configuration.
 
 Local consoles may use a locally issued or self-signed HTTPS certificate.
 `allowInsecureCert` relaxes peer verification only for that connector instance,

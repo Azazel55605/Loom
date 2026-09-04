@@ -13,8 +13,9 @@ network writes.
 
 ## Verified API facts
 
-These facts were checked against the official Network 9.4.17 OpenAPI document
-at `https://developer.ui.com/network/v9.4.17/openapi.json`:
+These facts were initially checked against the official Network 9.4.17 OpenAPI
+document and refreshed against the Network 10.4.57 document at
+`https://developer.ui.com/network/v10.4.57/openapi.json`:
 
 - The local API base is
   `https://<console>/proxy/network/integration/v1`. UniFi introduced this API
@@ -43,14 +44,25 @@ at `https://developer.ui.com/network/v9.4.17/openapi.json`:
   frequency, channel, and channel width. Although the 9.4.17 schema describes
   `frequencyGHz` as a string, real consoles also return it as a JSON number
   (for example `2.4`), so the client accepts both representations. Latest
-  statistics optionally expose CPU/memory utilization and uplink RX/TX rates.
-  The schema has no AP client
+  statistics optionally expose CPU/memory utilization, uplink RX/TX rates,
+  one/five/fifteen-minute load averages, and the last-heartbeat timestamp. AP
+  radio statistics expose a retry percentage per radio; Loom publishes the
+  highest valid value as the device's worst-band `radioTxRetryPercent`. The
+  schema has no AP client
   count and no per-port throughput counters. AP client count can be derived
   honestly from the clients collection's `uplinkDeviceId`; switch port
   throughput cannot be derived and is not published.
-- Device restart, port PoE cycling, guest authorization, and voucher mutations
-  are official write operations. A connectivity test must describe their
-  availability after successful API-key authentication without invoking them.
+- Device restart, port PoE cycling, guest authorization/unauthorization, voucher
+  mutations, and pending-device adoption are official write operations. Guest
+  unauthorization uses `UNAUTHORIZE_GUEST_ACCESS`. Voucher creation in 10.4.57
+  requires only `name` and `timeLimitMinutes`; `authorizedGuestLimit` is
+  optional. A connectivity test must describe write availability after
+  successful API-key authentication without invoking the operations.
+- `GET /sites/{siteId}/wans` is paginated and its 10.4.57 rows expose only `id`
+  and `name`. `GET /pending-devices` returns pending hardware independently of
+  a site. Adoption uses `POST /sites/{siteId}/devices` with `macAddress` and
+  required `ignoreDeviceLimit`; Loom deliberately sends `false` so adoption
+  does not bypass the configured limit.
 - Local consoles may present self-signed certificates. Loom's
   `allowInsecureCert` option relaxes certificate verification only for that
   configured connector; the origin remains HTTPS and the API key is never sent
@@ -65,7 +77,7 @@ and authentication failures are returned as `reachable: false` instead of
 escaping during construction.
 
 After the site is resolved, probe device and client listing independently.
-Report the five write capabilities as available after authentication with a
+Report the seven write capabilities as available after authentication with a
 note that the connection test did not execute them. This is an all-or-nothing
 API-key model, not evidence that any disruptive operation was tested live.
 
@@ -80,8 +92,8 @@ generic network-device icon.
 - The existing generic setup-guide UI renders UniFi instructions and live
   capability results without connector-specific frontend code.
 - Read failures remain visible per capability after authentication succeeds.
-- Test Connection never restarts hardware, cycles PoE, changes guest access, or
-  creates/revokes a voucher.
+- Test Connection never restarts or adopts hardware, cycles PoE, changes guest
+  access, or creates/revokes a voucher.
 - A future UniFi release introducing key scopes must supersede this decision
   and derive write availability from those scopes rather than assuming the
   current all-or-nothing model.
