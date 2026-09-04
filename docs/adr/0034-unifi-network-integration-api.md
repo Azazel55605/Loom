@@ -32,12 +32,13 @@ document and refreshed against the Network 10.4.57 document at
   advances by the number of rows actually present in `data`, making pagination
   robust when a console's `count` disagrees with its payload.
 - Some real Network releases omit an adopted online AP from the paginated
-  devices collection even though active client rows still carry that device's
-  UUID in `uplinkDeviceId`. The official per-device detail route accepts that
-  UUID, so Loom best-effort reconciles missing uplinks through
-  `GET /sites/{siteId}/devices/{deviceId}`. It does not call undocumented legacy
-  APIs and cannot recover an omitted device that currently has no client
-  reference.
+  devices collection. They can also omit the schema-required `uplinkDeviceId`
+  from local rows in the paginated clients collection. Loom first fills those
+  gaps through the official `GET /sites/{siteId}/clients/{clientId}` detail
+  route, then best-effort reconciles any still-unlisted uplink through the
+  official `GET /sites/{siteId}/devices/{deviceId}` detail route. It does not
+  call undocumented legacy APIs and still cannot recover an omitted device
+  when neither client overview nor client detail supplies a reference.
 - A device overview explicitly identifies capabilities through `features`:
   `accessPoint`, `switching`, and `gateway`. Classification therefore must not
   guess from the model string. Device detail exposes radio standard,

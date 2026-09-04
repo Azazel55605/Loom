@@ -276,7 +276,32 @@ impl UniFiNetworkConnector {
             .fetch_all_pages::<ClientOverview>(&format!("sites/{site_id}/clients"), PAGE_LIMIT)
             .await?;
         clients.retain(|client| !client.id.trim().is_empty());
+        self.resolve_missing_client_uplinks(site_id, &mut clients)
+            .await;
         Ok(clients)
+    }
+
+    /// Some console versions violate the published client-overview schema by
+    /// omitting `uplinkDeviceId` from otherwise valid local client rows. The
+    /// documented per-client detail endpoint carries the same field, so fill
+    /// only those gaps before client-to-device reconciliation. Detail lookup
+    /// remains best-effort because one stale client must not fail inventory.
+    async fn resolve_missing_client_uplinks(&self, site_id: &str, clients: &mut [ClientOverview]) {
+        let resolved = join_all(
+            clients
+                .iter()
+                .filter(|client| client.needs_uplink_resolution())
+                .map(|client| {
+                    let client_id = client.id.clone();
+                    async move {
+                        let path = format!("sites/{site_id}/clients/{client_id}");
+                        let details = self.client.get::<ClientOverview>(&path).await.ok()?;
+                        (details.id == client_id).then_some((client_id, details.uplink_device_id))
+                    }
+                }),
+        )
+        .await;
+        apply_resolved_client_uplinks(clients, resolved.into_iter().flatten());
     }
 
     async fn list_network_inventory(
@@ -1352,6 +1377,8 @@ struct PortPoeOverview {
 #[serde(rename_all = "camelCase")]
 struct ClientOverview {
     id: String,
+    #[serde(rename = "type")]
+    client_type: String,
     #[serde(default)]
     name: String,
     #[serde(default)]
@@ -1361,6 +1388,16 @@ struct ClientOverview {
     #[serde(default)]
     uplink_device_id: Option<String>,
     access: ClientAccessOverview,
+}
+
+impl ClientOverview {
+    fn needs_uplink_resolution(&self) -> bool {
+        matches!(self.client_type.as_str(), "WIRED" | "WIRELESS")
+            && self
+                .uplink_device_id
+                .as_deref()
+                .is_none_or(|device_id| device_id.trim().is_empty())
+    }
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -1600,6 +1637,25 @@ fn missing_uplink_device_ids(
         .filter(|device_id| missing.insert((*device_id).to_owned()))
         .map(str::to_owned)
         .collect()
+}
+
+fn apply_resolved_client_uplinks(
+    clients: &mut [ClientOverview],
+    resolved: impl IntoIterator<Item = (String, Option<String>)>,
+) {
+    let resolved = resolved
+        .into_iter()
+        .filter_map(|(client_id, uplink_device_id)| {
+            uplink_device_id
+                .filter(|device_id| !device_id.trim().is_empty())
+                .map(|device_id| (client_id, device_id))
+        })
+        .collect::<HashMap<_, _>>();
+    for client in clients {
+        if let Some(device_id) = resolved.get(&client.id) {
+            client.uplink_device_id = Some(device_id.clone());
+        }
+    }
 }
 
 fn device_overview_from_details(details: DeviceDetails) -> Option<DeviceOverview> {
@@ -3535,6 +3591,7 @@ mod tests {
         }];
         let client = |id: &str, uplink: Option<&str>| ClientOverview {
             id: id.to_owned(),
+            client_type: "WIRELESS".to_owned(),
             name: String::new(),
             mac_address: None,
             ip_address: None,
@@ -3556,6 +3613,42 @@ mod tests {
             missing_uplink_device_ids(&devices, &clients),
             ["missing-device"]
         );
+    }
+
+    #[test]
+    fn missing_list_uplink_is_filled_from_official_client_detail() {
+        let mut clients = vec![ClientOverview {
+            id: "wireless-client".to_owned(),
+            client_type: "WIRELESS".to_owned(),
+            name: "Phone".to_owned(),
+            mac_address: None,
+            ip_address: None,
+            uplink_device_id: None,
+            access: ClientAccessOverview {
+                access_type: "DEFAULT".to_owned(),
+                authorized: None,
+            },
+        }];
+
+        apply_resolved_client_uplinks(
+            &mut clients,
+            [("wireless-client".to_owned(), Some("missing-ap".to_owned()))],
+        );
+
+        assert_eq!(clients[0].uplink_device_id.as_deref(), Some("missing-ap"));
+    }
+
+    #[test]
+    fn remote_clients_do_not_trigger_local_uplink_detail_recovery() {
+        let client: ClientOverview = serde_json::from_value(json!({
+            "type": "VPN",
+            "id": "remote-client",
+            "name": "Remote user",
+            "access": {"type": "DEFAULT"}
+        }))
+        .expect("official remote client overview");
+
+        assert!(!client.needs_uplink_resolution());
     }
 
     #[test]
