@@ -39,6 +39,15 @@ document and refreshed against the Network 10.4.57 document at
   official `GET /sites/{siteId}/devices/{deviceId}` detail route. It does not
   call undocumented legacy APIs and still cannot recover an omitted device
   when neither client overview nor client detail supplies a reference.
+- Network 10.x can also return an adopted online device in the collection with
+  its schema-required `id` set to `null`. Loom retains such a row under a
+  stable `device:mac:<normalized-mac>` target so its list-level name, model,
+  state, health, and feature classification remain visible. Statistics,
+  restart, Ports, and every other device-detail operation remain unavailable
+  for that target because the official endpoints require the missing UUID;
+  Loom never sends the MAC where the API contract requires an ID. If a later
+  client-detail reconciliation recovers the UUID, that addressable row replaces
+  the MAC-backed copy with the same MAC rather than double-counting it.
 - A device overview explicitly identifies capabilities through `features`:
   `accessPoint`, `switching`, and `gateway`. Classification therefore must not
   guess from the model string. Device detail exposes radio standard,

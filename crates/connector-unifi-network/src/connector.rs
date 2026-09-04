@@ -184,18 +184,20 @@ impl UniFiNetworkConnector {
         // and honest for typical homelab device counts; the client's shared
         // semaphore caps the fan-out at ten rather than betting the console's
         // middleware can absorb an unbounded future installation.
-        let device_readings = join_all(devices.iter().map(|device| {
+        let device_readings = join_all(devices.iter().map(|device| async move {
+            let Some(device_id) = api_device_id(device) else {
+                return (None, None);
+            };
             let statistics_path = format!(
-                "sites/{}/devices/{}/statistics/latest",
-                self.site.id, device.id
+                "sites/{}/devices/{device_id}/statistics/latest",
+                self.site.id
             );
-            let details_path = format!("sites/{}/devices/{}", self.site.id, device.id);
-            async move {
-                tokio::join!(
-                    self.client.get::<DeviceStatistics>(&statistics_path),
-                    self.client.get::<DeviceDetails>(&details_path),
-                )
-            }
+            let details_path = format!("sites/{}/devices/{device_id}", self.site.id);
+            let (statistics, details) = tokio::join!(
+                self.client.get::<DeviceStatistics>(&statistics_path),
+                self.client.get::<DeviceDetails>(&details_path),
+            );
+            (statistics.ok(), details.ok())
         }));
         let device_readings = device_readings.await;
 
@@ -207,8 +209,8 @@ impl UniFiNetworkConnector {
                 .map(|(device, (statistics, details))| DeviceReading {
                     connected_client_count: connected_client_count(&clients, &device.id),
                     device,
-                    statistics: statistics.ok(),
-                    details: details.ok(),
+                    statistics,
+                    details,
                 })
                 .collect(),
         })
@@ -232,9 +234,7 @@ impl UniFiNetworkConnector {
             .client
             .fetch_all_pages::<DeviceOverview>(&format!("sites/{site_id}/devices"), PAGE_LIMIT)
             .await?;
-        // The published response requires an id. Ignore a malformed row
-        // instead of manufacturing the unusable target id `device:`.
-        devices.retain(|device| !device.id.trim().is_empty());
+        normalize_device_keys(&mut devices);
         Ok(devices)
     }
 
@@ -253,7 +253,7 @@ impl UniFiNetworkConnector {
     }
 
     fn device_type_for_target(&self, target_id: &str) -> DeviceType {
-        let Some(device_id) = device_id_from_target(target_id) else {
+        let Some(device_id) = device_key_from_target(target_id) else {
             return DeviceType::NetworkDevice;
         };
         self.device_snapshot()
@@ -348,7 +348,7 @@ impl UniFiNetworkConnector {
                 .flatten()
         }))
         .await;
-        devices.extend(recovered.into_iter().flatten());
+        merge_recovered_devices(devices, recovered.into_iter().flatten());
     }
 
     fn remember_clients(&self, clients: Vec<ClientOverview>) {
@@ -666,6 +666,7 @@ impl loom_core::connector::Connector for UniFiNetworkConnector {
         self.remember_devices(devices.clone());
         devices
             .into_iter()
+            .filter(|device| api_device_id(device).is_some())
             .map(|device| restart_action(&device_target_id(&device.id)))
             .collect()
     }
@@ -1127,7 +1128,7 @@ impl loom_core::connector::Connector for UniFiNetworkConnector {
     }
 
     fn default_layout_for(&self, target_id: Option<&str>) -> WidgetLayout {
-        match target_id.and_then(device_id_from_target) {
+        match target_id.and_then(device_key_from_target) {
             Some(_) => {
                 let mut bindings = vec![
                     WidgetBinding::display(DATA_POINT_STATE, DisplayWidgetType::StatusDot)
@@ -1209,10 +1210,12 @@ impl loom_core::connector::Connector for UniFiNetworkConnector {
                         ),
                     ]),
                 }
-                bindings.push(WidgetBinding::action(
-                    ACTION_RESTART,
-                    ActionWidgetType::Button,
-                ));
+                if target_id.and_then(device_id_from_target).is_some() {
+                    bindings.push(WidgetBinding::action(
+                        ACTION_RESTART,
+                        ActionWidgetType::Button,
+                    ));
+                }
                 WidgetLayout::new(bindings)
             }
             None => self.default_layout(),
@@ -1240,7 +1243,11 @@ struct DeviceOverview {
     // Such a row still contributes to the total, but is not claimed online.
     #[serde(default)]
     state: Option<String>,
-    #[serde(default)]
+    // The schema requires a UUID, but Network 10.x can return `null` for an
+    // adopted online device. It is normalized to a MAC-backed local key after
+    // deserialization so the device remains visible without pretending that
+    // UUID-only endpoints accept its MAC address.
+    #[serde(default, deserialize_with = "deserialize_nullable_string")]
     id: String,
     #[serde(default)]
     name: Option<String>,
@@ -1357,6 +1364,13 @@ where
         StringOrNumber::String(value) => value,
         StringOrNumber::Number(value) => value.to_string(),
     })
+}
+
+fn deserialize_nullable_string<'de, D>(deserializer: D) -> Result<String, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    Ok(Option::<String>::deserialize(deserializer)?.unwrap_or_default())
 }
 
 #[derive(Debug, Deserialize)]
@@ -1658,6 +1672,57 @@ fn apply_resolved_client_uplinks(
     }
 }
 
+fn normalize_device_keys(devices: &mut Vec<DeviceOverview>) {
+    for device in devices.iter_mut() {
+        device.id = match device.id.trim() {
+            "" => device
+                .mac_address
+                .as_deref()
+                .and_then(mac_device_key)
+                .unwrap_or_default(),
+            id => id.to_owned(),
+        };
+    }
+    // A row with neither the documented UUID nor a usable MAC cannot have a
+    // stable target identity. All other malformed rows remain visible.
+    devices.retain(|device| !device.id.is_empty());
+}
+
+fn mac_device_key(mac_address: &str) -> Option<String> {
+    let compact = mac_address
+        .chars()
+        .filter(char::is_ascii_hexdigit)
+        .collect::<String>()
+        .to_ascii_lowercase();
+    (compact.len() == 12).then(|| format!("mac:{compact}"))
+}
+
+fn api_device_id(device: &DeviceOverview) -> Option<&str> {
+    (!device.id.starts_with("mac:")).then_some(device.id.as_str())
+}
+
+fn merge_recovered_devices(
+    devices: &mut Vec<DeviceOverview>,
+    recovered: impl IntoIterator<Item = DeviceOverview>,
+) {
+    for recovered_device in recovered {
+        if devices
+            .iter()
+            .any(|device| device.id == recovered_device.id)
+        {
+            continue;
+        }
+        if let Some(recovered_mac) = recovered_device
+            .mac_address
+            .as_deref()
+            .and_then(mac_device_key)
+        {
+            devices.retain(|device| !(device.id.starts_with("mac:") && device.id == recovered_mac));
+        }
+        devices.push(recovered_device);
+    }
+}
+
 fn device_overview_from_details(details: DeviceDetails) -> Option<DeviceOverview> {
     if details.id.trim().is_empty() {
         return None;
@@ -1684,10 +1749,14 @@ fn device_target_id(device_id: &str) -> String {
     format!("device:{device_id}")
 }
 
-fn device_id_from_target(target_id: &str) -> Option<&str> {
+fn device_key_from_target(target_id: &str) -> Option<&str> {
     target_id
         .strip_prefix("device:")
         .filter(|device_id| !device_id.is_empty())
+}
+
+fn device_id_from_target(target_id: &str) -> Option<&str> {
+    device_key_from_target(target_id).filter(|device_id| !device_id.starts_with("mac:"))
 }
 
 fn device_label(device: &DeviceOverview) -> String {
@@ -3344,6 +3413,68 @@ mod tests {
                 wan_count: 0,
             }
         );
+    }
+
+    #[test]
+    fn a_null_device_uuid_remains_visible_under_a_mac_backed_read_only_target() {
+        let mut page: Page<DeviceOverview> = serde_json::from_value(json!({
+            "totalCount": 1,
+            "data": [{
+                "id": null,
+                "name": "Upstairs AP",
+                "model": "U7 Lite",
+                "state": "ONLINE",
+                "macAddress": "00:11:22:33:44:55",
+                "features": ["accessPoint"]
+            }]
+        }))
+        .expect("a real console's schema-violating null device id");
+
+        normalize_device_keys(&mut page.data);
+
+        assert_eq!(page.data.len(), 1);
+        assert_eq!(page.data[0].id, "mac:001122334455");
+        assert_eq!(device_label(&page.data[0]), "Upstairs AP");
+        assert_eq!(
+            device_sub_targets(&page.data)[0].id,
+            "device:mac:001122334455"
+        );
+        assert!(api_device_id(&page.data[0]).is_none());
+        assert!(device_id_from_target("device:mac:001122334455").is_none());
+        assert_eq!(
+            map_site_summary(&page.data, 0, 0),
+            SiteSummary {
+                device_count: 1,
+                online_device_count: 1,
+                client_count: 0,
+                wan_count: 0,
+            }
+        );
+    }
+
+    #[test]
+    fn a_later_uuid_recovery_replaces_the_same_mac_backed_device() {
+        let mut devices = vec![DeviceOverview {
+            id: "mac:001122334455".to_owned(),
+            name: Some("Upstairs AP".to_owned()),
+            model: Some("U7 Lite".to_owned()),
+            state: Some("ONLINE".to_owned()),
+            mac_address: Some("00:11:22:33:44:55".to_owned()),
+            features: vec!["accessPoint".to_owned()],
+        }];
+        let recovered = DeviceOverview {
+            id: "11111111-1111-1111-1111-111111111111".to_owned(),
+            name: Some("Upstairs AP".to_owned()),
+            model: Some("U7 Lite".to_owned()),
+            state: Some("ONLINE".to_owned()),
+            mac_address: Some("00:11:22:33:44:55".to_owned()),
+            features: vec!["accessPoint".to_owned()],
+        };
+
+        merge_recovered_devices(&mut devices, [recovered]);
+
+        assert_eq!(devices.len(), 1);
+        assert_eq!(devices[0].id, "11111111-1111-1111-1111-111111111111");
     }
 
     #[test]
