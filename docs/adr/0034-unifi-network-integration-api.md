@@ -27,12 +27,17 @@ at `https://developer.ui.com/network/v9.4.17/openapi.json`:
 - Sites, devices, and clients use `offset`/`limit` with a default of 25 and a
   maximum of 200. Vouchers use the same mechanism with a default of 100 and a
   maximum of 1000. Every page envelope carries `offset`, `limit`, `count`,
-  `totalCount`, and `data`; no cursor or next-page token is involved.
+  `totalCount`, and `data`; no cursor or next-page token is involved. Loom
+  advances by the number of rows actually present in `data`, making pagination
+  robust when a console's `count` disagrees with its payload.
 - A device overview explicitly identifies capabilities through `features`:
   `accessPoint`, `switching`, and `gateway`. Classification therefore must not
   guess from the model string. Device detail exposes radio standard,
-  frequency, channel, and channel width; latest statistics optionally expose
-  CPU/memory utilization and uplink RX/TX rates. The schema has no AP client
+  frequency, channel, and channel width. Although the 9.4.17 schema describes
+  `frequencyGHz` as a string, real consoles also return it as a JSON number
+  (for example `2.4`), so the client accepts both representations. Latest
+  statistics optionally expose CPU/memory utilization and uplink RX/TX rates.
+  The schema has no AP client
   count and no per-port throughput counters. AP client count can be derived
   honestly from the clients collection's `uplinkDeviceId`; switch port
   throughput cannot be derived and is not published.

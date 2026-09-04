@@ -9,7 +9,7 @@ use loom_core::connector::{
     DisplayWidgetType, HealthState, NetworkTarget, ResourceItem, ResourceKindDescriptor,
     SetupGuide, SetupGuideVariant, SubTarget, WidgetBinding, WidgetLayout,
 };
-use serde::Deserialize;
+use serde::{Deserialize, Deserializer};
 use serde_json::{json, Map, Value};
 
 #[cfg(test)]
@@ -786,12 +786,32 @@ struct DeviceInterfaces {
 #[serde(rename_all = "camelCase")]
 struct RadioOverview {
     wlan_standard: String,
-    #[serde(rename = "frequencyGHz")]
+    #[serde(
+        rename = "frequencyGHz",
+        deserialize_with = "deserialize_string_or_number"
+    )]
     frequency_ghz: String,
     #[serde(rename = "channelWidthMHz")]
     channel_width_mhz: u32,
     #[serde(default)]
     channel: Option<u32>,
+}
+
+fn deserialize_string_or_number<'de, D>(deserializer: D) -> Result<String, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum StringOrNumber {
+        String(String),
+        Number(serde_json::Number),
+    }
+
+    Ok(match StringOrNumber::deserialize(deserializer)? {
+        StringOrNumber::String(value) => value,
+        StringOrNumber::Number(value) => value.to_string(),
+    })
 }
 
 #[derive(Debug, Deserialize)]
@@ -2016,7 +2036,7 @@ mod tests {
                     },
                     {
                         "wlanStandard": "802.11ax",
-                        "frequencyGHz": "2.4",
+                        "frequencyGHz": 2.4,
                         "channelWidthMHz": 20
                     }
                 ]

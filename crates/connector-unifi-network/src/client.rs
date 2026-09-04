@@ -18,7 +18,8 @@ pub(crate) struct Page<T> {
     #[serde(default)]
     pub(crate) offset: usize,
     #[serde(default)]
-    pub(crate) count: usize,
+    #[serde(rename = "count")]
+    pub(crate) _count: usize,
     pub(crate) total_count: usize,
     pub(crate) data: Vec<T>,
 }
@@ -216,10 +217,14 @@ where
 
     loop {
         let page = fetch(format!("{path}{separator}offset={offset}&limit={limit}")).await?;
-        let next_offset = page.offset.saturating_add(page.count);
+        // Advance by what we consumed. If an appliance's envelope `count`
+        // disagrees with the rows actually present, trusting it would skip or
+        // repeat a device.
+        let returned_count = page.data.len();
+        let next_offset = page.offset.saturating_add(returned_count);
         items.extend(page.data);
 
-        if page.count == 0 || next_offset >= page.total_count {
+        if returned_count == 0 || items.len() >= page.total_count {
             break;
         }
         if next_offset <= offset {
@@ -322,23 +327,23 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn pagination_aggregates_every_page_and_advances_by_the_envelope_count() {
+    async fn pagination_aggregates_every_page_and_advances_by_rows_received() {
         let pages = Mutex::new(VecDeque::from([
             Page {
                 offset: 0,
-                count: 2,
+                _count: 2,
                 total_count: 5,
                 data: vec!["one", "two"],
             },
             Page {
                 offset: 2,
-                count: 2,
+                _count: 2,
                 total_count: 5,
                 data: vec!["three", "four"],
             },
             Page {
                 offset: 4,
-                count: 1,
+                _count: 1,
                 total_count: 5,
                 data: vec!["five"],
             },
@@ -363,6 +368,45 @@ mod tests {
                 "sites/site/devices?offset=0&limit=2",
                 "sites/site/devices?offset=2&limit=2",
                 "sites/site/devices?offset=4&limit=2",
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn pagination_does_not_skip_rows_when_reported_count_exceeds_the_payload() {
+        let pages = Mutex::new(VecDeque::from([
+            Page {
+                offset: 0,
+                _count: 6,
+                total_count: 6,
+                data: vec![1, 2, 3, 4, 5],
+            },
+            Page {
+                offset: 5,
+                _count: 1,
+                total_count: 6,
+                data: vec![6],
+            },
+        ]));
+        let requested = Mutex::new(Vec::new());
+
+        let items = fetch_all_pages_with("sites/site/devices", 200, |path| {
+            requested.lock().expect("request log").push(path);
+            std::future::ready(Ok(pages
+                .lock()
+                .expect("page queue")
+                .pop_front()
+                .expect("page")))
+        })
+        .await
+        .expect("pages");
+
+        assert_eq!(items, [1, 2, 3, 4, 5, 6]);
+        assert_eq!(
+            *requested.lock().expect("request log"),
+            [
+                "sites/site/devices?offset=0&limit=200",
+                "sites/site/devices?offset=5&limit=200",
             ]
         );
     }

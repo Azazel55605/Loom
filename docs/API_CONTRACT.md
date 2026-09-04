@@ -1025,8 +1025,10 @@ OpenAPI is versioned with the installed Network application. A configured
 `site` may be its UUID, legacy `internalReference`, or display name; Loom
 resolves that to the UUID required by subsequent calls. All list calls use the
 official offset envelope (`offset`, `limit`, `count`, `totalCount`, `data`) and
-are consumed until `totalCount` is reached: sites, devices, and clients default
-to 25 rows and allow 200; vouchers default to 100 and allow 1000. The host view
+are consumed until `totalCount` is reached, advancing by the number of rows
+actually returned so an inconsistent envelope `count` cannot skip a row. Sites,
+devices, and clients default to 25 rows and allow 200; vouchers default to 100
+and allow 1000. The host view
 publishes `deviceCount`, `onlineDeviceCount`, and `clientCount` from the complete
 device/client collections.
 
@@ -1040,6 +1042,8 @@ publish `connectedClientCount`, derived from the complete client collection's
 `uplinkDeviceId`, and a radio summary built from the documented standard,
 frequency, channel, and channel width fields. The current API publishes no
 per-port throughput counters, so Loom does not invent a switch aggregate.
+`frequencyGHz` accepts both the documented string form and the numeric form
+returned by some real consoles.
 `ONLINE` is Healthy;
 `PENDING_ADOPTION`, `UPDATING`, `GETTING_READY`, `ADOPTING`, and `DELETING` are
 Degraded; `OFFLINE`, `CONNECTION_INTERRUPTED`, and `ISOLATED` are Down. Unknown
