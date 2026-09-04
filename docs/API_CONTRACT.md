@@ -997,7 +997,7 @@ mean. A configuration that satisfies the schema's shape can still be refused
 (see [`POST /connector-instances`](#post-connector-instances)).
 
 Today the array holds five: the debug fixture, the unified Docker connector,
-the TrueNAS connector, the Pi-hole connector, and the minimal host-level UniFi Network connector. It was an array from day one so that registering a real connector
+the TrueNAS connector, the Pi-hole connector, and the UniFi Network connector. It was an array from day one so that registering a real connector
 type is an insertion rather than a reshape of this response, which is exactly
 what adding Docker turned out to be.
 
@@ -1015,7 +1015,7 @@ is created, not here.
 | `docker` | One Docker daemon connection and its host-level aggregate view. Containers are addressable sub-targets of that instance. | Required `dockerHost` (`unix://` or `tcp://`) only. | A real daemon connection and ping. |
 | `pihole` | One Pi-hole v6 instance with host-level statistics and DNS blocking control. | Required `baseUrl` including `http://` or `https://`, sensitive `password`, and optional `allowInsecureCert` (default `false`); an application password is recommended. | `POST /api/auth`, retaining `session.sid` for `X-FTL-SID` authentication. |
 | `truenas` | One TrueNAS host with an aggregate host view plus addressable pool and dataset sub-targets. | Required bare `host`, required API-key owner `username`, sensitive `apiKey`, and optional `allowInsecureCert` (default `false`). | A mandatory-TLS WebSocket connection and `auth.login_ex` API-key authentication. |
-| `unifi-network` | One local UniFi Network console site with host-level device and connected-client counts. | Required HTTPS `host` origin, sensitive `apiKey`, optional site UUID/internal reference/name (default `default`), and optional `allowInsecureCert` (default `false`). | `GET /proxy/network/integration/v1/sites` with `X-API-KEY`, followed by resolution of the configured site. |
+| `unifi-network` | One local UniFi Network console site with host-level counts and addressable device sub-targets. | Required HTTPS `host` origin, sensitive `apiKey`, optional site UUID/internal reference/name (default `default`), and optional `allowInsecureCert` (default `false`). | `GET /proxy/network/integration/v1/sites` with `X-API-KEY`, followed by resolution of the configured site. |
 
 The UniFi Network connector uses the official local Integration API. Its base is
 `https://<console>/proxy/network/integration/v1`; API keys are generated in
@@ -1025,13 +1025,23 @@ OpenAPI is versioned with the installed Network application. A configured
 `site` may be its UUID, legacy `internalReference`, or display name; Loom
 resolves that to the UUID required by subsequent calls. One poll pages through
 `/sites/{siteId}/devices`, counts documented `ONLINE` states, and reads
-`/sites/{siteId}/clients`'s `totalCount`. It publishes `deviceCount`,
+`/sites/{siteId}/clients`'s `totalCount`. The host view publishes `deviceCount`,
 `onlineDeviceCount`, and `clientCount`.
 
-The official API also documents device restart, PoE port power-cycle, guest
-authorization, and voucher mutations. This first host-only connector exposes
-no actions because each available operation requires a concrete device, port,
-client, or voucher target; those are deferred until Loom models those targets.
+Each returned device is an addressable `device:{deviceId}` sub-target. A poll
+also reads `/sites/{siteId}/devices/{deviceId}/statistics/latest` for every
+known device, with at most ten Integration API calls in flight across the
+connector. Device views publish the exact API `state`, `model`, and a
+human-readable `uptime` derived from `uptimeSec`. `ONLINE` is Healthy;
+`PENDING_ADOPTION`, `UPDATING`, `GETTING_READY`, `ADOPTING`, and `DELETING` are
+Degraded; `OFFLINE`, `CONNECTION_INTERRUPTED`, and `ISOLATED` are Down. Unknown
+future state values remain Unknown rather than being guessed.
+
+Device targets expose a parameterless, disruptive `restart` action. It invokes
+`POST /sites/{siteId}/devices/{deviceId}/actions` with
+`{ "action": "RESTART" }` and warns that attached clients—and potentially the
+network when restarting a gateway—will disconnect briefly. PoE port cycling,
+guest authorization, and voucher mutations remain deferred to resource kinds.
 There is no official site-summary or WAN-status endpoint in the current local
 Network specification, so no WAN field is inferred from undocumented APIs.
 

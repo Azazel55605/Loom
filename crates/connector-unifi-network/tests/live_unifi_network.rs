@@ -6,8 +6,8 @@
 //! untrusted local certificate.
 
 use loom_connector_unifi_network::{
-    UniFiNetworkConnector, DATA_POINT_CLIENT_COUNT, DATA_POINT_DEVICE_COUNT,
-    DATA_POINT_ONLINE_DEVICE_COUNT,
+    UniFiNetworkConnector, ACTION_RESTART, DATA_POINT_CLIENT_COUNT, DATA_POINT_DEVICE_COUNT,
+    DATA_POINT_MODEL, DATA_POINT_ONLINE_DEVICE_COUNT, DATA_POINT_STATE, DATA_POINT_UPTIME,
 };
 use loom_core::connector::{Connector, HealthState};
 use serde_json::{json, Value};
@@ -48,8 +48,62 @@ async fn a_real_unifi_console_reports_site_counts_and_obeys_the_contract() {
         .expect("online device count");
     assert!(online <= total);
 
-    loom_connector_test_kit::assert_connector_contract(&connector, &[None]).await;
+    let targets = connector
+        .list_sub_targets()
+        .await
+        .expect("the live UniFi Network site should list devices");
+    assert!(
+        !targets.is_empty(),
+        "the configured site should have devices"
+    );
+    assert!(targets
+        .iter()
+        .all(|target| target.kind == "device" && target.id.starts_with("device:")));
+    for target in &targets {
+        assert!(status
+            .data_point_value_for(Some(&target.id), DATA_POINT_STATE)
+            .is_some_and(Value::is_string));
+        assert!(status
+            .data_point_value_for(Some(&target.id), DATA_POINT_MODEL)
+            .is_some_and(Value::is_string));
+        assert!(status
+            .data_point_value_for(Some(&target.id), DATA_POINT_UPTIME)
+            .is_some_and(Value::is_string));
+        assert!(status.target_health.contains_key(&target.id));
+    }
+
+    let mut contract_targets = vec![None];
+    contract_targets.extend(targets.iter().map(|target| Some(target.id.clone())));
+    loom_connector_test_kit::assert_connector_contract(&connector, &contract_targets).await;
     eprintln!("{test_name}: {:#}", status.details);
+}
+
+#[tokio::test]
+#[ignore = "restarts a real network device; run manually with explicit target and acknowledgement"]
+async fn a_real_unifi_device_can_be_restarted_only_with_explicit_opt_in() {
+    let test_name = "a_real_unifi_device_can_be_restarted_only_with_explicit_opt_in";
+    assert_eq!(
+        std::env::var("LOOM_TEST_UNIFI_NETWORK_ALLOW_RESTART").as_deref(),
+        Ok("1"),
+        "set LOOM_TEST_UNIFI_NETWORK_ALLOW_RESTART=1 only when disconnecting the selected device is safe"
+    );
+    let raw_target = std::env::var("LOOM_TEST_UNIFI_NETWORK_RESTART_TARGET")
+        .expect("set LOOM_TEST_UNIFI_NETWORK_RESTART_TARGET to a disposable device UUID");
+    let target = if raw_target.starts_with("device:") {
+        raw_target
+    } else {
+        format!("device:{raw_target}")
+    };
+    let connector = live_connector(test_name)
+        .await
+        .expect("live UniFi Network variables are required for the manual restart test");
+
+    let result = connector
+        .execute_action(ACTION_RESTART, Some(&target), json!({}))
+        .await
+        .expect("the selected device should accept the restart request");
+    assert!(result.success, "{}", result.message);
+    eprintln!("{test_name}: {}", result.message);
 }
 
 async fn live_connector(test_name: &str) -> Option<UniFiNetworkConnector> {

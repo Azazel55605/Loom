@@ -2,11 +2,14 @@ use std::{error::Error as _, fmt, sync::Arc, time::Duration};
 
 use reqwest::StatusCode;
 use serde::de::DeserializeOwned;
+use serde_json::Value;
 use thiserror::Error;
+use tokio::sync::Semaphore;
 
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 const API_KEY_HEADER: &str = "X-API-KEY";
 const INTEGRATION_PATH: &str = "proxy/network/integration/v1";
+const MAX_CONCURRENT_CALLS: usize = 10;
 
 /// Failures at the official UniFi Network Integration API boundary.
 #[derive(Debug, Clone, Error, PartialEq, Eq)]
@@ -25,6 +28,7 @@ pub struct UniFiNetworkClient {
     base_url: Arc<str>,
     api_key: Arc<str>,
     http: reqwest::Client,
+    call_limit: Arc<Semaphore>,
 }
 
 impl fmt::Debug for UniFiNetworkClient {
@@ -53,6 +57,7 @@ impl UniFiNetworkClient {
             base_url: Arc::from(base_url.trim_end_matches('/')),
             api_key: Arc::from(api_key),
             http,
+            call_limit: Arc::new(Semaphore::new(MAX_CONCURRENT_CALLS)),
         })
     }
 
@@ -60,6 +65,7 @@ impl UniFiNetworkClient {
         &self,
         path: &str,
     ) -> Result<T, UniFiNetworkError> {
+        let _permit = self.call_permit().await?;
         let endpoint = self.endpoint(path);
         let response = self
             .http
@@ -92,6 +98,45 @@ impl UniFiNetworkClient {
                     error_chain(&error)
                 ),
             })
+    }
+
+    pub(crate) async fn post_json(&self, path: &str, body: Value) -> Result<(), UniFiNetworkError> {
+        let _permit = self.call_permit().await?;
+        let endpoint = self.endpoint(path);
+        let response = self
+            .http
+            .post(&endpoint)
+            .header(API_KEY_HEADER, self.api_key.as_ref())
+            .header(reqwest::header::ACCEPT, "application/json")
+            .json(&body)
+            .send()
+            .await
+            .map_err(connection_error)?;
+        let status = response.status();
+        if matches!(status, StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN) {
+            return Err(UniFiNetworkError::AuthFailed(
+                response_message(response).await,
+            ));
+        }
+        if !status.is_success() {
+            return Err(UniFiNetworkError::ApiError {
+                status: status.as_u16(),
+                message: response_message(response).await,
+            });
+        }
+        Ok(())
+    }
+
+    async fn call_permit(&self) -> Result<tokio::sync::SemaphorePermit<'_>, UniFiNetworkError> {
+        // One connector clone is shared by the host poll and every target
+        // consumer. The official API documents no endpoint-specific rate
+        // budget, but its per-device statistics shape naturally creates a
+        // request fan-out, so keep a hard upper bound across every clone.
+        self.call_limit.acquire().await.map_err(|_| {
+            UniFiNetworkError::ConnectionFailed(
+                "the UniFi Network request limiter was closed".to_owned(),
+            )
+        })
     }
 
     fn endpoint(&self, path: &str) -> String {
@@ -179,5 +224,13 @@ mod tests {
             api_path("https://console.example.com/proxy/network/integration/v1/sites/x/devices"),
             "/proxy/network/integration/v1/sites/x/devices"
         );
+    }
+
+    #[test]
+    fn client_caps_concurrent_requests_for_device_fan_out() {
+        let client =
+            UniFiNetworkClient::connect("https://console.example.com", "not-a-real-key", false)
+                .expect("client");
+        assert_eq!(client.call_limit.available_permits(), MAX_CONCURRENT_CALLS);
     }
 }
