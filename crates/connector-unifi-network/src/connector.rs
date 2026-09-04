@@ -1,4 +1,7 @@
-use std::{collections::HashSet, sync::Mutex};
+use std::{
+    collections::{HashMap, HashSet},
+    sync::Mutex,
+};
 
 use async_trait::async_trait;
 use futures_util::future::join_all;
@@ -45,12 +48,29 @@ pub const ACTION_UNAUTHORIZE_GUEST: &str = "unauthorizeGuest";
 pub const ACTION_CREATE_VOUCHER: &str = "createVoucher";
 pub const ACTION_REVOKE_VOUCHER: &str = "revokeVoucher";
 pub const ACTION_ADOPT: &str = "adopt";
+pub const ACTION_DELETE_ACL_RULE: &str = "deleteAclRule";
+pub const ACTION_DELETE_DNS_POLICY: &str = "deleteDnsPolicy";
+pub const ACTION_CREATE_A_RECORD: &str = "createARecord";
+pub const ACTION_CREATE_CNAME_RECORD: &str = "createCnameRecord";
+pub const ACTION_CREATE_FORWARD_DOMAIN: &str = "createForwardDomain";
+pub const ACTION_DELETE_FIREWALL_ZONE: &str = "deleteFirewallZone";
+pub const ACTION_CREATE_FIREWALL_ZONE: &str = "createZone";
+pub const ACTION_DELETE_FIREWALL_POLICY: &str = "deleteFirewallPolicy";
+pub const ACTION_TOGGLE_FIREWALL_LOGGING: &str = "toggleLogging";
+pub const ACTION_DELETE_NETWORK: &str = "deleteNetwork";
+pub const ACTION_TOGGLE_WLAN_ENABLED: &str = "toggleEnabled";
 
 pub const RESOURCE_KIND_PORTS: &str = "ports";
 pub const RESOURCE_KIND_CLIENTS: &str = "clients";
 pub const RESOURCE_KIND_VOUCHERS: &str = "vouchers";
 pub const RESOURCE_KIND_WANS: &str = "wans";
 pub const RESOURCE_KIND_PENDING_DEVICES: &str = "pendingDevices";
+pub const RESOURCE_KIND_ACL_RULES: &str = "aclRules";
+pub const RESOURCE_KIND_DNS_POLICIES: &str = "dnsPolicies";
+pub const RESOURCE_KIND_FIREWALL_ZONES: &str = "firewallZones";
+pub const RESOURCE_KIND_FIREWALL_POLICIES: &str = "firewallPolicies";
+pub const RESOURCE_KIND_NETWORKS: &str = "networks";
+pub const RESOURCE_KIND_WLAN_BROADCASTS: &str = "wlanBroadcasts";
 
 pub const CAPABILITY_READ_DEVICES: &str = "readDevices";
 pub const CAPABILITY_READ_CLIENTS: &str = "readClients";
@@ -349,6 +369,77 @@ impl UniFiNetworkConnector {
         self.client
             .fetch_all_pages::<PendingDeviceOverview>("pending-devices", PAGE_LIMIT)
             .await
+    }
+
+    async fn list_all_acl_rules(&self) -> Result<Vec<AclRuleOverview>, UniFiNetworkError> {
+        self.client
+            .fetch_all_pages::<AclRuleOverview>(
+                &format!("sites/{}/acl-rules", self.site.id),
+                PAGE_LIMIT,
+            )
+            .await
+    }
+
+    async fn list_all_dns_policies(&self) -> Result<Vec<DnsPolicyOverview>, UniFiNetworkError> {
+        self.client
+            .fetch_all_pages::<DnsPolicyOverview>(
+                &format!("sites/{}/dns/policies", self.site.id),
+                PAGE_LIMIT,
+            )
+            .await
+    }
+
+    async fn list_all_firewall_zones(
+        &self,
+    ) -> Result<Vec<FirewallZoneOverview>, UniFiNetworkError> {
+        self.client
+            .fetch_all_pages::<FirewallZoneOverview>(
+                &format!("sites/{}/firewall/zones", self.site.id),
+                PAGE_LIMIT,
+            )
+            .await
+    }
+
+    async fn list_all_firewall_policies(
+        &self,
+    ) -> Result<Vec<FirewallPolicyOverview>, UniFiNetworkError> {
+        self.client
+            .fetch_all_pages::<FirewallPolicyOverview>(
+                &format!("sites/{}/firewall/policies", self.site.id),
+                PAGE_LIMIT,
+            )
+            .await
+    }
+
+    async fn list_all_networks(&self) -> Result<Vec<NetworkOverview>, UniFiNetworkError> {
+        self.client
+            .fetch_all_pages::<NetworkOverview>(
+                &format!("sites/{}/networks", self.site.id),
+                PAGE_LIMIT,
+            )
+            .await
+    }
+
+    async fn list_all_wifi_broadcasts(
+        &self,
+    ) -> Result<Vec<WifiBroadcastDetails>, UniFiNetworkError> {
+        let overviews = self
+            .client
+            .fetch_all_pages::<WifiBroadcastOverview>(
+                &format!("sites/{}/wifi/broadcasts", self.site.id),
+                PAGE_LIMIT,
+            )
+            .await?;
+        let details = join_all(overviews.into_iter().map(|overview| async move {
+            self.client
+                .get::<WifiBroadcastDetails>(&format!(
+                    "sites/{}/wifi/broadcasts/{}",
+                    self.site.id, overview.id
+                ))
+                .await
+        }))
+        .await;
+        details.into_iter().collect()
     }
 
     async fn list_sub_targets_live(&self) -> Result<Vec<SubTarget>, ConnectorError> {
@@ -690,6 +781,126 @@ impl loom_core::connector::Connector for UniFiNetworkConnector {
                     "Device adoption started. The device will become selectable after the connector's sub-targets are refreshed.",
                 ))
             }
+            ACTION_DELETE_ACL_RULE => {
+                require_host_action(action_id, target_id)?;
+                let resource_id = required_resource_id(action_id, &params)?;
+                self.client
+                    .delete(&format!("sites/{}/acl-rules/{resource_id}", self.site.id))
+                    .await
+                    .map_err(connector_error)?;
+                Ok(ActionResult::ok("Deleted the ACL rule."))
+            }
+            ACTION_DELETE_DNS_POLICY => {
+                require_host_action(action_id, target_id)?;
+                let resource_id = required_resource_id(action_id, &params)?;
+                self.client
+                    .delete(&format!(
+                        "sites/{}/dns/policies/{resource_id}",
+                        self.site.id
+                    ))
+                    .await
+                    .map_err(connector_error)?;
+                Ok(ActionResult::ok("Deleted the DNS policy."))
+            }
+            ACTION_CREATE_A_RECORD | ACTION_CREATE_CNAME_RECORD | ACTION_CREATE_FORWARD_DOMAIN => {
+                require_host_action(action_id, target_id)?;
+                self.client
+                    .post_json(
+                        &format!("sites/{}/dns/policies", self.site.id),
+                        dns_policy_creation_body(action_id, &params)?,
+                    )
+                    .await
+                    .map_err(connector_error)?;
+                Ok(ActionResult::ok("Created the DNS policy."))
+            }
+            ACTION_DELETE_FIREWALL_ZONE => {
+                require_host_action(action_id, target_id)?;
+                let resource_id = required_resource_id(action_id, &params)?;
+                self.client
+                    .delete(&format!(
+                        "sites/{}/firewall/zones/{resource_id}",
+                        self.site.id
+                    ))
+                    .await
+                    .map_err(connector_error)?;
+                Ok(ActionResult::ok("Deleted the firewall zone."))
+            }
+            ACTION_CREATE_FIREWALL_ZONE => {
+                require_host_action(action_id, target_id)?;
+                self.client
+                    .post_json(
+                        &format!("sites/{}/firewall/zones", self.site.id),
+                        firewall_zone_creation_body(action_id, &params)?,
+                    )
+                    .await
+                    .map_err(connector_error)?;
+                Ok(ActionResult::ok("Created the firewall zone."))
+            }
+            ACTION_DELETE_FIREWALL_POLICY => {
+                require_host_action(action_id, target_id)?;
+                let resource_id = required_resource_id(action_id, &params)?;
+                self.client
+                    .delete(&format!(
+                        "sites/{}/firewall/policies/{resource_id}",
+                        self.site.id
+                    ))
+                    .await
+                    .map_err(connector_error)?;
+                Ok(ActionResult::ok("Deleted the firewall policy."))
+            }
+            ACTION_TOGGLE_FIREWALL_LOGGING => {
+                require_host_action(action_id, target_id)?;
+                let resource_id = required_resource_id(action_id, &params)?;
+                let policy: FirewallPolicyOverview = self
+                    .client
+                    .get(&format!(
+                        "sites/{}/firewall/policies/{resource_id}",
+                        self.site.id
+                    ))
+                    .await
+                    .map_err(connector_error)?;
+                self.client
+                    .patch_json(
+                        &format!("sites/{}/firewall/policies/{resource_id}", self.site.id),
+                        json!({ "loggingEnabled": !policy.logging_enabled }),
+                    )
+                    .await
+                    .map_err(connector_error)?;
+                Ok(ActionResult::ok("Toggled firewall-policy logging."))
+            }
+            ACTION_DELETE_NETWORK => {
+                require_host_action(action_id, target_id)?;
+                let resource_id = required_resource_id(action_id, &params)?;
+                self.client
+                    .delete(&format!(
+                        "sites/{}/networks/{resource_id}?force=false",
+                        self.site.id
+                    ))
+                    .await
+                    .map_err(connector_error)?;
+                Ok(ActionResult::ok("Deleted the network."))
+            }
+            ACTION_TOGGLE_WLAN_ENABLED => {
+                require_host_action(action_id, target_id)?;
+                let resource_id = required_resource_id(action_id, &params)?;
+                let details: WifiBroadcastDetails = self
+                    .client
+                    .get(&format!(
+                        "sites/{}/wifi/broadcasts/{resource_id}",
+                        self.site.id
+                    ))
+                    .await
+                    .map_err(connector_error)?;
+                let body = wifi_broadcast_toggle_body(action_id, details)?;
+                self.client
+                    .put_json(
+                        &format!("sites/{}/wifi/broadcasts/{resource_id}", self.site.id),
+                        body,
+                    )
+                    .await
+                    .map_err(connector_error)?;
+                Ok(ActionResult::ok("Toggled the WLAN broadcast state."))
+            }
             _ => Err(ConnectorError::invalid_action(action_id)),
         }
     }
@@ -701,6 +912,12 @@ impl loom_core::connector::Connector for UniFiNetworkConnector {
                 vouchers_kind(),
                 wans_kind(),
                 pending_devices_kind(),
+                acl_rules_kind(),
+                dns_policies_kind(),
+                firewall_zones_kind(),
+                firewall_policies_kind(),
+                networks_kind(),
+                wlan_broadcasts_kind(),
             ],
             Some(target) if device_id_from_target(target).is_some() => vec![ports_kind()],
             _ => Vec::new(),
@@ -741,6 +958,40 @@ impl loom_core::connector::Connector for UniFiNetworkConnector {
             )),
             (RESOURCE_KIND_PENDING_DEVICES, None) => Ok(pending_device_resource_items(
                 self.list_all_pending_devices()
+                    .await
+                    .map_err(connector_error)?,
+            )),
+            (RESOURCE_KIND_ACL_RULES, None) => Ok(acl_rule_resource_items(
+                self.list_all_acl_rules().await.map_err(connector_error)?,
+            )),
+            (RESOURCE_KIND_DNS_POLICIES, None) => Ok(dns_policy_resource_items(
+                self.list_all_dns_policies()
+                    .await
+                    .map_err(connector_error)?,
+            )),
+            (RESOURCE_KIND_FIREWALL_ZONES, None) => {
+                let (zones, networks) =
+                    tokio::join!(self.list_all_firewall_zones(), self.list_all_networks());
+                Ok(firewall_zone_resource_items(
+                    zones.map_err(connector_error)?,
+                    &networks.map_err(connector_error)?,
+                ))
+            }
+            (RESOURCE_KIND_FIREWALL_POLICIES, None) => {
+                let (policies, zones) = tokio::join!(
+                    self.list_all_firewall_policies(),
+                    self.list_all_firewall_zones()
+                );
+                Ok(firewall_policy_resource_items(
+                    policies.map_err(connector_error)?,
+                    &zones.map_err(connector_error)?,
+                ))
+            }
+            (RESOURCE_KIND_NETWORKS, None) => Ok(network_resource_items(
+                self.list_all_networks().await.map_err(connector_error)?,
+            )),
+            (RESOURCE_KIND_WLAN_BROADCASTS, None) => Ok(wifi_broadcast_resource_items(
+                self.list_all_wifi_broadcasts()
                     .await
                     .map_err(connector_error)?,
             )),
@@ -1115,6 +1366,99 @@ struct PendingDeviceOverview {
     state: String,
     #[serde(default)]
     firmware_version: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct AclRuleOverview {
+    id: String,
+    name: String,
+    #[serde(rename = "type")]
+    rule_type: String,
+    action: String,
+    enabled: bool,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct DnsPolicyOverview {
+    id: String,
+    #[serde(rename = "type")]
+    policy_type: String,
+    #[serde(default)]
+    domain: Option<String>,
+    enabled: bool,
+    #[serde(default)]
+    ipv4_address: Option<String>,
+    #[serde(default)]
+    ipv6_address: Option<String>,
+    #[serde(default)]
+    target_domain: Option<String>,
+    #[serde(default)]
+    ip_address: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct FirewallZoneOverview {
+    id: String,
+    name: String,
+    network_ids: Vec<String>,
+    metadata: EntityMetadata,
+}
+
+#[derive(Debug, Deserialize)]
+struct EntityMetadata {
+    origin: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct FirewallPolicyOverview {
+    id: String,
+    name: String,
+    action: TypedValue,
+    source: ZoneReference,
+    destination: ZoneReference,
+    enabled: bool,
+    logging_enabled: bool,
+}
+
+#[derive(Debug, Deserialize)]
+struct TypedValue {
+    #[serde(rename = "type")]
+    value_type: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ZoneReference {
+    zone_id: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct NetworkOverview {
+    id: String,
+    name: String,
+    vlan_id: u32,
+    management: String,
+    enabled: bool,
+}
+
+/// The list response omits fields needed by the resource table, so only its ID
+/// is read before fetching the documented full configuration for each row.
+#[derive(Debug, Deserialize)]
+struct WifiBroadcastOverview {
+    id: String,
+}
+
+/// Keeps the complete documented WLAN configuration intact for read-modify-
+/// write. `id` is response-only; every other property is retained verbatim.
+#[derive(Debug, Clone, Deserialize)]
+struct WifiBroadcastDetails {
+    id: String,
+    #[serde(flatten)]
+    config: Map<String, Value>,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -1534,6 +1878,250 @@ fn pending_devices_kind() -> ResourceKindDescriptor {
     )])
 }
 
+fn acl_rules_kind() -> ResourceKindDescriptor {
+    ResourceKindDescriptor::new(
+        RESOURCE_KIND_ACL_RULES,
+        "ACL Rules",
+        vec![
+            ColumnDescriptor::new("name", "Name", ColumnValueType::Text),
+            ColumnDescriptor::new("type", "Type", ColumnValueType::Text),
+            ColumnDescriptor::new("action", "Action", ColumnValueType::Text),
+            ColumnDescriptor::new("enabled", "Enabled", ColumnValueType::Bool),
+        ],
+    )
+    .applicable_to(ApplicableTarget::HostOnly)
+    .with_row_actions(vec![resource_row_action(
+        ACTION_DELETE_ACL_RULE,
+        "Delete",
+        "Permanently delete this ACL rule.",
+        false,
+    )])
+}
+
+fn dns_policies_kind() -> ResourceKindDescriptor {
+    ResourceKindDescriptor::new(
+        RESOURCE_KIND_DNS_POLICIES,
+        "DNS Policies",
+        vec![
+            ColumnDescriptor::new("type", "Type", ColumnValueType::Text),
+            ColumnDescriptor::new("domain", "Domain", ColumnValueType::Text),
+            ColumnDescriptor::new("target", "Target", ColumnValueType::Text),
+            ColumnDescriptor::new("enabled", "Enabled", ColumnValueType::Bool),
+        ],
+    )
+    .applicable_to(ApplicableTarget::HostOnly)
+    // AAAA/MX/SRV/TXT remain browse-and-delete only in this pass. Their
+    // subtype-specific forms do not belong in one misleading mega-action.
+    .with_row_actions(vec![resource_row_action(
+        ACTION_DELETE_DNS_POLICY,
+        "Delete",
+        "Permanently delete this DNS policy.",
+        false,
+    )])
+    .with_kind_actions(vec![
+        create_a_record_action(),
+        create_cname_record_action(),
+        create_forward_domain_action(),
+    ])
+}
+
+fn firewall_zones_kind() -> ResourceKindDescriptor {
+    ResourceKindDescriptor::new(
+        RESOURCE_KIND_FIREWALL_ZONES,
+        "Firewall Zones",
+        vec![
+            ColumnDescriptor::new("name", "Name", ColumnValueType::Text),
+            ColumnDescriptor::new("networks", "Networks", ColumnValueType::Text),
+            ColumnDescriptor::new("systemDerived", "System derived", ColumnValueType::Bool),
+        ],
+    )
+    .applicable_to(ApplicableTarget::HostOnly)
+    .with_row_actions(vec![resource_row_action(
+        ACTION_DELETE_FIREWALL_ZONE,
+        "Delete",
+        "Delete this firewall zone. UniFi will reject protected system zones.",
+        false,
+    )])
+    .with_kind_actions(vec![create_firewall_zone_action()])
+}
+
+fn firewall_policies_kind() -> ResourceKindDescriptor {
+    ResourceKindDescriptor::new(
+        RESOURCE_KIND_FIREWALL_POLICIES,
+        "Firewall Policies",
+        vec![
+            ColumnDescriptor::new("name", "Name", ColumnValueType::Text),
+            ColumnDescriptor::new("action", "Action", ColumnValueType::Text),
+            ColumnDescriptor::new("sourceZone", "Source zone", ColumnValueType::Text),
+            ColumnDescriptor::new("destinationZone", "Destination zone", ColumnValueType::Text),
+            ColumnDescriptor::new("enabled", "Enabled", ColumnValueType::Bool),
+            ColumnDescriptor::new("loggingEnabled", "Logging", ColumnValueType::Bool),
+        ],
+    )
+    .applicable_to(ApplicableTarget::HostOnly)
+    .with_row_actions(vec![
+        resource_row_action(
+            ACTION_DELETE_FIREWALL_POLICY,
+            "Delete",
+            "Permanently delete this firewall policy.",
+            false,
+        ),
+        resource_row_action(
+            ACTION_TOGGLE_FIREWALL_LOGGING,
+            "Toggle logging",
+            "Flip logging for this policy without changing its other configuration.",
+            false,
+        ),
+    ])
+}
+
+fn networks_kind() -> ResourceKindDescriptor {
+    ResourceKindDescriptor::new(
+        RESOURCE_KIND_NETWORKS,
+        "Networks",
+        vec![
+            ColumnDescriptor::new("name", "Name", ColumnValueType::Text),
+            ColumnDescriptor::new("vlanId", "VLAN", ColumnValueType::Number),
+            ColumnDescriptor::new("management", "Management", ColumnValueType::Text),
+            ColumnDescriptor::new("enabled", "Enabled", ColumnValueType::Bool),
+        ],
+    )
+    .applicable_to(ApplicableTarget::HostOnly)
+    .with_row_actions(vec![resource_row_action(
+        ACTION_DELETE_NETWORK,
+        "Delete network",
+        "Deleting a network can disconnect every client and device using it. Loom does not force deletion when UniFi reports references.",
+        true,
+    )])
+}
+
+fn wlan_broadcasts_kind() -> ResourceKindDescriptor {
+    ResourceKindDescriptor::new(
+        RESOURCE_KIND_WLAN_BROADCASTS,
+        "WLAN Broadcasts",
+        vec![
+            ColumnDescriptor::new("name", "SSID", ColumnValueType::Text),
+            ColumnDescriptor::new("enabled", "Enabled", ColumnValueType::Bool),
+            ColumnDescriptor::new("hidden", "Hidden", ColumnValueType::Bool),
+            ColumnDescriptor::new("securityType", "Security", ColumnValueType::Text),
+            ColumnDescriptor::new("frequencies", "Frequencies", ColumnValueType::Text),
+        ],
+    )
+    .applicable_to(ApplicableTarget::HostOnly)
+    .with_row_actions(vec![resource_row_action(
+        ACTION_TOGGLE_WLAN_ENABLED,
+        "Toggle enabled",
+        "Enable or disable this WLAN without changing its other configuration. Connected clients may be disconnected.",
+        true,
+    )])
+}
+
+fn create_a_record_action() -> ConnectorAction {
+    dns_creation_action(
+        ACTION_CREATE_A_RECORD,
+        "Create A record",
+        json!({
+            "domain": text_schema("Domain", "DNS name for the record."),
+            "ipv4Address": text_schema("IPv4 address", "IPv4 address returned by this record."),
+            "ttl": ttl_schema(86_400)
+        }),
+        &["domain", "ipv4Address", "ttl"],
+    )
+}
+
+fn create_cname_record_action() -> ConnectorAction {
+    dns_creation_action(
+        ACTION_CREATE_CNAME_RECORD,
+        "Create CNAME record",
+        json!({
+            "domain": text_schema("Domain", "Alias DNS name."),
+            "targetDomain": text_schema("Target domain", "Canonical DNS name the alias resolves to."),
+            "ttl": ttl_schema(604_800)
+        }),
+        &["domain", "targetDomain", "ttl"],
+    )
+}
+
+fn create_forward_domain_action() -> ConnectorAction {
+    dns_creation_action(
+        ACTION_CREATE_FORWARD_DOMAIN,
+        "Create forward domain",
+        json!({
+            "domain": text_schema("Domain", "DNS suffix to forward."),
+            "forwardIp": text_schema("Forwarding server", "IPv4 or IPv6 address of the DNS server."),
+        }),
+        &["domain", "forwardIp"],
+    )
+}
+
+fn dns_creation_action(
+    id: &str,
+    label: &str,
+    properties: Value,
+    required: &[&str],
+) -> ConnectorAction {
+    ConnectorAction {
+        id: id.to_owned(),
+        target_id: None,
+        label: label.to_owned(),
+        description: Some(format!("{label} using the official UniFi DNS policy API.")),
+        params_schema: json!({
+            "type": "object",
+            "properties": properties,
+            "required": required,
+            "additionalProperties": false
+        }),
+        is_disruptive: false,
+        snapshot_data_point_ids: Vec::new(),
+    }
+}
+
+fn create_firewall_zone_action() -> ConnectorAction {
+    ConnectorAction {
+        id: ACTION_CREATE_FIREWALL_ZONE.to_owned(),
+        target_id: None,
+        label: "Create zone".to_owned(),
+        description: Some("Create a firewall zone and attach network IDs.".to_owned()),
+        params_schema: json!({
+            "type": "object",
+            "properties": {
+                "name": text_schema("Name", "Firewall zone name."),
+                // SchemaForm intentionally does not support arrays yet. Match
+                // its established string control and parse a comma-separated
+                // list at the connector boundary.
+                "networkIds": {
+                    "type": "string",
+                    "title": "Network IDs",
+                    "description": "Comma-separated network IDs; leave empty for an unattached zone."
+                }
+            },
+            "required": ["name"],
+            "additionalProperties": false
+        }),
+        is_disruptive: false,
+        snapshot_data_point_ids: Vec::new(),
+    }
+}
+
+fn text_schema(title: &str, description: &str) -> Value {
+    json!({
+        "type": "string",
+        "title": title,
+        "description": description,
+        "minLength": 1
+    })
+}
+
+fn ttl_schema(maximum: u64) -> Value {
+    json!({
+        "type": "integer",
+        "title": "TTL (seconds)",
+        "description": "DNS time to live in seconds.",
+        "minimum": 0,
+        "maximum": maximum
+    })
+}
+
 fn authorize_guest_action() -> ConnectorAction {
     ConnectorAction {
         id: ACTION_AUTHORIZE_GUEST.to_owned(),
@@ -1801,6 +2389,185 @@ fn pending_device_resource_items(mut devices: Vec<PendingDeviceOverview>) -> Vec
         .collect()
 }
 
+fn acl_rule_resource_items(mut rules: Vec<AclRuleOverview>) -> Vec<ResourceItem> {
+    rules.sort_by_key(|rule| rule.name.to_lowercase());
+    rules
+        .into_iter()
+        .map(|rule| {
+            let rule_type = if rule.rule_type == "IPV4" {
+                "IPv4".to_owned()
+            } else {
+                rule.rule_type
+            };
+            ResourceItem::new(rule.id)
+                .with_field("name", rule.name)
+                .with_field("type", rule_type)
+                .with_field("action", rule.action)
+                .with_field("enabled", rule.enabled)
+        })
+        .collect()
+}
+
+fn dns_policy_resource_items(mut policies: Vec<DnsPolicyOverview>) -> Vec<ResourceItem> {
+    policies.sort_by(|left, right| {
+        left.domain
+            .as_deref()
+            .unwrap_or_default()
+            .to_lowercase()
+            .cmp(&right.domain.as_deref().unwrap_or_default().to_lowercase())
+    });
+    policies
+        .into_iter()
+        .map(|policy| {
+            let target = match policy.policy_type.as_str() {
+                "A_RECORD" => policy.ipv4_address,
+                "AAAA_RECORD" => policy.ipv6_address,
+                "CNAME_RECORD" => policy.target_domain,
+                "FORWARD_DOMAIN" => policy.ip_address,
+                _ => None,
+            }
+            .unwrap_or_else(|| "—".to_owned());
+            ResourceItem::new(policy.id)
+                .with_field("type", policy.policy_type)
+                .with_field("domain", policy.domain.unwrap_or_else(|| "—".to_owned()))
+                .with_field("target", target)
+                .with_field("enabled", policy.enabled)
+        })
+        .collect()
+}
+
+fn firewall_zone_resource_items(
+    mut zones: Vec<FirewallZoneOverview>,
+    networks: &[NetworkOverview],
+) -> Vec<ResourceItem> {
+    let network_names = networks
+        .iter()
+        .map(|network| (network.id.as_str(), network.name.as_str()))
+        .collect::<HashMap<_, _>>();
+    zones.sort_by_key(|zone| zone.name.to_lowercase());
+    zones
+        .into_iter()
+        .map(|zone| {
+            let attached = zone
+                .network_ids
+                .iter()
+                .map(|id| network_names.get(id.as_str()).copied().unwrap_or(id))
+                .collect::<Vec<_>>()
+                .join(", ");
+            ResourceItem::new(zone.id)
+                .with_field("name", zone.name)
+                .with_field("networks", attached)
+                .with_field("systemDerived", zone.metadata.origin == "SYSTEM_DEFINED")
+        })
+        .collect()
+}
+
+fn firewall_policy_resource_items(
+    mut policies: Vec<FirewallPolicyOverview>,
+    zones: &[FirewallZoneOverview],
+) -> Vec<ResourceItem> {
+    let zone_names = zones
+        .iter()
+        .map(|zone| (zone.id.as_str(), zone.name.as_str()))
+        .collect::<HashMap<_, _>>();
+    policies.sort_by_key(|policy| policy.name.to_lowercase());
+    policies
+        .into_iter()
+        .map(|policy| {
+            let source = zone_names
+                .get(policy.source.zone_id.as_str())
+                .copied()
+                .unwrap_or(&policy.source.zone_id);
+            let destination = zone_names
+                .get(policy.destination.zone_id.as_str())
+                .copied()
+                .unwrap_or(&policy.destination.zone_id);
+            ResourceItem::new(policy.id)
+                .with_field("name", policy.name)
+                .with_field("action", policy.action.value_type)
+                .with_field("sourceZone", source)
+                .with_field("destinationZone", destination)
+                .with_field("enabled", policy.enabled)
+                .with_field("loggingEnabled", policy.logging_enabled)
+        })
+        .collect()
+}
+
+fn network_resource_items(mut networks: Vec<NetworkOverview>) -> Vec<ResourceItem> {
+    networks.sort_by_key(|network| network.name.to_lowercase());
+    networks
+        .into_iter()
+        .map(|network| {
+            ResourceItem::new(network.id)
+                .with_field("name", network.name)
+                .with_field("vlanId", network.vlan_id)
+                .with_field("management", network.management)
+                .with_field("enabled", network.enabled)
+        })
+        .collect()
+}
+
+fn wifi_broadcast_resource_items(mut broadcasts: Vec<WifiBroadcastDetails>) -> Vec<ResourceItem> {
+    broadcasts.sort_by(|left, right| {
+        wifi_config_string(&left.config, "name")
+            .to_lowercase()
+            .cmp(&wifi_config_string(&right.config, "name").to_lowercase())
+    });
+    broadcasts
+        .into_iter()
+        .map(|broadcast| {
+            let frequencies = broadcast
+                .config
+                .get("broadcastingFrequenciesGHz")
+                .and_then(Value::as_array)
+                .map(|values| {
+                    values
+                        .iter()
+                        .filter_map(Value::as_f64)
+                        .map(|frequency| format!("{frequency} GHz"))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                })
+                .filter(|value| !value.is_empty())
+                .unwrap_or_else(|| "—".to_owned());
+            let security_type = broadcast
+                .config
+                .get("securityConfiguration")
+                .and_then(|value| value.get("type"))
+                .and_then(Value::as_str)
+                .unwrap_or("—");
+            ResourceItem::new(broadcast.id)
+                .with_field("name", wifi_config_string(&broadcast.config, "name"))
+                .with_field(
+                    "enabled",
+                    broadcast
+                        .config
+                        .get("enabled")
+                        .cloned()
+                        .unwrap_or(Value::Null),
+                )
+                .with_field(
+                    "hidden",
+                    broadcast
+                        .config
+                        .get("hideName")
+                        .cloned()
+                        .unwrap_or(Value::Null),
+                )
+                .with_field("securityType", security_type)
+                .with_field("frequencies", frequencies)
+        })
+        .collect()
+}
+
+fn wifi_config_string(config: &Map<String, Value>, key: &str) -> String {
+    config
+        .get(key)
+        .and_then(Value::as_str)
+        .unwrap_or("—")
+        .to_owned()
+}
+
 fn guest_authorization_body(action_id: &str, params: &Value) -> Result<Value, ConnectorError> {
     let mut body = Map::from_iter([(
         "action".to_owned(),
@@ -1822,6 +2589,78 @@ fn guest_authorization_body(action_id: &str, params: &Value) -> Result<Value, Co
 
 fn guest_unauthorization_body() -> Value {
     json!({"action": "UNAUTHORIZE_GUEST_ACCESS"})
+}
+
+fn dns_policy_creation_body(action_id: &str, params: &Value) -> Result<Value, ConnectorError> {
+    let domain = required_string_param(action_id, params, "domain")?;
+    match action_id {
+        ACTION_CREATE_A_RECORD => Ok(json!({
+            "type": "A_RECORD",
+            "enabled": true,
+            "domain": domain,
+            "ipv4Address": required_string_param(action_id, params, "ipv4Address")?,
+            "ttlSeconds": required_integer_in_range(action_id, params, "ttl", 0, 86_400)?,
+        })),
+        ACTION_CREATE_CNAME_RECORD => Ok(json!({
+            "type": "CNAME_RECORD",
+            "enabled": true,
+            "domain": domain,
+            "targetDomain": required_string_param(action_id, params, "targetDomain")?,
+            "ttlSeconds": required_integer_in_range(action_id, params, "ttl", 0, 604_800)?,
+        })),
+        ACTION_CREATE_FORWARD_DOMAIN => Ok(json!({
+            "type": "FORWARD_DOMAIN",
+            "enabled": true,
+            "domain": domain,
+            "ipAddress": required_string_param(action_id, params, "forwardIp")?,
+        })),
+        _ => Err(ConnectorError::invalid_action(action_id)),
+    }
+}
+
+fn firewall_zone_creation_body(action_id: &str, params: &Value) -> Result<Value, ConnectorError> {
+    let name = required_string_param(action_id, params, "name")?;
+    let raw_network_ids = params
+        .get("networkIds")
+        .map(|value| {
+            value
+                .as_str()
+                .ok_or_else(|| invalid_param(action_id, "`networkIds` must be a string"))
+        })
+        .transpose()?
+        .unwrap_or_default();
+    let mut seen = HashSet::new();
+    let network_ids = raw_network_ids
+        .split(',')
+        .map(str::trim)
+        .filter(|id| !id.is_empty())
+        .filter(|id| seen.insert((*id).to_owned()))
+        .collect::<Vec<_>>();
+    Ok(json!({ "name": name, "networkIds": network_ids }))
+}
+
+fn wifi_broadcast_toggle_body(
+    action_id: &str,
+    mut details: WifiBroadcastDetails,
+) -> Result<Value, ConnectorError> {
+    let enabled = details
+        .config
+        .get("enabled")
+        .and_then(Value::as_bool)
+        .ok_or_else(|| {
+            ConnectorError::Internal(
+                "UniFi WLAN detail omitted the required boolean `enabled` field".to_owned(),
+            )
+        })?;
+    details.config.insert("enabled".to_owned(), json!(!enabled));
+    // `id` is represented separately by WifiBroadcastDetails. Metadata is
+    // response-only; every mutable configuration property remains byte-for-
+    // byte equivalent at the JSON-value level apart from `enabled`.
+    details.config.remove("metadata");
+    if details.config.is_empty() {
+        return Err(invalid_param(action_id, "WLAN configuration was empty"));
+    }
+    Ok(Value::Object(details.config))
 }
 
 fn device_adoption_body(mac_address: &str) -> Value {
@@ -1880,6 +2719,33 @@ fn required_integer_param(
         .and_then(Value::as_u64)
         .filter(|value| *value > 0)
         .ok_or_else(|| invalid_param(action_id, format!("`{key}` must be a positive integer")))
+}
+
+fn required_integer_in_range(
+    action_id: &str,
+    params: &Value,
+    key: &str,
+    minimum: u64,
+    maximum: u64,
+) -> Result<u64, ConnectorError> {
+    params
+        .get(key)
+        .and_then(Value::as_u64)
+        .filter(|value| (minimum..=maximum).contains(value))
+        .ok_or_else(|| {
+            invalid_param(
+                action_id,
+                format!("`{key}` must be an integer from {minimum} through {maximum}"),
+            )
+        })
+}
+
+fn require_host_action(action_id: &str, target_id: Option<&str>) -> Result<(), ConnectorError> {
+    if target_id.is_some() {
+        Err(ConnectorError::invalid_action(action_id))
+    } else {
+        Ok(())
+    }
 }
 
 fn copy_optional_integer_params(
@@ -2343,7 +3209,7 @@ mod tests {
         assert_eq!(connector.metadata().id, TYPE_ID);
         assert_eq!(connector.data_points().len(), 4);
         assert!(connector.supports_sub_targets());
-        assert_eq!(connector.resource_kinds(None).len(), 4);
+        assert_eq!(connector.resource_kinds(None).len(), 10);
         assert!(connector.setup_guide().is_some());
     }
 
@@ -2807,6 +3673,12 @@ mod tests {
             vouchers_kind(),
             wans_kind(),
             pending_devices_kind(),
+            acl_rules_kind(),
+            dns_policies_kind(),
+            firewall_zones_kind(),
+            firewall_policies_kind(),
+            networks_kind(),
+            wlan_broadcasts_kind(),
         ];
         assert!(host
             .iter()
@@ -2824,6 +3696,12 @@ mod tests {
         assert!(host[2].row_actions.is_empty());
         assert!(host[2].kind_actions.is_empty());
         assert_eq!(host[3].row_actions[0].id, ACTION_ADOPT);
+        assert_eq!(host[4].row_actions[0].id, ACTION_DELETE_ACL_RULE);
+        assert_eq!(host[5].kind_actions.len(), 3);
+        assert_eq!(host[6].kind_actions[0].id, ACTION_CREATE_FIREWALL_ZONE);
+        assert_eq!(host[7].row_actions.len(), 2);
+        assert!(host[8].row_actions[0].is_disruptive);
+        assert!(host[9].row_actions[0].is_disruptive);
 
         let ports = ports_kind();
         assert_eq!(ports.applicable_target, ApplicableTarget::TargetOnly);
@@ -2891,6 +3769,181 @@ mod tests {
             )
             .expect("guest limit is optional in v10.4.57"),
             json!({"count": 1, "name": "Visitor", "timeLimitMinutes": 60})
+        );
+        assert_eq!(
+            dns_policy_creation_body(
+                ACTION_CREATE_A_RECORD,
+                &json!({"domain": "host.example.com", "ipv4Address": "192.0.2.10", "ttl": 300})
+            )
+            .expect("A record"),
+            json!({
+                "type": "A_RECORD",
+                "enabled": true,
+                "domain": "host.example.com",
+                "ipv4Address": "192.0.2.10",
+                "ttlSeconds": 300
+            })
+        );
+        assert_eq!(
+            dns_policy_creation_body(
+                ACTION_CREATE_CNAME_RECORD,
+                &json!({"domain": "alias.example.com", "targetDomain": "host.example.com", "ttl": 600})
+            )
+            .expect("CNAME record"),
+            json!({
+                "type": "CNAME_RECORD",
+                "enabled": true,
+                "domain": "alias.example.com",
+                "targetDomain": "host.example.com",
+                "ttlSeconds": 600
+            })
+        );
+        assert_eq!(
+            dns_policy_creation_body(
+                ACTION_CREATE_FORWARD_DOMAIN,
+                &json!({"domain": "internal.example", "forwardIp": "192.0.2.53"})
+            )
+            .expect("forward domain"),
+            json!({
+                "type": "FORWARD_DOMAIN",
+                "enabled": true,
+                "domain": "internal.example",
+                "ipAddress": "192.0.2.53"
+            })
+        );
+        assert_eq!(
+            firewall_zone_creation_body(
+                ACTION_CREATE_FIREWALL_ZONE,
+                &json!({"name": "Devices", "networkIds": "network-a, network-b, network-a"})
+            )
+            .expect("zone"),
+            json!({"name": "Devices", "networkIds": ["network-a", "network-b"]})
+        );
+    }
+
+    #[test]
+    fn tier_two_acl_and_dns_shapes_map_to_browse_rows() {
+        let acl: Page<AclRuleOverview> = serde_json::from_value(json!({
+            "totalCount": 2,
+            "data": [
+                {"id":"acl-2","name":"Block cameras","type":"MAC","action":"BLOCK","enabled":false},
+                {"id":"acl-1","name":"Allow DNS","type":"IPV4","action":"ALLOW","enabled":true}
+            ]
+        }))
+        .expect("ACL page");
+        let acl_rows = acl_rule_resource_items(acl.data);
+        assert_eq!(acl_rows[0].fields.get("type"), Some(&json!("IPv4")));
+        assert_eq!(acl_rows[1].fields.get("enabled"), Some(&json!(false)));
+
+        let dns: Page<DnsPolicyOverview> = serde_json::from_value(json!({
+            "totalCount": 4,
+            "data": [
+                {"id":"dns-a","type":"A_RECORD","domain":"a.example","ipv4Address":"192.0.2.10","ttlSeconds":300,"enabled":true,"metadata":{}},
+                {"id":"dns-aaaa","type":"AAAA_RECORD","domain":"aaaa.example","ipv6Address":"2001:db8::10","ttlSeconds":300,"enabled":true,"metadata":{}},
+                {"id":"dns-cname","type":"CNAME_RECORD","domain":"cname.example","targetDomain":"a.example","ttlSeconds":300,"enabled":true,"metadata":{}},
+                {"id":"dns-txt","type":"TXT_RECORD","domain":"txt.example","text":"value","enabled":false,"metadata":{}}
+            ]
+        }))
+        .expect("DNS page");
+        let dns_rows = dns_policy_resource_items(dns.data);
+        assert_eq!(dns_rows[0].fields.get("target"), Some(&json!("192.0.2.10")));
+        assert_eq!(
+            dns_rows[1].fields.get("target"),
+            Some(&json!("2001:db8::10"))
+        );
+        assert_eq!(dns_rows[2].fields.get("target"), Some(&json!("a.example")));
+        assert_eq!(dns_rows[3].fields.get("target"), Some(&json!("—")));
+    }
+
+    #[test]
+    fn tier_two_zone_policy_and_network_shapes_resolve_names() {
+        let networks: Page<NetworkOverview> = serde_json::from_value(json!({
+            "totalCount": 2,
+            "data": [
+                {"id":"network-a","name":"Trusted","vlanId":10,"management":"GATEWAY","enabled":true,"default":false,"metadata":{}},
+                {"id":"network-b","name":"IoT","vlanId":20,"management":"SWITCH","enabled":false,"default":false,"metadata":{}}
+            ]
+        }))
+        .expect("network page");
+        let zones: Page<FirewallZoneOverview> = serde_json::from_value(json!({
+            "totalCount": 2,
+            "data": [
+                {"id":"zone-a","name":"Internal","networkIds":["network-a", "unknown-network"],"metadata":{"origin":"USER_DEFINED"}},
+                {"id":"zone-b","name":"External","networkIds":[],"metadata":{"origin":"SYSTEM_DEFINED"}}
+            ]
+        }))
+        .expect("zone page");
+        let zone_rows = firewall_zone_resource_items(zones.data, &networks.data);
+        assert_eq!(zone_rows[0].fields.get("systemDerived"), Some(&json!(true)));
+        assert_eq!(
+            zone_rows[1].fields.get("networks"),
+            Some(&json!("Trusted, unknown-network"))
+        );
+
+        let policies: Page<FirewallPolicyOverview> = serde_json::from_value(json!({
+            "totalCount": 1,
+            "data": [{
+                "id":"policy-a","name":"Allow outbound","action":{"type":"ALLOW"},
+                "source":{"zoneId":"zone-a"},"destination":{"zoneId":"zone-b"},
+                "enabled":true,"loggingEnabled":false,"index":0,"ipProtocolScope":{},"metadata":{}
+            }]
+        }))
+        .expect("policy page");
+        let zones_for_policy: Page<FirewallZoneOverview> = serde_json::from_value(json!({
+            "totalCount": 2,
+            "data": [
+                {"id":"zone-a","name":"Internal","networkIds":[],"metadata":{"origin":"USER_DEFINED"}},
+                {"id":"zone-b","name":"External","networkIds":[],"metadata":{"origin":"SYSTEM_DEFINED"}}
+            ]
+        }))
+        .expect("zone page");
+        let policy_rows = firewall_policy_resource_items(policies.data, &zones_for_policy.data);
+        assert_eq!(policy_rows[0].fields.get("action"), Some(&json!("ALLOW")));
+        assert_eq!(
+            policy_rows[0].fields.get("sourceZone"),
+            Some(&json!("Internal"))
+        );
+        assert_eq!(
+            policy_rows[0].fields.get("destinationZone"),
+            Some(&json!("External"))
+        );
+
+        let network_rows = network_resource_items(networks.data);
+        assert_eq!(network_rows[0].fields.get("vlanId"), Some(&json!(20)));
+        assert_eq!(
+            network_rows[1].fields.get("management"),
+            Some(&json!("GATEWAY"))
+        );
+    }
+
+    #[test]
+    fn wlan_toggle_preserves_every_mutable_field_and_rows_show_detail_only_values() {
+        let details: WifiBroadcastDetails = serde_json::from_value(json!({
+            "id":"wifi-a","metadata":{"origin":"USER_DEFINED"},"type":"STANDARD",
+            "name":"Guest WiFi","enabled":true,"hideName":true,
+            "securityConfiguration":{"type":"WPA2_PERSONAL","passphrase":"not-a-real-secret"},
+            "broadcastingFrequenciesGHz":[2.4,5],"clientIsolationEnabled":true,
+            "uapsdEnabled":false
+        }))
+        .expect("WLAN details");
+        let body = wifi_broadcast_toggle_body(ACTION_TOGGLE_WLAN_ENABLED, details.clone())
+            .expect("toggle body");
+        assert_eq!(body.get("enabled"), Some(&json!(false)));
+        assert_eq!(body.get("name"), Some(&json!("Guest WiFi")));
+        assert_eq!(body.get("clientIsolationEnabled"), Some(&json!(true)));
+        assert_eq!(body.get("uapsdEnabled"), Some(&json!(false)));
+        assert!(body.get("id").is_none());
+        assert!(body.get("metadata").is_none());
+
+        let rows = wifi_broadcast_resource_items(vec![details]);
+        assert_eq!(rows[0].fields.get("hidden"), Some(&json!(true)));
+        assert_eq!(
+            rows[0].fields.get("securityType"),
+            Some(&json!("WPA2_PERSONAL"))
+        );
+        assert_eq!(
+            rows[0].fields.get("frequencies"),
+            Some(&json!("2.4 GHz, 5 GHz"))
         );
     }
 }

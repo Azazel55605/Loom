@@ -33,7 +33,7 @@ dependencies are fetched by Cargo on first build; no separate step.
 | connector-docker (library) | `pnpm build:connector-docker` | Compiled rlib inside `target/release/`. Like Core, a library: it is linked into web-backend, which is what decides that this build has a Docker connector in it. |
 | connector-pihole | `pnpm build:connector-pihole` | Compiled rlib inside `target/release/`. Pi-hole v6 session-authenticated REST client with host metrics, domain-list resources, top clients, setup guidance, and capability checks. |
 | connector-truenas | `pnpm build:connector-truenas` | Compiled rlib inside `target/release/`. TLS-only JSON-RPC transport plus the minimal host-level TrueNAS connector. |
-| connector-unifi-network | `pnpm build:connector-unifi-network` | Compiled rlib inside `target/release/`. Official local UniFi Network Integration API client with site/device metrics, restart, ports/PoE, guest clients, and hotspot vouchers. |
+| connector-unifi-network | `pnpm build:connector-unifi-network` | Compiled rlib inside `target/release/`. Official local UniFi Network Integration API client with site/device metrics, actions, and browse-first network configuration resources. |
 | web-backend | `pnpm build:web-backend` | `target/release/loom-web-backend` binary |
 | web-frontend | `pnpm build:web-frontend` | `apps/web-frontend/dist/` static site |
 | desktop | `pnpm build:desktop` | Platform installers in `apps/desktop/src-tauri/target/release/bundle/` |

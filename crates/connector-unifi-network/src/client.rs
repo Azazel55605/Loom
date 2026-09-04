@@ -155,6 +155,64 @@ impl UniFiNetworkClient {
         Ok(())
     }
 
+    pub(crate) async fn patch_json(
+        &self,
+        path: &str,
+        body: Value,
+    ) -> Result<(), UniFiNetworkError> {
+        let _permit = self.call_permit().await?;
+        let endpoint = self.endpoint(path);
+        let response = self
+            .http
+            .patch(&endpoint)
+            .header(API_KEY_HEADER, self.api_key.as_ref())
+            .header(reqwest::header::ACCEPT, "application/json")
+            .json(&body)
+            .send()
+            .await
+            .map_err(connection_error)?;
+        let status = response.status();
+        if matches!(status, StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN) {
+            return Err(UniFiNetworkError::AuthFailed(
+                response_message(response).await,
+            ));
+        }
+        if !status.is_success() {
+            return Err(UniFiNetworkError::ApiError {
+                status: status.as_u16(),
+                message: response_message(response).await,
+            });
+        }
+        Ok(())
+    }
+
+    pub(crate) async fn put_json(&self, path: &str, body: Value) -> Result<(), UniFiNetworkError> {
+        let _permit = self.call_permit().await?;
+        let endpoint = self.endpoint(path);
+        let response = self
+            .http
+            .put(&endpoint)
+            .header(API_KEY_HEADER, self.api_key.as_ref())
+            .header(reqwest::header::ACCEPT, "application/json")
+            .json(&body)
+            .send()
+            .await
+            .map_err(connection_error)?;
+        let status = response.status();
+        if matches!(status, StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN) {
+            return Err(UniFiNetworkError::AuthFailed(
+                response_message(response).await,
+            ));
+        }
+        if !status.is_success() {
+            return Err(UniFiNetworkError::ApiError {
+                status: status.as_u16(),
+                message: response_message(response).await,
+            });
+        }
+        Ok(())
+    }
+
     pub(crate) async fn delete(&self, path: &str) -> Result<(), UniFiNetworkError> {
         let _permit = self.call_permit().await?;
         let endpoint = self.endpoint(path);

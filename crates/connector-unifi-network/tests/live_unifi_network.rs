@@ -7,16 +7,23 @@
 //! `LOOM_TEST_UNIFI_NETWORK_EXPECTED_DEVICE_COUNT` to make the pagination
 //! regression check assert the controller's known inventory size.
 
-use std::collections::HashSet;
+use std::{
+    collections::HashSet,
+    time::{SystemTime, UNIX_EPOCH},
+};
 
 use loom_connector_unifi_network::{
-    UniFiNetworkConnector, ACTION_ADOPT, ACTION_AUTHORIZE_GUEST, ACTION_CREATE_VOUCHER,
-    ACTION_CYCLE_POE, ACTION_RESTART, ACTION_REVOKE_VOUCHER, ACTION_UNAUTHORIZE_GUEST,
-    DATA_POINT_CLIENT_COUNT, DATA_POINT_DEVICE_COUNT, DATA_POINT_LAST_HEARTBEAT_AT,
-    DATA_POINT_LOAD_AVERAGE_15M, DATA_POINT_LOAD_AVERAGE_1M, DATA_POINT_LOAD_AVERAGE_5M,
-    DATA_POINT_MODEL, DATA_POINT_ONLINE_DEVICE_COUNT, DATA_POINT_RADIO_TX_RETRY_PERCENT,
-    DATA_POINT_STATE, DATA_POINT_UPTIME, DATA_POINT_WAN_COUNT, RESOURCE_KIND_CLIENTS,
+    UniFiNetworkConnector, ACTION_ADOPT, ACTION_AUTHORIZE_GUEST, ACTION_CREATE_A_RECORD,
+    ACTION_CREATE_VOUCHER, ACTION_CYCLE_POE, ACTION_DELETE_DNS_POLICY, ACTION_RESTART,
+    ACTION_REVOKE_VOUCHER, ACTION_TOGGLE_FIREWALL_LOGGING, ACTION_TOGGLE_WLAN_ENABLED,
+    ACTION_UNAUTHORIZE_GUEST, DATA_POINT_CLIENT_COUNT, DATA_POINT_DEVICE_COUNT,
+    DATA_POINT_LAST_HEARTBEAT_AT, DATA_POINT_LOAD_AVERAGE_15M, DATA_POINT_LOAD_AVERAGE_1M,
+    DATA_POINT_LOAD_AVERAGE_5M, DATA_POINT_MODEL, DATA_POINT_ONLINE_DEVICE_COUNT,
+    DATA_POINT_RADIO_TX_RETRY_PERCENT, DATA_POINT_STATE, DATA_POINT_UPTIME, DATA_POINT_WAN_COUNT,
+    RESOURCE_KIND_ACL_RULES, RESOURCE_KIND_CLIENTS, RESOURCE_KIND_DNS_POLICIES,
+    RESOURCE_KIND_FIREWALL_POLICIES, RESOURCE_KIND_FIREWALL_ZONES, RESOURCE_KIND_NETWORKS,
     RESOURCE_KIND_PENDING_DEVICES, RESOURCE_KIND_PORTS, RESOURCE_KIND_VOUCHERS, RESOURCE_KIND_WANS,
+    RESOURCE_KIND_WLAN_BROADCASTS,
 };
 use loom_core::connector::{Connector, HealthState};
 use serde_json::{json, Value};
@@ -165,6 +172,71 @@ async fn a_real_unifi_console_reports_site_counts_and_obeys_the_contract() {
             && row.fields.get("state").is_some_and(Value::is_string)
             && row.fields.contains_key("firmwareVersion")
     }));
+    let acl_rules = connector
+        .list_resource_items(RESOURCE_KIND_ACL_RULES, None)
+        .await
+        .expect("the live site should list ACL rules");
+    assert!(acl_rules.iter().all(|row| {
+        row.fields.get("name").is_some_and(Value::is_string)
+            && row.fields.get("type").is_some_and(Value::is_string)
+            && row.fields.get("action").is_some_and(Value::is_string)
+            && row.fields.get("enabled").is_some_and(Value::is_boolean)
+    }));
+    let dns_policies = connector
+        .list_resource_items(RESOURCE_KIND_DNS_POLICIES, None)
+        .await
+        .expect("the live site should list DNS policies");
+    assert!(dns_policies.iter().all(|row| {
+        row.fields.get("type").is_some_and(Value::is_string)
+            && row.fields.get("domain").is_some_and(Value::is_string)
+            && row.fields.get("target").is_some_and(Value::is_string)
+            && row.fields.get("enabled").is_some_and(Value::is_boolean)
+    }));
+    let firewall_zones = connector
+        .list_resource_items(RESOURCE_KIND_FIREWALL_ZONES, None)
+        .await
+        .expect("the live site should list firewall zones");
+    assert!(firewall_zones.iter().all(|row| {
+        row.fields.get("name").is_some_and(Value::is_string)
+            && row.fields.get("networks").is_some_and(Value::is_string)
+            && row
+                .fields
+                .get("systemDerived")
+                .is_some_and(Value::is_boolean)
+    }));
+    let firewall_policies = connector
+        .list_resource_items(RESOURCE_KIND_FIREWALL_POLICIES, None)
+        .await
+        .expect("the live site should list firewall policies");
+    assert!(firewall_policies.iter().all(|row| {
+        ["name", "action", "sourceZone", "destinationZone"]
+            .into_iter()
+            .all(|key| row.fields.get(key).is_some_and(Value::is_string))
+            && ["enabled", "loggingEnabled"]
+                .into_iter()
+                .all(|key| row.fields.get(key).is_some_and(Value::is_boolean))
+    }));
+    let networks = connector
+        .list_resource_items(RESOURCE_KIND_NETWORKS, None)
+        .await
+        .expect("the live site should list networks");
+    assert!(networks.iter().all(|row| {
+        row.fields.get("name").is_some_and(Value::is_string)
+            && row.fields.get("vlanId").is_some_and(Value::is_number)
+            && row.fields.get("management").is_some_and(Value::is_string)
+            && row.fields.get("enabled").is_some_and(Value::is_boolean)
+    }));
+    let wlan_broadcasts = connector
+        .list_resource_items(RESOURCE_KIND_WLAN_BROADCASTS, None)
+        .await
+        .expect("the live site should list WLAN broadcasts and their full configurations");
+    assert!(wlan_broadcasts.iter().all(|row| {
+        row.fields.get("name").is_some_and(Value::is_string)
+            && row.fields.get("enabled").is_some_and(Value::is_boolean)
+            && row.fields.get("hidden").is_some_and(Value::is_boolean)
+            && row.fields.get("securityType").is_some_and(Value::is_string)
+            && row.fields.get("frequencies").is_some_and(Value::is_string)
+    }));
     let mut port_count = 0usize;
     for target in &targets {
         let ports = connector
@@ -183,12 +255,18 @@ async fn a_real_unifi_console_reports_site_counts_and_obeys_the_contract() {
     contract_targets.extend(targets.iter().map(|target| Some(target.id.clone())));
     loom_connector_test_kit::assert_connector_contract(&connector, &contract_targets).await;
     eprintln!(
-        "{test_name}: {:#}; {} client rows, {} voucher rows, {} WAN rows, {} pending-device rows, {} port rows",
+        "{test_name}: {:#}; {} client rows, {} voucher rows, {} WAN rows, {} pending-device rows, {} ACL rows, {} DNS rows, {} zone rows, {} policy rows, {} network rows, {} WLAN rows, {} port rows",
         status.details,
         clients.len(),
         vouchers.len(),
         wans.len(),
         pending_devices.len(),
+        acl_rules.len(),
+        dns_policies.len(),
+        firewall_zones.len(),
+        firewall_policies.len(),
+        networks.len(),
+        wlan_broadcasts.len(),
         port_count
     );
 }
@@ -344,6 +422,118 @@ async fn a_real_unifi_voucher_can_be_created_and_revoked_with_explicit_opt_in() 
         .await
         .expect("list vouchers after revocation");
     assert!(final_rows.iter().all(|voucher| voucher.id != created_id));
+}
+
+#[tokio::test]
+#[ignore = "creates and deletes a real DNS A record; run manually with explicit acknowledgement"]
+async fn a_real_unifi_dns_record_can_be_created_and_deleted_with_explicit_opt_in() {
+    let test_name = "a_real_unifi_dns_record_can_be_created_and_deleted_with_explicit_opt_in";
+    assert_eq!(
+        std::env::var("LOOM_TEST_UNIFI_NETWORK_ALLOW_DNS_WRITE").as_deref(),
+        Ok("1"),
+        "set LOOM_TEST_UNIFI_NETWORK_ALLOW_DNS_WRITE=1 only when a temporary local DNS record is acceptable"
+    );
+    let connector = live_connector(test_name)
+        .await
+        .expect("live UniFi Network variables are required for the manual DNS test");
+    let before = connector
+        .list_resource_items(RESOURCE_KIND_DNS_POLICIES, None)
+        .await
+        .expect("list DNS policies before creation");
+    let before_ids = before
+        .iter()
+        .map(|record| record.id.as_str())
+        .collect::<HashSet<_>>();
+    let suffix = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("system clock is after the Unix epoch")
+        .as_secs();
+    let domain = format!("loom-test-{suffix}.invalid");
+
+    connector
+        .execute_action(
+            ACTION_CREATE_A_RECORD,
+            None,
+            json!({"domain": domain, "ipv4Address": "192.0.2.10", "ttl": 60}),
+        )
+        .await
+        .expect("create temporary DNS A record");
+    let after = connector
+        .list_resource_items(RESOURCE_KIND_DNS_POLICIES, None)
+        .await
+        .expect("list DNS policies after creation");
+    let created = after
+        .iter()
+        .find(|record| !before_ids.contains(record.id.as_str()))
+        .expect("new DNS record should appear");
+    let created_id = created.id.clone();
+
+    connector
+        .execute_action(
+            ACTION_DELETE_DNS_POLICY,
+            None,
+            json!({"resourceId": created_id}),
+        )
+        .await
+        .expect("delete temporary DNS A record");
+    let final_rows = connector
+        .list_resource_items(RESOURCE_KIND_DNS_POLICIES, None)
+        .await
+        .expect("list DNS policies after deletion");
+    assert!(final_rows.iter().all(|record| record.id != created_id));
+}
+
+#[tokio::test]
+#[ignore = "toggles real firewall logging and restores it; run manually with an explicit policy"]
+async fn a_real_firewall_policy_logging_can_be_toggled_and_restored_with_explicit_opt_in() {
+    let test_name =
+        "a_real_firewall_policy_logging_can_be_toggled_and_restored_with_explicit_opt_in";
+    assert_eq!(
+        std::env::var("LOOM_TEST_UNIFI_NETWORK_ALLOW_FIREWALL_LOGGING_TOGGLE").as_deref(),
+        Ok("1"),
+        "set LOOM_TEST_UNIFI_NETWORK_ALLOW_FIREWALL_LOGGING_TOGGLE=1 only when two real policy updates are acceptable"
+    );
+    let policy_id = std::env::var("LOOM_TEST_UNIFI_NETWORK_FIREWALL_POLICY")
+        .expect("set LOOM_TEST_UNIFI_NETWORK_FIREWALL_POLICY to a disposable policy UUID");
+    let connector = live_connector(test_name)
+        .await
+        .expect("live UniFi Network variables are required for the manual firewall test");
+    for _ in 0..2 {
+        connector
+            .execute_action(
+                ACTION_TOGGLE_FIREWALL_LOGGING,
+                None,
+                json!({"resourceId": &policy_id}),
+            )
+            .await
+            .expect("toggle firewall logging");
+    }
+}
+
+#[tokio::test]
+#[ignore = "toggles a real WLAN and restores it; clients can disconnect, so run manually"]
+async fn a_real_wlan_can_be_toggled_and_restored_with_explicit_opt_in() {
+    let test_name = "a_real_wlan_can_be_toggled_and_restored_with_explicit_opt_in";
+    assert_eq!(
+        std::env::var("LOOM_TEST_UNIFI_NETWORK_ALLOW_WLAN_TOGGLE").as_deref(),
+        Ok("1"),
+        "set LOOM_TEST_UNIFI_NETWORK_ALLOW_WLAN_TOGGLE=1 only when disconnecting every client on the selected WLAN is safe"
+    );
+    let wlan_id = std::env::var("LOOM_TEST_UNIFI_NETWORK_WLAN")
+        .expect("set LOOM_TEST_UNIFI_NETWORK_WLAN to a disposable WLAN UUID");
+    let connector = live_connector(test_name)
+        .await
+        .expect("live UniFi Network variables are required for the manual WLAN test");
+    for _ in 0..2 {
+        connector
+            .execute_action(
+                ACTION_TOGGLE_WLAN_ENABLED,
+                None,
+                json!({"resourceId": &wlan_id}),
+            )
+            .await
+            .expect("toggle WLAN enabled state");
+    }
 }
 
 #[tokio::test]

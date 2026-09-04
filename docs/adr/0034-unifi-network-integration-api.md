@@ -63,6 +63,19 @@ document and refreshed against the Network 10.4.57 document at
   a site. Adoption uses `POST /sites/{siteId}/devices` with `macAddress` and
   required `ignoreDeviceLimit`; Loom deliberately sends `false` so adoption
   does not bypass the configured limit.
+- The 10.4.57 browse-first configuration collections are ACL rules, DNS
+  policies, firewall zones/policies, networks, and WLAN broadcasts. Firewall
+  policy PATCH accepts only optional `loggingEnabled`. Network deletion has an
+  optional `force` flag, which Loom pins to `false`.
+- WLAN overviews do not expose `hideName`; that value exists only on the detail
+  response. Toggling therefore reads the full detail, removes response-only
+  `id` and `metadata`, flips `enabled`, and PUTs the remaining complete mutable
+  configuration. The client-wide ten-call semaphore also bounds this detail
+  fan-out.
+- DNS creation stays limited to the three compact official variants: A records
+  (`ipv4Address`, `ttlSeconds`), CNAME records (`targetDomain`, `ttlSeconds`),
+  and forward domains (`ipAddress`). AAAA, MX, SRV, and TXT remain visible and
+  deletable but are not offered misleadingly through a conditional mega-form.
 - Local consoles may present self-signed certificates. Loom's
   `allowInsecureCert` option relaxes certificate verification only for that
   configured connector; the origin remains HTTPS and the API key is never sent
@@ -86,6 +99,12 @@ presentation uses generic Lucide category icons only; no product photography is
 vendored because no stable licensing-clear source was established. An
 unrecognised or absent feature classification deliberately falls back to a
 generic network-device icon.
+
+Keep broad network configuration browse-first. Expose only deletion, the
+firewall logging PATCH, WLAN enabled-state read-modify-write, firewall-zone
+creation, and the three simple DNS creation variants. The shared params form
+does not support arrays, so `createZone` accepts comma-separated network IDs at
+the connector boundary and converts them to the API's required array.
 
 ## Consequences
 

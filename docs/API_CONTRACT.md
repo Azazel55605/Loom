@@ -1087,6 +1087,12 @@ schema.
 | `vouchers` | Host only | `code`, `expiresAt`, `usesRemaining`, `createdAt` | Row: `revokeVoucher`; kind: `createVoucher` | `GET`/`POST /sites/{siteId}/hotspot/vouchers` and `DELETE /sites/{siteId}/hotspot/vouchers/{voucherId}`. Remaining uses are the optional authorized-guest limit minus the authorized count; an unlimited voucher reports no numeric remainder. |
 | `wans` | Host only | `name`, `id` | None | Read-only paginated `GET /sites/{siteId}/wans`; the 10.4.57 response contains exactly the WAN identifier and name. |
 | `pendingDevices` | Host only | `model`, `macAddress`, `state`, `firmwareVersion` | Row: `adopt` | Paginated `GET /pending-devices`; adoption posts the row's MAC to `/sites/{siteId}/devices` with `ignoreDeviceLimit: false`. The refreshed adopted-device collection becomes authoritative after adoption. |
+| `aclRules` | Host only | `name`, `type`, `action`, `enabled` | Row: `deleteAclRule` | Paginated `GET /sites/{siteId}/acl-rules`; deletion uses the matching rule route. IPv4 and MAC rules are browsable, while subtype-specific creation remains out of scope. |
+| `dnsPolicies` | Host only | `type`, `domain`, `target`, `enabled` | Row: `deleteDnsPolicy`; kind: `createARecord`, `createCnameRecord`, `createForwardDomain` | Paginated `GET /sites/{siteId}/dns/policies`. A/AAAA addresses, CNAME targets, and forward-domain server addresses become the normalized target; record types without one obvious target show an em dash. AAAA/MX/SRV/TXT creation remains deliberately unavailable. |
+| `firewallZones` | Host only | `name`, `networks`, `systemDerived` | Row: `deleteFirewallZone`; kind: `createZone` | Paginated `GET /sites/{siteId}/firewall/zones`, with network IDs resolved against the networks collection when possible. The params UI supplies zone network IDs as a comma-separated string, which the connector converts to the API's required array. Protected system-zone deletion errors come from UniFi. |
+| `firewallPolicies` | Host only | `name`, `action`, `sourceZone`, `destinationZone`, `enabled`, `loggingEnabled` | Row: `deleteFirewallPolicy`, `toggleLogging` | Paginated `GET /sites/{siteId}/firewall/policies`. Zone IDs are resolved to names. Logging is the API's sole partial policy update and PATCHes only `{ "loggingEnabled": bool }`; full policy creation is deliberately unavailable. |
+| `networks` | Host only | `name`, `vlanId`, `management`, `enabled` | Row: disruptive `deleteNetwork` | Paginated `GET /sites/{siteId}/networks`. Deletion explicitly uses `force=false`, allowing UniFi to reject referenced networks instead of silently disrupting their consumers. |
+| `wlanBroadcasts` | Host only | `name`, `enabled`, `hidden`, `securityType`, `frequencies` | Row: disruptive `toggleEnabled` | The paginated WLAN overview omits hidden state, so Loom fetches each `/wifi/broadcasts/{id}` detail under the connector's ten-call concurrency cap. Toggle removes response-only `id`/`metadata`, flips only `enabled`, and PUTs every other mutable configuration value back unchanged. |
 
 `createVoucher` creates one voucher and requires only `name` and
 `timeLimitMinutes`; `authorizedGuestLimit`, `dataUsageLimitMBytes`,
@@ -1094,6 +1100,12 @@ schema.
 optional limit fields supported by the API. The official client action enum
 contains guest authorize/unauthorize only—there is no client block/unblock
 operation, so Loom exposes none.
+
+Tier 2 remains browse-first: ACL, firewall-policy, network, and WLAN creation
+editors are intentionally absent because their discriminated configuration
+surfaces cannot be represented honestly by a small generic form. DNS exposes
+only the three simple creation shapes confirmed above. Network deletion and
+WLAN enable/disable are marked disruptive; both can disconnect real clients.
 
 The UniFi Network setup guide has one instruction-only **Connect via API key**
 variant. It directs administrators running Network 9.1.105 or newer to
