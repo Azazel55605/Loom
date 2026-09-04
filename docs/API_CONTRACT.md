@@ -1070,8 +1070,14 @@ instead of being forced into one exclusive type. Presentation still has one
 deterministic primary icon (`gateway` -> `lucide:router`, then `accessPoint` ->
 `lucide:wifi`, then `switching` -> `lucide:ethernet-port`); an absent or
 unrecognised feature set uses `lucide:network` rather than guessing from a
-model name. When two devices would otherwise have the same label, only those
-colliding labels receive the last two MAC octets as a suffix.
+model name. One narrow compatibility exception covers unambiguous integrated
+gateway families because Network can report a UCG as only `switching` and the
+published detail-feature schema cannot express `gateway`: UCG, Dream Machine,
+Dream Router, and UniFi Express model identifiers add their known gateway
+capability, while UniFi Express also adds its built-in switching and access
+point capabilities. Ordinary AP and switch models are never guessed. When two
+devices would otherwise have the same label, only those colliding labels
+receive the last two MAC octets as a suffix.
 
 Device targets expose a parameterless, disruptive `restart` action. It invokes
 `POST /sites/{siteId}/devices/{deviceId}/actions` with

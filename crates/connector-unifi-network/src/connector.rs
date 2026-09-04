@@ -590,7 +590,7 @@ impl loom_core::connector::Connector for UniFiNetworkConnector {
                             );
                         }
                     }
-                    if device_has_feature(&reading.device, "accessPoint") {
+                    if device_has_capability(&reading.device, "accessPoint") {
                         if let Some(statistics) = &reading.statistics {
                             set_optional_number(
                                 &mut details,
@@ -1183,7 +1183,7 @@ impl loom_core::connector::Connector for UniFiNetworkConnector {
                     });
                 if device
                     .as_ref()
-                    .is_some_and(|device| device_has_feature(device, "accessPoint"))
+                    .is_some_and(|device| device_has_capability(device, "accessPoint"))
                 {
                     bindings.extend([
                         WidgetBinding::display(
@@ -1198,7 +1198,8 @@ impl loom_core::connector::Connector for UniFiNetworkConnector {
                     ]);
                 }
                 if device.as_ref().is_some_and(|device| {
-                    device_has_feature(device, "gateway") || device_has_feature(device, "switching")
+                    device_has_capability(device, "gateway")
+                        || device_has_capability(device, "switching")
                 }) {
                     bindings.extend([
                         WidgetBinding::display(
@@ -1867,19 +1868,49 @@ fn device_disambiguator(device: &DeviceOverview) -> String {
 }
 
 fn device_type(device: &DeviceOverview) -> DeviceType {
-    if device_has_feature(device, "gateway") {
+    if device_has_capability(device, "gateway") {
         DeviceType::Gateway
-    } else if device_has_feature(device, "accessPoint") {
+    } else if device_has_capability(device, "accessPoint") {
         DeviceType::AccessPoint
-    } else if device_has_feature(device, "switching") {
+    } else if device_has_capability(device, "switching") {
         DeviceType::Switch
     } else {
         DeviceType::NetworkDevice
     }
 }
 
-fn device_has_feature(device: &DeviceOverview, feature: &str) -> bool {
-    device.features.iter().any(|candidate| candidate == feature)
+fn device_has_capability(device: &DeviceOverview, capability: &str) -> bool {
+    device
+        .features
+        .iter()
+        .any(|candidate| candidate == capability)
+        || model_capability_override(device, capability)
+}
+
+/// Network's overview sometimes labels integrated consoles only as switching,
+/// while its published detail schema cannot express `gateway` at all. Keep the
+/// fallback deliberately limited to unambiguous integrated-gateway families;
+/// ordinary AP/switch model names are never classified heuristically.
+fn model_capability_override(device: &DeviceOverview, capability: &str) -> bool {
+    let model = device
+        .model
+        .as_deref()
+        .unwrap_or_default()
+        .chars()
+        .filter(char::is_ascii_alphanumeric)
+        .collect::<String>()
+        .to_ascii_lowercase();
+    let is_cloud_gateway = model.starts_with("ucg");
+    let is_dream_gateway = model.starts_with("udm") || model.starts_with("udr");
+    let is_express = matches!(
+        model.as_str(),
+        "ux" | "ux7" | "unifiexpress" | "unifiexpress7"
+    );
+    match capability {
+        "gateway" => is_cloud_gateway || is_dream_gateway || is_express,
+        "switching" | "accessPoint" => is_express,
+        _ => false,
+    }
 }
 
 fn device_icon(device: &DeviceOverview) -> &'static str {
@@ -1953,7 +1984,7 @@ fn device_data_points(device: &DeviceOverview) -> Vec<DataPointDescriptor> {
         )
         .for_target(&target_id),
     ];
-    if device_has_feature(device, "accessPoint") {
+    if device_has_capability(device, "accessPoint") {
         points.extend([
             DataPointDescriptor::new(
                 DATA_POINT_CONNECTED_CLIENT_COUNT,
@@ -3616,7 +3647,7 @@ mod tests {
     }
 
     #[test]
-    fn device_type_uses_official_features_and_never_guesses_from_model() {
+    fn device_type_uses_features_with_narrow_integrated_gateway_fallbacks() {
         let device = |model: &str, features: &[&str]| DeviceOverview {
             id: model.to_owned(),
             name: None,
@@ -3641,6 +3672,15 @@ mod tests {
             device_type(&device("UDM", &["gateway", "switching"])),
             DeviceType::Gateway
         );
+        assert_eq!(
+            device_type(&device("UCG Max", &["switching"])),
+            DeviceType::Gateway
+        );
+        let express = device("UniFi Express 7", &[]);
+        assert_eq!(device_type(&express), DeviceType::Gateway);
+        assert!(device_has_capability(&express, "gateway"));
+        assert!(device_has_capability(&express, "switching"));
+        assert!(device_has_capability(&express, "accessPoint"));
         assert_eq!(device_type(&device("U7", &[])), DeviceType::NetworkDevice);
     }
 
@@ -3671,9 +3711,9 @@ mod tests {
 
         merge_device_detail_metadata(&mut device, &details);
 
-        assert!(device_has_feature(&device, "gateway"));
-        assert!(device_has_feature(&device, "switching"));
-        assert!(device_has_feature(&device, "accessPoint"));
+        assert!(device_has_capability(&device, "gateway"));
+        assert!(device_has_capability(&device, "switching"));
+        assert!(device_has_capability(&device, "accessPoint"));
         assert_eq!(device_type(&device), DeviceType::Gateway);
         assert_eq!(device_icon(&device), "lucide:router");
         assert!(device_data_points(&device)

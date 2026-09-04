@@ -55,7 +55,14 @@ document and refreshed against the Network 10.4.57 document at
   switch, and access point simultaneously. Loom merges the overview array with
   the detail response's feature map, keeps one physical sub-target, composes
   widgets and resources from every capability, and uses gateway then access
-  point then switch only as presentation-icon precedence. Device detail exposes radio standard,
+  point then switch only as presentation-icon precedence. The published detail
+  feature schema itself defines only `switching` and `accessPoint`; it cannot
+  repair an overview that reports an integrated gateway as switching-only.
+  Loom therefore has a deliberately narrow model-identifier compatibility map
+  for the unambiguous UCG, Dream Machine, Dream Router, and UniFi Express
+  gateway families. UniFi Express additionally receives its known built-in AP
+  and switching capabilities; ordinary AP/switch models are not guessed.
+  Device detail exposes radio standard,
   frequency, channel, and channel width. Although the 9.4.17 schema describes
   `frequencyGHz` as a string, real consoles also return it as a JSON number
   (for example `2.4`), so the client accepts both representations. Latest
