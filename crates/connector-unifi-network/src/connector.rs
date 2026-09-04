@@ -3,10 +3,11 @@ use std::sync::Mutex;
 use async_trait::async_trait;
 use futures_util::future::join_all;
 use loom_core::connector::{
-    details::set_detail, ActionResult, ActionWidgetType, ApplicableTarget, ColumnDescriptor,
-    ColumnValueType, ConnectorAction, ConnectorError, ConnectorMetadata, ConnectorStatus,
-    DataPointDescriptor, DataPointValueType, DisplayField, DisplayWidgetType, HealthState,
-    NetworkTarget, ResourceItem, ResourceKindDescriptor, SubTarget, WidgetBinding, WidgetLayout,
+    details::set_detail, ActionResult, ActionWidgetType, ApplicableTarget, CapabilityStatus,
+    ColumnDescriptor, ColumnValueType, ConnectionTestResult, ConnectorAction, ConnectorError,
+    ConnectorMetadata, ConnectorStatus, DataPointDescriptor, DataPointValueType, DisplayField,
+    DisplayWidgetType, HealthState, NetworkTarget, ResourceItem, ResourceKindDescriptor,
+    SetupGuide, SetupGuideVariant, SubTarget, WidgetBinding, WidgetLayout,
 };
 use serde::Deserialize;
 use serde_json::{json, Map, Value};
@@ -33,9 +34,34 @@ pub const RESOURCE_KIND_PORTS: &str = "ports";
 pub const RESOURCE_KIND_CLIENTS: &str = "clients";
 pub const RESOURCE_KIND_VOUCHERS: &str = "vouchers";
 
+pub const CAPABILITY_READ_DEVICES: &str = "readDevices";
+pub const CAPABILITY_READ_CLIENTS: &str = "readClients";
+pub const CAPABILITY_RESTART: &str = ACTION_RESTART;
+pub const CAPABILITY_CYCLE_POE: &str = ACTION_CYCLE_POE;
+pub const CAPABILITY_AUTHORIZE_GUEST: &str = ACTION_AUTHORIZE_GUEST;
+pub const CAPABILITY_CREATE_VOUCHER: &str = ACTION_CREATE_VOUCHER;
+pub const CAPABILITY_REVOKE_VOUCHER: &str = ACTION_REVOKE_VOUCHER;
+
 const PAGE_LIMIT: usize = 200;
 const VOUCHER_PAGE_LIMIT: usize = 1_000;
 const RESOURCE_ID_PARAM: &str = "resourceId";
+
+/// Setup instructions published with the connector type catalog.
+pub fn setup_guide() -> SetupGuide {
+    SetupGuide {
+        variants: vec![SetupGuideVariant {
+            id: "api-key".to_owned(),
+            label: "Connect via API key".to_owned(),
+            description: "UniFi Network 9.1.105 or newer is required for the official Integration API. In UniFi Network, open Settings > Control Plane > Integrations, create an API key, and enter it in Loom's API key field. Local consoles commonly present self-signed certificates: enable allowInsecureCert only after verifying the console when its certificate is not trusted by this host. This opt-in relaxes certificate verification for this connector instance; TLS encryption always remains enabled and Loom never sends the API key over plaintext transport."
+                .to_owned(),
+            // API-key creation is an instruction-only flow, not a deployment
+            // template. The shared guide UI omits an empty template surface.
+            template: String::new(),
+            toggles: Vec::new(),
+            capability_requirements: Vec::new(),
+        }],
+    }
+}
 
 /// One configured local UniFi Network console and selected site.
 pub struct UniFiNetworkConnector {
@@ -83,6 +109,28 @@ impl UniFiNetworkConnector {
         })
     }
 
+    /// Builds the throwaway connector used by the setup connection check.
+    /// Network I/O intentionally begins inside `test_connection`, so a failed
+    /// site-list request becomes a structured `reachable: false` result.
+    pub fn from_config_value_for_connection_test(value: Value) -> Result<Self, ConnectorError> {
+        let config = UniFiNetworkConfig::from_value(value)?;
+        let client =
+            UniFiNetworkClient::connect(&config.host, &config.api_key, config.allow_insecure_cert)
+                .map_err(connector_error)?;
+        let requested_site = config.site.clone();
+        Ok(Self {
+            config,
+            client,
+            site: SiteOverview {
+                id: String::new(),
+                internal_reference: requested_site.clone(),
+                name: requested_site,
+            },
+            known_devices: Mutex::new(Vec::new()),
+            known_clients: Mutex::new(Vec::new()),
+        })
+    }
+
     async fn read_status(&self) -> Result<PollReadings, UniFiNetworkError> {
         let devices = self.list_all_devices().await?;
         self.remember_devices(devices.clone());
@@ -118,6 +166,13 @@ impl UniFiNetworkConnector {
     }
 
     async fn list_all_devices(&self) -> Result<Vec<DeviceOverview>, UniFiNetworkError> {
+        self.list_all_devices_for_site(&self.site.id).await
+    }
+
+    async fn list_all_devices_for_site(
+        &self,
+        site_id: &str,
+    ) -> Result<Vec<DeviceOverview>, UniFiNetworkError> {
         let mut offset = 0usize;
         let mut devices = Vec::new();
         loop {
@@ -125,7 +180,7 @@ impl UniFiNetworkConnector {
                 .client
                 .get(&format!(
                     "sites/{}/devices?offset={offset}&limit={PAGE_LIMIT}",
-                    self.site.id
+                    site_id
                 ))
                 .await?;
             let total_count = page.total_count;
@@ -157,6 +212,13 @@ impl UniFiNetworkConnector {
     }
 
     async fn list_all_clients(&self) -> Result<Vec<ClientOverview>, UniFiNetworkError> {
+        self.list_all_clients_for_site(&self.site.id).await
+    }
+
+    async fn list_all_clients_for_site(
+        &self,
+        site_id: &str,
+    ) -> Result<Vec<ClientOverview>, UniFiNetworkError> {
         let mut offset = 0usize;
         let mut clients = Vec::new();
         loop {
@@ -164,7 +226,7 @@ impl UniFiNetworkConnector {
                 .client
                 .get(&format!(
                     "sites/{}/clients?offset={offset}&limit={PAGE_LIMIT}",
-                    self.site.id
+                    site_id
                 ))
                 .await?;
             let total_count = page.total_count;
@@ -272,6 +334,26 @@ impl loom_core::connector::Connector for UniFiNetworkConnector {
                     .with_target_health(String::new(), HealthState::Down))
             }
         }
+    }
+
+    async fn test_connection(&self) -> ConnectionTestResult {
+        let sites: Page<SiteOverview> =
+            match self.client.get(&format!("sites?limit={PAGE_LIMIT}")).await {
+                Ok(sites) => sites,
+                Err(error) => return unreachable_connection(error.to_string()),
+            };
+        let Some(site) = resolve_site(&sites.data, &self.config.site) else {
+            return unreachable_connection(format!(
+                "site `{}` was not returned by the console",
+                self.config.site
+            ));
+        };
+
+        let (devices, clients) = tokio::join!(
+            self.list_all_devices_for_site(&site.id),
+            self.list_all_clients_for_site(&site.id),
+        );
+        connection_test_from_reads(devices, clients)
     }
 
     async fn actions(&self) -> Vec<ConnectorAction> {
@@ -446,6 +528,10 @@ impl loom_core::connector::Connector for UniFiNetworkConnector {
 
     fn config_schema(&self) -> Value {
         crate::config_schema()
+    }
+
+    fn setup_guide(&self) -> Option<SetupGuide> {
+        Some(setup_guide())
     }
 
     fn metadata(&self) -> ConnectorMetadata {
@@ -1111,6 +1197,103 @@ fn invalid_param(action_id: &str, reason: impl Into<String>) -> ConnectorError {
     }
 }
 
+fn connection_test_from_reads(
+    devices: Result<Vec<DeviceOverview>, UniFiNetworkError>,
+    clients: Result<Vec<ClientOverview>, UniFiNetworkError>,
+) -> ConnectionTestResult {
+    let read_devices = tested_read_capability(
+        CAPABILITY_READ_DEVICES,
+        "List devices",
+        "device listing",
+        devices,
+    );
+    let read_clients = tested_read_capability(
+        CAPABILITY_READ_CLIENTS,
+        "List clients",
+        "client listing",
+        clients,
+    );
+    let all_reads_available = read_devices.available && read_clients.available;
+    let authenticated_note = Some(
+        "Available after API-key authentication; Test Connection does not perform writes."
+            .to_owned(),
+    );
+
+    ConnectionTestResult {
+        reachable: true,
+        capabilities: vec![
+            read_devices,
+            read_clients,
+            available_capability(
+                CAPABILITY_RESTART,
+                "Restart devices",
+                authenticated_note.clone(),
+            ),
+            available_capability(
+                CAPABILITY_CYCLE_POE,
+                "Power-cycle PoE ports",
+                authenticated_note.clone(),
+            ),
+            available_capability(
+                CAPABILITY_AUTHORIZE_GUEST,
+                "Authorize guest clients",
+                authenticated_note.clone(),
+            ),
+            available_capability(
+                CAPABILITY_CREATE_VOUCHER,
+                "Create vouchers",
+                authenticated_note.clone(),
+            ),
+            available_capability(
+                CAPABILITY_REVOKE_VOUCHER,
+                "Revoke vouchers",
+                authenticated_note,
+            ),
+        ],
+        message: Some(if all_reads_available {
+            "Authenticated successfully and verified device and client listings. Write capabilities are available but were not exercised."
+                .to_owned()
+        } else {
+            "Authenticated successfully, but one or more read endpoints could not be verified. Write capabilities are available but were not exercised."
+                .to_owned()
+        }),
+    }
+}
+
+fn tested_read_capability<T>(
+    key: &str,
+    label: &str,
+    operation: &str,
+    result: Result<T, UniFiNetworkError>,
+) -> CapabilityStatus {
+    match result {
+        Ok(_) => available_capability(key, label, None),
+        Err(error) => CapabilityStatus {
+            key: key.to_owned(),
+            label: label.to_owned(),
+            available: false,
+            note: Some(format!("{operation} failed: {error}")),
+        },
+    }
+}
+
+fn available_capability(key: &str, label: &str, note: Option<String>) -> CapabilityStatus {
+    CapabilityStatus {
+        key: key.to_owned(),
+        label: label.to_owned(),
+        available: true,
+        note,
+    }
+}
+
+fn unreachable_connection(message: impl Into<String>) -> ConnectionTestResult {
+    ConnectionTestResult {
+        reachable: false,
+        capabilities: Vec::new(),
+        message: Some(message.into()),
+    }
+}
+
 fn health_for_device_state(state: &str) -> HealthState {
     match state {
         "ONLINE" => HealthState::Healthy,
@@ -1175,6 +1358,102 @@ fn connector_error(error: UniFiNetworkError) -> ConnectorError {
 mod tests {
     use super::*;
     use loom_core::connector::Connector;
+
+    fn capability<'a>(result: &'a ConnectionTestResult, key: &str) -> &'a CapabilityStatus {
+        result
+            .capabilities
+            .iter()
+            .find(|capability| capability.key == key)
+            .unwrap_or_else(|| panic!("connection test omitted capability {key}"))
+    }
+
+    #[test]
+    fn setup_guide_describes_the_official_api_key_and_tls_path() {
+        let guide = setup_guide();
+        assert_eq!(guide.variants.len(), 1);
+        let variant = &guide.variants[0];
+        assert_eq!(variant.id, "api-key");
+        assert_eq!(variant.label, "Connect via API key");
+        assert!(variant.description.contains("9.1.105"));
+        assert!(variant
+            .description
+            .contains("Settings > Control Plane > Integrations"));
+        assert!(variant.description.contains("self-signed"));
+        assert!(variant.description.contains("allowInsecureCert"));
+        assert!(variant
+            .description
+            .contains("TLS encryption always remains enabled"));
+        assert!(variant.template.is_empty());
+        assert!(variant.toggles.is_empty());
+        assert!(variant.capability_requirements.is_empty());
+    }
+
+    #[test]
+    fn connection_test_probes_reads_and_never_executes_writes() {
+        let result = connection_test_from_reads(
+            Ok(vec![DeviceOverview {
+                id: "device-one".to_owned(),
+                name: Some("Switch".to_owned()),
+                model: Some("USW".to_owned()),
+                state: Some("ONLINE".to_owned()),
+            }]),
+            Err(UniFiNetworkError::ApiError {
+                status: 500,
+                message: "temporary client-list failure".to_owned(),
+            }),
+        );
+
+        assert!(result.reachable);
+        assert!(capability(&result, CAPABILITY_READ_DEVICES).available);
+        let clients = capability(&result, CAPABILITY_READ_CLIENTS);
+        assert!(!clients.available);
+        assert!(clients
+            .note
+            .as_deref()
+            .is_some_and(|note| note.contains("temporary client-list failure")));
+        for key in [
+            CAPABILITY_RESTART,
+            CAPABILITY_CYCLE_POE,
+            CAPABILITY_AUTHORIZE_GUEST,
+            CAPABILITY_CREATE_VOUCHER,
+            CAPABILITY_REVOKE_VOUCHER,
+        ] {
+            let write = capability(&result, key);
+            assert!(write.available, "{key}");
+            assert!(write
+                .note
+                .as_deref()
+                .is_some_and(|note| note.contains("does not perform writes")));
+        }
+        assert!(result
+            .message
+            .as_deref()
+            .is_some_and(|message| message.contains("one or more read endpoints")));
+    }
+
+    #[test]
+    fn connection_failure_is_unreachable_and_claims_no_capabilities() {
+        let result = unreachable_connection(
+            UniFiNetworkError::AuthFailed("API key was rejected".to_owned()).to_string(),
+        );
+        assert!(!result.reachable);
+        assert!(result.capabilities.is_empty());
+        assert!(result
+            .message
+            .as_deref()
+            .is_some_and(|message| message.contains("API key was rejected")));
+    }
+
+    #[test]
+    fn connection_test_factory_performs_no_network_io() {
+        let connector = UniFiNetworkConnector::from_config_value_for_connection_test(json!({
+            "host": "https://console.example.com",
+            "apiKey": "not-a-real-key"
+        }))
+        .expect("building the ephemeral connector is local-only");
+        assert_eq!(connector.site.internal_reference, "default");
+        assert!(connector.setup_guide().is_some());
+    }
 
     #[test]
     fn official_site_shape_resolves_by_id_reference_or_name() {
@@ -1277,7 +1556,7 @@ mod tests {
         assert_eq!(connector.data_points().len(), 3);
         assert!(connector.supports_sub_targets());
         assert_eq!(connector.resource_kinds(None).len(), 2);
-        assert!(connector.setup_guide().is_none());
+        assert!(connector.setup_guide().is_some());
     }
 
     #[test]

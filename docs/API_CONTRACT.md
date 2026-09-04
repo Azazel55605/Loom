@@ -1059,6 +1059,24 @@ optional limit fields supported by the API. The official client action enum
 contains guest authorize/unauthorize only—there is no client block/unblock
 operation, so Loom exposes none.
 
+The UniFi Network setup guide has one instruction-only **Connect via API key**
+variant. It directs administrators running Network 9.1.105 or newer to
+**Network > Settings > Control Plane > Integrations**, explains the explicit
+`allowInsecureCert` opt-in for a locally self-signed certificate, and makes
+clear that transport remains HTTPS even when certificate verification is
+relaxed. Its template, toggles, and capability requirements are empty because
+there is no command snippet and the official API-key model has no independent
+per-capability scopes.
+
+Test Connection first performs the same site-list request used by ordinary
+construction. A transport or authentication failure returns `reachable:
+false` with the connector's real error. Once authenticated, it genuinely lists
+devices and clients and reports those read capabilities independently. Device
+restart, PoE cycling, guest authorization, and voucher create/revoke are
+reported available without being executed: the API key has no partial
+permission model from which to infer a narrower result, and a connection test
+must not disrupt a network or mutate its hotspot configuration.
+
 Local consoles may use a locally issued or self-signed HTTPS certificate.
 `allowInsecureCert` relaxes peer verification only for that connector instance,
 remains off by default, and never permits plaintext transport.

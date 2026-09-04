@@ -207,9 +207,9 @@ pub fn builtin_registry() -> ConnectorTypeRegistry {
         },
     );
 
-    // UniFi Network verifies both its API key and selected site during
-    // construction. Like the other network connectors, the descriptors remain
-    // available without contacting a console.
+    // Ordinary construction verifies both the API key and selected site. The
+    // connection-test factory delays that request until `test_connection`, so
+    // transport/auth failures use the structured capability-test result.
     types.insert(
         loom_connector_unifi_network::TYPE_ID,
         ConnectorTypeRegistration {
@@ -223,9 +223,14 @@ pub fn builtin_registry() -> ConnectorTypeRegistry {
                         .map(|connector| Box::new(connector) as Box<dyn Connector>)
                 })
             },
-            connection_test_factory: None,
+            connection_test_factory: Some(|config| {
+                Box::pin(async move {
+                    UniFiNetworkConnector::from_config_value_for_connection_test(config)
+                        .map(|connector| Box::new(connector) as Box<dyn Connector>)
+                })
+            }),
             schema: loom_connector_unifi_network::config_schema(),
-            setup_guide: None,
+            setup_guide: Some(loom_connector_unifi_network::setup_guide()),
             discoverable_type: None,
             discovery_target_field: None,
         },
@@ -378,8 +383,10 @@ mod tests {
             registration.schema["properties"]["allowInsecureCert"]["default"],
             false
         );
-        assert!(registration.setup_guide.is_none());
-        assert!(registration.connection_test_factory.is_none());
+        let guide = registration.setup_guide.as_ref().expect("setup guide");
+        assert_eq!(guide.variants.len(), 1);
+        assert_eq!(guide.variants[0].id, "api-key");
+        assert!(registration.connection_test_factory.is_some());
         assert!(registration.discoverable_type.is_none());
     }
 

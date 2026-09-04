@@ -1490,7 +1490,14 @@ mod tests {
             unifi["configSchema"]["properties"]["site"]["default"],
             "default"
         );
-        assert_eq!(unifi["setupGuide"], serde_json::Value::Null);
+        let variants = unifi["setupGuide"]["variants"]
+            .as_array()
+            .expect("UniFi Network should publish API-key setup help");
+        assert_eq!(variants.len(), 1);
+        assert_eq!(variants[0]["id"], "api-key");
+        assert_eq!(variants[0]["template"], "");
+        assert_eq!(variants[0]["toggles"], serde_json::json!([]));
+        assert_eq!(variants[0]["capabilityRequirements"], serde_json::json!([]));
         assert_eq!(unifi["discoverableType"], serde_json::Value::Null);
     }
 
