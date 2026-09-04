@@ -86,14 +86,21 @@ export function ConnectorDetailModal({
   const instance = placement.connector;
   const [live, setLive] = React.useState<LiveReading | null>(null);
   const canControl = hasPermission(user?.permissions ?? [], PERMISSION_KEYS.connectorsControl);
-  // Client-side from the id, like the tile's — see `describeTarget`.
-  const target = describeTarget(placement.targetId);
-
   const detail = useQuery({
     queryKey: ["connector-instance", instance.id],
     queryFn: ({ signal }) => api.getConnectorInstance(instance.id, signal),
     enabled: open,
   });
+  const subTargets = useQuery({
+    queryKey: ["connector-instance-sub-targets", instance.id],
+    queryFn: ({ signal }) => api.getSubTargets(instance.id, signal),
+    enabled: open && placement.targetId !== null,
+    staleTime: 30_000,
+  });
+  const targetMetadata = subTargets.data?.find((target) => target.id === placement.targetId);
+  const target = targetMetadata === undefined
+    ? describeTarget(placement.targetId)
+    : { text: targetMetadata.label, isStack: targetMetadata.kind === "stack" };
 
   // Fetched only while the modal is open: a browsable kind list is of no use
   // to a closed dialog, and a dashboard of twenty tiles would otherwise ask
@@ -242,7 +249,9 @@ export function ConnectorDetailModal({
           <div className="flex flex-wrap items-center gap-2">
             {/* The same icon rule the tile follows, so opening a stack does not
                 change what it looks like. */}
-            {target?.isStack === true ? (
+            {targetMetadata?.icon !== undefined ? (
+              <ConnectorIcon typeIcon={targetMetadata.icon} iconOverride={null} size={22} />
+            ) : target?.isStack === true ? (
               <Layers className="shrink-0 text-muted-foreground" size={22} aria-hidden="true" />
             ) : (
               <ConnectorIcon

@@ -24,6 +24,18 @@ at `https://developer.ui.com/network/v9.4.17/openapi.json`:
   independent scoped-permission model for one key.
 - `GET /v1/sites` is the authentication and configured-site discovery proof.
   Device and client reads are separate paginated calls under the resolved site.
+- Sites, devices, and clients use `offset`/`limit` with a default of 25 and a
+  maximum of 200. Vouchers use the same mechanism with a default of 100 and a
+  maximum of 1000. Every page envelope carries `offset`, `limit`, `count`,
+  `totalCount`, and `data`; no cursor or next-page token is involved.
+- A device overview explicitly identifies capabilities through `features`:
+  `accessPoint`, `switching`, and `gateway`. Classification therefore must not
+  guess from the model string. Device detail exposes radio standard,
+  frequency, channel, and channel width; latest statistics optionally expose
+  CPU/memory utilization and uplink RX/TX rates. The schema has no AP client
+  count and no per-port throughput counters. AP client count can be derived
+  honestly from the clients collection's `uplinkDeviceId`; switch port
+  throughput cannot be derived and is not published.
 - Device restart, port PoE cycling, guest authorization, and voucher mutations
   are official write operations. A connectivity test must describe their
   availability after successful API-key authentication without invoking them.
@@ -44,6 +56,12 @@ After the site is resolved, probe device and client listing independently.
 Report the five write capabilities as available after authentication with a
 note that the connection test did not execute them. This is an all-or-nothing
 API-key model, not evidence that any disruptive operation was tested live.
+
+Use one client-owned pagination implementation for every list endpoint. Device
+presentation uses generic Lucide category icons only; no product photography is
+vendored because no stable licensing-clear source was established. An
+unrecognised or absent feature classification deliberately falls back to a
+generic network-device icon.
 
 ## Consequences
 

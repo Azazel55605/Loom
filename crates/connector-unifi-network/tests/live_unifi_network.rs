@@ -3,7 +3,9 @@
 //! Set `LOOM_TEST_UNIFI_NETWORK_HOST`, `LOOM_TEST_UNIFI_NETWORK_API_KEY`, and
 //! optionally `LOOM_TEST_UNIFI_NETWORK_SITE` to enable it. Set
 //! `LOOM_TEST_UNIFI_NETWORK_ALLOW_INSECURE_CERT=1` only for a deliberately
-//! untrusted local certificate.
+//! untrusted local certificate. Set
+//! `LOOM_TEST_UNIFI_NETWORK_EXPECTED_DEVICE_COUNT` to make the pagination
+//! regression check assert the controller's known inventory size.
 
 use std::collections::HashSet;
 
@@ -63,6 +65,17 @@ async fn a_real_unifi_console_reports_site_counts_and_obeys_the_contract() {
     assert!(targets
         .iter()
         .all(|target| target.kind == "device" && target.id.starts_with("device:")));
+    assert!(targets.iter().all(|target| target.icon.is_some()));
+    if let Ok(expected) = std::env::var("LOOM_TEST_UNIFI_NETWORK_EXPECTED_DEVICE_COUNT") {
+        let expected = expected
+            .parse::<usize>()
+            .expect("LOOM_TEST_UNIFI_NETWORK_EXPECTED_DEVICE_COUNT must be a non-negative integer");
+        assert_eq!(
+            targets.len(),
+            expected,
+            "pagination must return every device the live console is expected to expose"
+        );
+    }
     for target in &targets {
         assert!(status
             .data_point_value_for(Some(&target.id), DATA_POINT_STATE)

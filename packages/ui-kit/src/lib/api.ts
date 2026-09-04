@@ -786,6 +786,8 @@ export type UpdateDashboardPlacementRequest = {
 export type SubTarget = {
   id: string;
   label: string;
+  /** Optional curated generic icon; unknown values fall back safely. */
+  icon?: string;
   /**
    * What *sort* of thing this target is, in the connector's own vocabulary —
    * Docker uses `"container"` and `"stack"`; `"target"` when a connector does

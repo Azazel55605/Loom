@@ -1301,7 +1301,7 @@ dependencies = [
 
 [[package]]
 name = "loom-connector-unifi-network"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "async-trait",
  "futures-util",
@@ -1316,7 +1316,7 @@ dependencies = [
 
 [[package]]
 name = "loom-core"
-version = "0.2.5"
+version = "0.2.6"
 dependencies = [
  "async-trait",
  "chrono",

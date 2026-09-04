@@ -389,6 +389,7 @@ function pickerOptions(targets: SubTarget[]): SearchablePickerOption[] {
   return targets.map((target) => ({
     id: target.id,
     label: target.label,
+    icon: target.icon,
     badge: describeTargetKind(target.kind) ?? undefined,
   }));
 }

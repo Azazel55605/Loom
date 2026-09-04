@@ -1023,19 +1023,33 @@ The UniFi Network connector uses the official local Integration API. Its base is
 documented this API/key flow with Network 9.1.105, while the current published
 OpenAPI is versioned with the installed Network application. A configured
 `site` may be its UUID, legacy `internalReference`, or display name; Loom
-resolves that to the UUID required by subsequent calls. One poll pages through
-`/sites/{siteId}/devices`, counts documented `ONLINE` states, and reads
-`/sites/{siteId}/clients`'s `totalCount`. The host view publishes `deviceCount`,
-`onlineDeviceCount`, and `clientCount`.
+resolves that to the UUID required by subsequent calls. All list calls use the
+official offset envelope (`offset`, `limit`, `count`, `totalCount`, `data`) and
+are consumed until `totalCount` is reached: sites, devices, and clients default
+to 25 rows and allow 200; vouchers default to 100 and allow 1000. The host view
+publishes `deviceCount`, `onlineDeviceCount`, and `clientCount` from the complete
+device/client collections.
 
 Each returned device is an addressable `device:{deviceId}` sub-target. A poll
 also reads `/sites/{siteId}/devices/{deviceId}/statistics/latest` for every
 known device, with at most ten Integration API calls in flight across the
-connector. Device views publish the exact API `state`, `model`, and a
-human-readable `uptime` derived from `uptimeSec`. `ONLINE` is Healthy;
+connector. Device views publish the exact API `state`, `model`, a human-readable
+`uptime` derived from `uptimeSec`, CPU/memory utilization, and uplink RX/TX
+rates when those optional statistics are returned. Access points additionally
+publish `connectedClientCount`, derived from the complete client collection's
+`uplinkDeviceId`, and a radio summary built from the documented standard,
+frequency, channel, and channel width fields. The current API publishes no
+per-port throughput counters, so Loom does not invent a switch aggregate.
+`ONLINE` is Healthy;
 `PENDING_ADOPTION`, `UPDATING`, `GETTING_READY`, `ADOPTING`, and `DELETING` are
 Degraded; `OFFLINE`, `CONNECTION_INTERRUPTED`, and `ISOLATED` are Down. Unknown
-future state values remain Unknown rather than being guessed.
+future state values remain Unknown rather than being guessed. Device type and
+its generic icon come from the documented `features` values (`accessPoint` ->
+`lucide:wifi`, `switching` -> `lucide:ethernet-port`, `gateway` ->
+`lucide:router`); an absent/unrecognised feature set uses `lucide:network`
+rather than guessing from a model name. When two devices would otherwise have
+the same label, only those colliding labels receive the last two MAC octets as
+a suffix.
 
 Device targets expose a parameterless, disruptive `restart` action. It invokes
 `POST /sites/{siteId}/devices/{deviceId}/actions` with
@@ -3723,13 +3737,20 @@ against.
 ### `SubTarget`
 
 ```json
-{ "id": "web", "label": "web (example/image:latest)" }
+{
+  "id": "device:11111111-1111-1111-1111-111111111111",
+  "label": "U7 Lite (a4:f6)",
+  "kind": "device",
+  "icon": "lucide:wifi"
+}
 ```
 
 | Field | JSON type | Meaning | Nullability |
 | --- | --- | --- | --- |
 | `id` | string | Stable address used as `targetId` on placements, descriptors, and action requests. | Always present. |
 | `label` | string | Current human-facing label for pickers. It may include supplemental information and is not an identifier. | Always present. |
+| `kind` | string | Connector-owned category used for badges and other generic presentation. Unknown values remain valid. | Always present; defaults to `target` when an older connector omits it. |
+| `icon` | string | Optional curated `lucide:<name>` presentation hint for this target. Unknown references fall back to the connector icon. | Omitted when not supplied. |
 
 Sub-target enumeration is intentionally cheap metadata. Values and action
 descriptors remain in the instance detail/status contracts.

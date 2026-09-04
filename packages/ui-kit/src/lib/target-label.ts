@@ -1,18 +1,19 @@
 /**
  * How a placement's sub-target reads in a header.
  *
- * Pure and client-side by design: a tile knows its `targetId` and nothing else,
- * and a header that had to fetch the sub-target list to render its own title
- * would put a request — and a loading state, and a failure state — on the
- * critical path of a dashboard that already has everything it needs.
+ * This remains the immediate, client-side fallback while shared target
+ * metadata loads. Connectors whose stable ids are not human-readable (UniFi
+ * device UUIDs, for example) can replace it with the API's current label and
+ * icon without making a failed metadata request blank the header.
  *
  * The cost of that choice is that this file knows one connector's convention.
  * That is a deliberate, bounded trade: the prefix is documented in
  * `docs/API_CONTRACT.md` and guaranteed unambiguous by Docker's own naming
  * rules (a container name cannot contain a colon), and the fallback for
  * anything unrecognised is exactly what was rendered before — the raw id. A
- * second connector wanting decorated targets is the moment to move this onto
- * `SubTarget.kind` and pay for the lookup.
+ * decorated targets now use `SubTarget`; this helper deliberately keeps the
+ * backward-compatible no-request path for older connectors and loading/error
+ * states.
  */
 
 /** Marks a Docker sub-target id as naming a Compose project. */

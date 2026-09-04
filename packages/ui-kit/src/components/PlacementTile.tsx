@@ -147,6 +147,12 @@ export function PlacementTile({
       !(error instanceof SessionExpiredError) &&
       failureCount < 1,
   });
+  const subTargets = useQuery({
+    queryKey: ["connector-instance-sub-targets", instance.id],
+    queryFn: ({ signal }) => api.getSubTargets(instance.id, signal),
+    enabled: placement.targetId !== null,
+    staleTime: 30_000,
+  });
 
   const execute = useMutation({
     mutationFn: ({ actionId, params }: { actionId: string; params: Record<string, unknown> }) =>
@@ -213,10 +219,13 @@ export function PlacementTile({
             live === undefined ? instance.pendingOperation : live.pendingOperation,
           diagnosis: live === undefined ? instance.diagnosis : live.diagnosis,
         });
-  // Derived from the id alone — no fetch. A header that had to load the
-  // sub-target list to render its own title would put a request, a loading
-  // state and a failure state on a dashboard that already has what it needs.
-  const target = describeTarget(placement.targetId);
+  // Docker's id remains a useful immediate fallback. The shared cached target
+  // lookup adds authoritative labels and icons for connectors such as UniFi,
+  // whose stable UUID cannot itself tell a person which device it names.
+  const targetMetadata = subTargets.data?.find((target) => target.id === placement.targetId);
+  const target = targetMetadata === undefined
+    ? describeTarget(placement.targetId)
+    : { text: targetMetadata.label, isStack: targetMetadata.kind === "stack" };
   const currentDetails = statusDetailsForTarget(status?.details, placement.targetId);
   const details = useRetainedStatusDetails(
     `${instance.id}:${placement.targetId ?? ""}`,
@@ -273,7 +282,9 @@ export function PlacementTile({
           {/* A stack is not the connector's own thing — it is a set of them —
               so it takes the layers glyph rather than the Docker whale. A
               container placement keeps the icon it has always had. */}
-          {target?.isStack === true ? (
+          {targetMetadata?.icon !== undefined ? (
+            <ConnectorIcon typeIcon={targetMetadata.icon} iconOverride={null} size={20} />
+          ) : target?.isStack === true ? (
             <Layers className="shrink-0 text-muted-foreground" size={20} aria-hidden="true" />
           ) : (
             <ConnectorIcon

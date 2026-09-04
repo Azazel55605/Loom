@@ -12,6 +12,8 @@ use loom_core::connector::{
 use serde::Deserialize;
 use serde_json::{json, Map, Value};
 
+#[cfg(test)]
+use crate::client::Page;
 use crate::{UniFiNetworkClient, UniFiNetworkConfig, UniFiNetworkError};
 
 pub const TYPE_ID: &str = "unifi-network";
@@ -24,6 +26,12 @@ pub const DATA_POINT_CLIENT_COUNT: &str = "clientCount";
 pub const DATA_POINT_STATE: &str = "state";
 pub const DATA_POINT_MODEL: &str = "model";
 pub const DATA_POINT_UPTIME: &str = "uptime";
+pub const DATA_POINT_CONNECTED_CLIENT_COUNT: &str = "connectedClientCount";
+pub const DATA_POINT_RADIOS: &str = "radios";
+pub const DATA_POINT_CPU_UTILIZATION: &str = "cpuUtilization";
+pub const DATA_POINT_MEMORY_UTILIZATION: &str = "memoryUtilization";
+pub const DATA_POINT_UPLINK_RX_RATE: &str = "uplinkRxRate";
+pub const DATA_POINT_UPLINK_TX_RATE: &str = "uplinkTxRate";
 pub const ACTION_RESTART: &str = "restart";
 pub const ACTION_CYCLE_POE: &str = "cyclePoe";
 pub const ACTION_AUTHORIZE_GUEST: &str = "authorizeGuest";
@@ -79,13 +87,12 @@ impl UniFiNetworkConnector {
         let client =
             UniFiNetworkClient::connect(&config.host, &config.api_key, config.allow_insecure_cert)
                 .map_err(connector_error)?;
-        let sites: Page<SiteOverview> = client
-            .get(&format!("sites?limit={PAGE_LIMIT}"))
+        let sites = client
+            .fetch_all_pages::<SiteOverview>("sites", PAGE_LIMIT)
             .await
             .map_err(connector_error)?;
-        let site = resolve_site(&sites.data, &config.site).ok_or_else(|| {
+        let site = resolve_site(&sites, &config.site).ok_or_else(|| {
             let available = sites
-                .data
                 .iter()
                 .map(|site| format!("{} ({})", site.name, site.internal_reference))
                 .collect::<Vec<_>>()
@@ -140,15 +147,21 @@ impl UniFiNetworkConnector {
         // and honest for typical homelab device counts; the client's shared
         // semaphore caps the fan-out at ten rather than betting the console's
         // middleware can absorb an unbounded future installation.
-        let statistics = join_all(devices.iter().map(|device| {
-            let path = format!(
+        let device_readings = join_all(devices.iter().map(|device| {
+            let statistics_path = format!(
                 "sites/{}/devices/{}/statistics/latest",
                 self.site.id, device.id
             );
-            async move { self.client.get::<DeviceStatistics>(&path).await }
+            let details_path = format!("sites/{}/devices/{}", self.site.id, device.id);
+            async move {
+                tokio::join!(
+                    self.client.get::<DeviceStatistics>(&statistics_path),
+                    self.client.get::<DeviceDetails>(&details_path),
+                )
+            }
         }));
         let clients = self.list_all_clients();
-        let (statistics, clients) = tokio::join!(statistics, clients);
+        let (device_readings, clients) = tokio::join!(device_readings, clients);
         let clients = clients?;
         self.remember_clients(clients.clone());
 
@@ -156,10 +169,12 @@ impl UniFiNetworkConnector {
             summary: map_site_summary(&devices, clients.len()),
             devices: devices
                 .into_iter()
-                .zip(statistics)
-                .map(|(device, statistics)| DeviceReading {
+                .zip(device_readings)
+                .map(|(device, (statistics, details))| DeviceReading {
+                    connected_client_count: connected_client_count(&clients, &device.id),
                     device,
-                    uptime_seconds: statistics.ok().and_then(|value| value.uptime_sec),
+                    statistics: statistics.ok(),
+                    details: details.ok(),
                 })
                 .collect(),
         })
@@ -173,24 +188,10 @@ impl UniFiNetworkConnector {
         &self,
         site_id: &str,
     ) -> Result<Vec<DeviceOverview>, UniFiNetworkError> {
-        let mut offset = 0usize;
-        let mut devices = Vec::new();
-        loop {
-            let page: Page<DeviceOverview> = self
-                .client
-                .get(&format!(
-                    "sites/{}/devices?offset={offset}&limit={PAGE_LIMIT}",
-                    site_id
-                ))
-                .await?;
-            let total_count = page.total_count;
-            let count = page.data.len();
-            devices.extend(page.data);
-            if count == 0 || devices.len() >= total_count {
-                break;
-            }
-            offset += count;
-        }
+        let mut devices = self
+            .client
+            .fetch_all_pages::<DeviceOverview>(&format!("sites/{site_id}/devices"), PAGE_LIMIT)
+            .await?;
         // The published response requires an id. Ignore a malformed row
         // instead of manufacturing the unusable target id `device:`.
         devices.retain(|device| !device.id.trim().is_empty());
@@ -211,6 +212,17 @@ impl UniFiNetworkConnector {
             .clone()
     }
 
+    fn device_type_for_target(&self, target_id: &str) -> DeviceType {
+        let Some(device_id) = device_id_from_target(target_id) else {
+            return DeviceType::NetworkDevice;
+        };
+        self.device_snapshot()
+            .iter()
+            .find(|device| device.id == device_id)
+            .map(device_type)
+            .unwrap_or(DeviceType::NetworkDevice)
+    }
+
     async fn list_all_clients(&self) -> Result<Vec<ClientOverview>, UniFiNetworkError> {
         self.list_all_clients_for_site(&self.site.id).await
     }
@@ -219,24 +231,10 @@ impl UniFiNetworkConnector {
         &self,
         site_id: &str,
     ) -> Result<Vec<ClientOverview>, UniFiNetworkError> {
-        let mut offset = 0usize;
-        let mut clients = Vec::new();
-        loop {
-            let page: Page<ClientOverview> = self
-                .client
-                .get(&format!(
-                    "sites/{}/clients?offset={offset}&limit={PAGE_LIMIT}",
-                    site_id
-                ))
-                .await?;
-            let total_count = page.total_count;
-            let count = page.data.len();
-            clients.extend(page.data);
-            if count == 0 || clients.len() >= total_count {
-                break;
-            }
-            offset += count;
-        }
+        let mut clients = self
+            .client
+            .fetch_all_pages::<ClientOverview>(&format!("sites/{site_id}/clients"), PAGE_LIMIT)
+            .await?;
         clients.retain(|client| !client.id.trim().is_empty());
         Ok(clients)
     }
@@ -263,31 +261,20 @@ impl UniFiNetworkConnector {
     }
 
     async fn list_all_vouchers(&self) -> Result<Vec<VoucherOverview>, UniFiNetworkError> {
-        let mut offset = 0usize;
-        let mut vouchers = Vec::new();
-        loop {
-            let page: Page<VoucherOverview> = self
-                .client
-                .get(&format!(
-                    "sites/{}/hotspot/vouchers?offset={offset}&limit={VOUCHER_PAGE_LIMIT}",
-                    self.site.id
-                ))
-                .await?;
-            let total_count = page.total_count;
-            let count = page.data.len();
-            vouchers.extend(page.data);
-            if count == 0 || vouchers.len() >= total_count {
-                break;
-            }
-            offset += count;
-        }
+        let mut vouchers = self
+            .client
+            .fetch_all_pages::<VoucherOverview>(
+                &format!("sites/{}/hotspot/vouchers", self.site.id),
+                VOUCHER_PAGE_LIMIT,
+            )
+            .await?;
         vouchers.retain(|voucher| !voucher.id.trim().is_empty());
         Ok(vouchers)
     }
 
     async fn list_sub_targets_live(&self) -> Result<Vec<SubTarget>, ConnectorError> {
         let devices = self.list_all_devices().await.map_err(connector_error)?;
-        let targets = devices.iter().map(device_sub_target).collect();
+        let targets = device_sub_targets(&devices);
         self.remember_devices(devices);
         Ok(targets)
     }
@@ -320,8 +307,62 @@ impl loom_core::connector::Connector for UniFiNetworkConnector {
                         &mut details,
                         Some(&target_id),
                         DATA_POINT_UPTIME,
-                        json!(format_uptime(reading.uptime_seconds)),
+                        json!(format_uptime(
+                            reading
+                                .statistics
+                                .as_ref()
+                                .and_then(|value| value.uptime_sec)
+                        )),
                     );
+                    if let Some(statistics) = &reading.statistics {
+                        set_optional_number(
+                            &mut details,
+                            &target_id,
+                            DATA_POINT_CPU_UTILIZATION,
+                            statistics.cpu_utilization_pct,
+                        );
+                        set_optional_number(
+                            &mut details,
+                            &target_id,
+                            DATA_POINT_MEMORY_UTILIZATION,
+                            statistics.memory_utilization_pct,
+                        );
+                        if let Some(uplink) = &statistics.uplink {
+                            set_optional_number(
+                                &mut details,
+                                &target_id,
+                                DATA_POINT_UPLINK_RX_RATE,
+                                uplink.rx_rate_bps.map(|value| value as f64),
+                            );
+                            set_optional_number(
+                                &mut details,
+                                &target_id,
+                                DATA_POINT_UPLINK_TX_RATE,
+                                uplink.tx_rate_bps.map(|value| value as f64),
+                            );
+                        }
+                    }
+                    if device_type(&reading.device) == DeviceType::AccessPoint {
+                        set_detail(
+                            &mut details,
+                            Some(&target_id),
+                            DATA_POINT_CONNECTED_CLIENT_COUNT,
+                            json!(reading.connected_client_count),
+                        );
+                        if let Some(radios) = reading
+                            .details
+                            .as_ref()
+                            .map(|details| format_radios(&details.interfaces.radios))
+                            .filter(|radios| !radios.is_empty())
+                        {
+                            set_detail(
+                                &mut details,
+                                Some(&target_id),
+                                DATA_POINT_RADIOS,
+                                json!(radios),
+                            );
+                        }
+                    }
                     status = status.with_target_health(target_id, health_for_device_state(state));
                 }
                 status.details = details;
@@ -337,12 +378,15 @@ impl loom_core::connector::Connector for UniFiNetworkConnector {
     }
 
     async fn test_connection(&self) -> ConnectionTestResult {
-        let sites: Page<SiteOverview> =
-            match self.client.get(&format!("sites?limit={PAGE_LIMIT}")).await {
-                Ok(sites) => sites,
-                Err(error) => return unreachable_connection(error.to_string()),
-            };
-        let Some(site) = resolve_site(&sites.data, &self.config.site) else {
+        let sites = match self
+            .client
+            .fetch_all_pages::<SiteOverview>("sites", PAGE_LIMIT)
+            .await
+        {
+            Ok(sites) => sites,
+            Err(error) => return unreachable_connection(error.to_string()),
+        };
+        let Some(site) = resolve_site(&sites, &self.config.site) else {
             return unreachable_connection(format!(
                 "site `{}` was not returned by the console",
                 self.config.site
@@ -588,27 +632,79 @@ impl loom_core::connector::Connector for UniFiNetworkConnector {
 
     fn default_layout_for(&self, target_id: Option<&str>) -> WidgetLayout {
         match target_id.and_then(device_id_from_target) {
-            Some(_) => WidgetLayout::new(vec![
-                WidgetBinding::display(DATA_POINT_STATE, DisplayWidgetType::StatusDot).with_config(
-                    json!({
-                        "colorMap": {
-                            "ONLINE": "healthy",
-                            "PENDING_ADOPTION": "degraded",
-                            "UPDATING": "degraded",
-                            "GETTING_READY": "degraded",
-                            "ADOPTING": "degraded",
-                            "DELETING": "degraded",
-                            "OFFLINE": "down",
-                            "CONNECTION_INTERRUPTED": "down",
-                            "ISOLATED": "down",
-                            "UNKNOWN": "unknown"
-                        }
-                    }),
-                ),
-                WidgetBinding::display(DATA_POINT_MODEL, DisplayWidgetType::StatTile),
-                WidgetBinding::display(DATA_POINT_UPTIME, DisplayWidgetType::StatTile),
-                WidgetBinding::action(ACTION_RESTART, ActionWidgetType::Button),
-            ]),
+            Some(_) => {
+                let mut bindings = vec![
+                    WidgetBinding::display(DATA_POINT_STATE, DisplayWidgetType::StatusDot)
+                        .with_config(json!({
+                            "colorMap": {
+                                "ONLINE": "healthy",
+                                "PENDING_ADOPTION": "degraded",
+                                "UPDATING": "degraded",
+                                "GETTING_READY": "degraded",
+                                "ADOPTING": "degraded",
+                                "DELETING": "degraded",
+                                "OFFLINE": "down",
+                                "CONNECTION_INTERRUPTED": "down",
+                                "ISOLATED": "down",
+                                "UNKNOWN": "unknown"
+                            }
+                        })),
+                    WidgetBinding::display(DATA_POINT_MODEL, DisplayWidgetType::StatTile),
+                    WidgetBinding::display(DATA_POINT_UPTIME, DisplayWidgetType::StatTile),
+                ];
+                match target_id.map_or(DeviceType::NetworkDevice, |target| {
+                    self.device_type_for_target(target)
+                }) {
+                    DeviceType::AccessPoint => bindings.extend([
+                        WidgetBinding::display(
+                            DATA_POINT_CONNECTED_CLIENT_COUNT,
+                            DisplayWidgetType::StatTile,
+                        ),
+                        WidgetBinding::display(DATA_POINT_RADIOS, DisplayWidgetType::StatTile),
+                        WidgetBinding::display(
+                            DATA_POINT_CPU_UTILIZATION,
+                            DisplayWidgetType::ProgressBar,
+                        ),
+                        WidgetBinding::display(
+                            DATA_POINT_MEMORY_UTILIZATION,
+                            DisplayWidgetType::ProgressBar,
+                        ),
+                    ]),
+                    DeviceType::Switch | DeviceType::Gateway => bindings.extend([
+                        WidgetBinding::display(
+                            DATA_POINT_CPU_UTILIZATION,
+                            DisplayWidgetType::ProgressBar,
+                        ),
+                        WidgetBinding::display(
+                            DATA_POINT_MEMORY_UTILIZATION,
+                            DisplayWidgetType::ProgressBar,
+                        ),
+                        WidgetBinding::display(
+                            DATA_POINT_UPLINK_RX_RATE,
+                            DisplayWidgetType::StatTile,
+                        ),
+                        WidgetBinding::display(
+                            DATA_POINT_UPLINK_TX_RATE,
+                            DisplayWidgetType::StatTile,
+                        ),
+                    ]),
+                    DeviceType::NetworkDevice => bindings.extend([
+                        WidgetBinding::display(
+                            DATA_POINT_CPU_UTILIZATION,
+                            DisplayWidgetType::ProgressBar,
+                        ),
+                        WidgetBinding::display(
+                            DATA_POINT_MEMORY_UTILIZATION,
+                            DisplayWidgetType::ProgressBar,
+                        ),
+                    ]),
+                }
+                bindings.push(WidgetBinding::action(
+                    ACTION_RESTART,
+                    ActionWidgetType::Button,
+                ));
+                WidgetLayout::new(bindings)
+            }
             None => self.default_layout(),
         }
     }
@@ -616,13 +712,6 @@ impl loom_core::connector::Connector for UniFiNetworkConnector {
     fn network_target(&self) -> Option<NetworkTarget> {
         self.config.network_target()
     }
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct Page<T> {
-    total_count: usize,
-    data: Vec<T>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -647,6 +736,13 @@ struct DeviceOverview {
     name: Option<String>,
     #[serde(default)]
     model: Option<String>,
+    #[serde(default)]
+    mac_address: Option<String>,
+    /// The official API's authoritative capability categories. Do not infer a
+    /// product family from model names: an unknown future model still carries
+    /// these feature flags, and a missing flag safely becomes `NetworkDevice`.
+    #[serde(default)]
+    features: Vec<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -654,6 +750,21 @@ struct DeviceOverview {
 struct DeviceStatistics {
     #[serde(default)]
     uptime_sec: Option<u64>,
+    #[serde(default)]
+    cpu_utilization_pct: Option<f64>,
+    #[serde(default)]
+    memory_utilization_pct: Option<f64>,
+    #[serde(default)]
+    uplink: Option<UplinkStatistics>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct UplinkStatistics {
+    #[serde(default)]
+    tx_rate_bps: Option<u64>,
+    #[serde(default)]
+    rx_rate_bps: Option<u64>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -667,6 +778,20 @@ struct DeviceDetails {
 struct DeviceInterfaces {
     #[serde(default)]
     ports: Vec<PortOverview>,
+    #[serde(default)]
+    radios: Vec<RadioOverview>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct RadioOverview {
+    wlan_standard: String,
+    #[serde(rename = "frequencyGHz")]
+    frequency_ghz: String,
+    #[serde(rename = "channelWidthMHz")]
+    channel_width_mhz: u32,
+    #[serde(default)]
+    channel: Option<u32>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -733,7 +858,17 @@ struct PollReadings {
 
 struct DeviceReading {
     device: DeviceOverview,
-    uptime_seconds: Option<u64>,
+    statistics: Option<DeviceStatistics>,
+    details: Option<DeviceDetails>,
+    connected_client_count: usize,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DeviceType {
+    AccessPoint,
+    Switch,
+    Gateway,
+    NetworkDevice,
 }
 
 fn resolve_site(sites: &[SiteOverview], requested: &str) -> Option<SiteOverview> {
@@ -757,6 +892,13 @@ fn map_site_summary(devices: &[DeviceOverview], client_count: usize) -> SiteSumm
         online_device_count,
         client_count,
     }
+}
+
+fn connected_client_count(clients: &[ClientOverview], device_id: &str) -> usize {
+    clients
+        .iter()
+        .filter(|client| client.uplink_device_id.as_deref() == Some(device_id))
+        .count()
 }
 
 fn device_target_id(device_id: &str) -> String {
@@ -795,20 +937,133 @@ fn device_model(device: &DeviceOverview) -> String {
         .unwrap_or_else(|| "Unknown model".to_owned())
 }
 
-fn device_sub_target(device: &DeviceOverview) -> SubTarget {
-    SubTarget::new(device_target_id(&device.id), device_label(device)).of_kind("device")
+fn device_sub_targets(devices: &[DeviceOverview]) -> Vec<SubTarget> {
+    let base_labels = devices.iter().map(device_label).collect::<Vec<_>>();
+    let mut counts = std::collections::HashMap::new();
+    for label in &base_labels {
+        *counts.entry(label.clone()).or_insert(0usize) += 1;
+    }
+
+    devices
+        .iter()
+        .zip(base_labels)
+        .map(|(device, label)| {
+            let label = if counts.get(label.as_str()).copied().unwrap_or_default() > 1 {
+                format!("{label} ({})", device_disambiguator(device))
+            } else {
+                label
+            };
+            SubTarget::new(device_target_id(&device.id), label)
+                .of_kind("device")
+                .with_icon(device_icon(device))
+        })
+        .collect()
+}
+
+fn device_disambiguator(device: &DeviceOverview) -> String {
+    let compact = device
+        .mac_address
+        .as_deref()
+        .unwrap_or_default()
+        .chars()
+        .filter(char::is_ascii_hexdigit)
+        .collect::<String>()
+        .to_ascii_lowercase();
+    if compact.len() >= 4 {
+        let suffix = &compact[compact.len() - 4..];
+        return format!("{}:{}", &suffix[..2], &suffix[2..]);
+    }
+
+    // The OpenAPI schema requires a MAC address, but a stable id suffix keeps
+    // two malformed real-world rows distinguishable instead of recreating the
+    // original collision.
+    device
+        .id
+        .chars()
+        .rev()
+        .take(6)
+        .collect::<String>()
+        .chars()
+        .rev()
+        .collect()
+}
+
+fn device_type(device: &DeviceOverview) -> DeviceType {
+    if device.features.iter().any(|feature| feature == "gateway") {
+        DeviceType::Gateway
+    } else if device
+        .features
+        .iter()
+        .any(|feature| feature == "accessPoint")
+    {
+        DeviceType::AccessPoint
+    } else if device.features.iter().any(|feature| feature == "switching") {
+        DeviceType::Switch
+    } else {
+        DeviceType::NetworkDevice
+    }
+}
+
+fn device_icon(device: &DeviceOverview) -> &'static str {
+    match device_type(device) {
+        DeviceType::AccessPoint => "lucide:wifi",
+        DeviceType::Switch => "lucide:ethernet-port",
+        DeviceType::Gateway => "lucide:router",
+        DeviceType::NetworkDevice => "lucide:network",
+    }
 }
 
 fn device_data_points(device: &DeviceOverview) -> Vec<DataPointDescriptor> {
     let target_id = device_target_id(&device.id);
-    vec![
+    let mut points = vec![
         DataPointDescriptor::new(DATA_POINT_STATE, "State", DataPointValueType::String)
             .for_target(&target_id),
         DataPointDescriptor::new(DATA_POINT_MODEL, "Model", DataPointValueType::String)
             .for_target(&target_id),
         DataPointDescriptor::new(DATA_POINT_UPTIME, "Uptime", DataPointValueType::String)
-            .for_target(target_id),
-    ]
+            .for_target(&target_id),
+        DataPointDescriptor::new(
+            DATA_POINT_CPU_UTILIZATION,
+            "CPU utilization",
+            DataPointValueType::Number,
+        )
+        .with_unit("%")
+        .for_target(&target_id),
+        DataPointDescriptor::new(
+            DATA_POINT_MEMORY_UTILIZATION,
+            "Memory utilization",
+            DataPointValueType::Number,
+        )
+        .with_unit("%")
+        .for_target(&target_id),
+        DataPointDescriptor::new(
+            DATA_POINT_UPLINK_RX_RATE,
+            "Uplink receive rate",
+            DataPointValueType::Number,
+        )
+        .with_unit("bps")
+        .for_target(&target_id),
+        DataPointDescriptor::new(
+            DATA_POINT_UPLINK_TX_RATE,
+            "Uplink transmit rate",
+            DataPointValueType::Number,
+        )
+        .with_unit("bps")
+        .for_target(&target_id),
+    ];
+    if device_type(device) == DeviceType::AccessPoint {
+        points.extend([
+            DataPointDescriptor::new(
+                DATA_POINT_CONNECTED_CLIENT_COUNT,
+                "Connected clients",
+                DataPointValueType::Number,
+            )
+            .for_target(&target_id),
+            DataPointDescriptor::new(DATA_POINT_RADIOS, "Radios", DataPointValueType::String)
+                .for_target(target_id),
+        ]);
+    }
+    points
 }
 
 fn restart_action(target_id: &str) -> ConnectorAction {
@@ -1294,6 +1549,33 @@ fn unreachable_connection(message: impl Into<String>) -> ConnectionTestResult {
     }
 }
 
+fn set_optional_number(
+    details: &mut Value,
+    target_id: &str,
+    data_point_id: &str,
+    value: Option<f64>,
+) {
+    if let Some(value) = value.filter(|value| value.is_finite()) {
+        set_detail(details, Some(target_id), data_point_id, json!(value));
+    }
+}
+
+fn format_radios(radios: &[RadioOverview]) -> String {
+    radios
+        .iter()
+        .map(|radio| {
+            let channel = radio
+                .channel
+                .map_or_else(|| "auto".to_owned(), |channel| channel.to_string());
+            format!(
+                "{} GHz ch {channel} / {} MHz ({})",
+                radio.frequency_ghz, radio.channel_width_mhz, radio.wlan_standard
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
 fn health_for_device_state(state: &str) -> HealthState {
     match state {
         "ONLINE" => HealthState::Healthy,
@@ -1396,6 +1678,8 @@ mod tests {
                 name: Some("Switch".to_owned()),
                 model: Some("USW".to_owned()),
                 state: Some("ONLINE".to_owned()),
+                mac_address: Some("00:11:22:33:44:55".to_owned()),
+                features: vec!["switching".to_owned()],
             }]),
             Err(UniFiNetworkError::ApiError {
                 status: 500,
@@ -1584,18 +1868,89 @@ mod tests {
             name: Some("Workshop AP".to_owned()),
             model: Some("U7 Pro".to_owned()),
             state: Some("ONLINE".to_owned()),
+            mac_address: Some("00:11:22:33:44:55".to_owned()),
+            features: vec!["accessPoint".to_owned()],
         };
         let generic = DeviceOverview {
             id: "device-two".to_owned(),
             name: Some("Device".to_owned()),
             model: Some("USW Lite".to_owned()),
             state: Some("OFFLINE".to_owned()),
+            mac_address: Some("00:11:22:33:66:77".to_owned()),
+            features: vec!["switching".to_owned()],
         };
 
-        assert_eq!(device_sub_target(&named).id, "device:device-one");
-        assert_eq!(device_sub_target(&named).label, "Workshop AP");
-        assert_eq!(device_sub_target(&named).kind, "device");
-        assert_eq!(device_sub_target(&generic).label, "USW Lite");
+        let targets = device_sub_targets(&[named, generic]);
+        assert_eq!(targets[0].id, "device:device-one");
+        assert_eq!(targets[0].label, "Workshop AP");
+        assert_eq!(targets[0].kind, "device");
+        assert_eq!(targets[0].icon.as_deref(), Some("lucide:wifi"));
+        assert_eq!(targets[1].label, "USW Lite");
+        assert_eq!(targets[1].icon.as_deref(), Some("lucide:ethernet-port"));
+    }
+
+    #[test]
+    fn duplicate_device_labels_gain_only_their_mac_suffix() {
+        let devices = [
+            DeviceOverview {
+                id: "device-one".to_owned(),
+                name: Some("Device".to_owned()),
+                model: Some("U7 Lite".to_owned()),
+                state: Some("ONLINE".to_owned()),
+                mac_address: Some("68:d7:9a:11:a4:f6".to_owned()),
+                features: vec!["accessPoint".to_owned()],
+            },
+            DeviceOverview {
+                id: "device-two".to_owned(),
+                name: Some("Device".to_owned()),
+                model: Some("U7 Lite".to_owned()),
+                state: Some("ONLINE".to_owned()),
+                mac_address: Some("68:d7:9a:22:b5:07".to_owned()),
+                features: vec!["accessPoint".to_owned()],
+            },
+            DeviceOverview {
+                id: "device-three".to_owned(),
+                name: Some("Gateway".to_owned()),
+                model: Some("UDM".to_owned()),
+                state: Some("ONLINE".to_owned()),
+                mac_address: Some("68:d7:9a:33:c6:18".to_owned()),
+                features: vec!["gateway".to_owned()],
+            },
+        ];
+
+        let targets = device_sub_targets(&devices);
+        assert_eq!(targets[0].label, "U7 Lite (a4:f6)");
+        assert_eq!(targets[1].label, "U7 Lite (b5:07)");
+        assert_eq!(targets[2].label, "Gateway");
+    }
+
+    #[test]
+    fn device_type_uses_official_features_and_never_guesses_from_model() {
+        let device = |model: &str, features: &[&str]| DeviceOverview {
+            id: model.to_owned(),
+            name: None,
+            model: Some(model.to_owned()),
+            state: Some("ONLINE".to_owned()),
+            mac_address: Some("00:11:22:33:44:55".to_owned()),
+            features: features
+                .iter()
+                .map(|feature| (*feature).to_owned())
+                .collect(),
+        };
+
+        assert_eq!(
+            device_type(&device("U7", &["accessPoint"])),
+            DeviceType::AccessPoint
+        );
+        assert_eq!(
+            device_type(&device("USW", &["switching"])),
+            DeviceType::Switch
+        );
+        assert_eq!(
+            device_type(&device("UDM", &["gateway", "switching"])),
+            DeviceType::Gateway
+        );
+        assert_eq!(device_type(&device("U7", &[])), DeviceType::NetworkDevice);
     }
 
     #[test]
@@ -1605,11 +1960,13 @@ mod tests {
             name: Some("Workshop AP".to_owned()),
             model: Some("U7 Pro".to_owned()),
             state: Some("ONLINE".to_owned()),
+            mac_address: Some("00:11:22:33:44:55".to_owned()),
+            features: vec!["accessPoint".to_owned()],
         };
         let target_id = "device:device-one";
 
         let descriptors = device_data_points(&device);
-        assert_eq!(descriptors.len(), 3);
+        assert_eq!(descriptors.len(), 9);
         assert!(descriptors
             .iter()
             .all(|descriptor| descriptor.target_id.as_deref() == Some(target_id)));
@@ -1625,6 +1982,51 @@ mod tests {
         assert_eq!(format_uptime(Some(7_500)), "2h 5m");
         assert_eq!(format_uptime(Some(59)), "0m");
         assert_eq!(format_uptime(None), "Unavailable");
+    }
+
+    #[test]
+    fn documented_statistics_and_radio_details_map_without_invented_fields() {
+        let statistics: DeviceStatistics = serde_json::from_value(json!({
+            "uptimeSec": 42,
+            "cpuUtilizationPct": 12.5,
+            "memoryUtilizationPct": 48.25,
+            "uplink": {"rxRateBps": 1000, "txRateBps": 2000},
+            "interfaces": {"radios": [{"frequencyGHz": "5", "txRetriesPct": 1.2}]}
+        }))
+        .expect("official device statistics");
+        assert_eq!(statistics.cpu_utilization_pct, Some(12.5));
+        assert_eq!(statistics.memory_utilization_pct, Some(48.25));
+        assert_eq!(
+            statistics
+                .uplink
+                .as_ref()
+                .and_then(|uplink| uplink.rx_rate_bps),
+            Some(1000)
+        );
+
+        let details: DeviceDetails = serde_json::from_value(json!({
+            "interfaces": {
+                "ports": [],
+                "radios": [
+                    {
+                        "wlanStandard": "802.11be",
+                        "frequencyGHz": "6",
+                        "channelWidthMHz": 160,
+                        "channel": 37
+                    },
+                    {
+                        "wlanStandard": "802.11ax",
+                        "frequencyGHz": "2.4",
+                        "channelWidthMHz": 20
+                    }
+                ]
+            }
+        }))
+        .expect("official device detail");
+        assert_eq!(
+            format_radios(&details.interfaces.radios),
+            "6 GHz ch 37 / 160 MHz (802.11be), 2.4 GHz ch auto / 20 MHz (802.11ax)"
+        );
     }
 
     #[test]
@@ -1699,7 +2101,14 @@ mod tests {
             name: Some("Workshop AP".to_owned()),
             model: Some("U7 Pro".to_owned()),
             state: Some("ONLINE".to_owned()),
+            mac_address: Some("00:11:22:33:44:55".to_owned()),
+            features: vec!["accessPoint".to_owned()],
         }];
+
+        assert_eq!(
+            connected_client_count(&page.data, "11111111-1111-1111-1111-111111111111"),
+            1
+        );
 
         let rows = client_resource_items(page.data, &devices);
         let guest = rows

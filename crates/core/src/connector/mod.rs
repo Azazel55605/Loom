@@ -637,6 +637,11 @@ pub struct SubTarget {
     /// from its own `target_id`, which is the thing it actually receives.
     #[serde(default = "default_sub_target_kind")]
     pub kind: String,
+    /// Optional generic icon reference for this particular target. Connectors
+    /// use the same curated `lucide:<name>` convention as metadata; clients
+    /// fall back to the connector icon when it is absent or unknown.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub icon: Option<String>,
 }
 
 /// What [`SubTarget::kind`] means when a connector does not say.
@@ -656,6 +661,7 @@ impl SubTarget {
             id: id.into(),
             label: label.into(),
             kind: default_sub_target_kind(),
+            icon: None,
         }
     }
 
@@ -663,6 +669,13 @@ impl SubTarget {
     #[must_use]
     pub fn of_kind(mut self, kind: impl Into<String>) -> Self {
         self.kind = kind.into();
+        self
+    }
+
+    /// Gives this target a generic icon independent of its connector type.
+    #[must_use]
+    pub fn with_icon(mut self, icon: impl Into<String>) -> Self {
+        self.icon = Some(icon.into());
         self
     }
 }
@@ -1634,6 +1647,21 @@ mod tests {
         }))
         .expect("the new optional field must preserve older discovery payloads");
         assert_eq!(resource.target_field_value, None);
+    }
+
+    #[test]
+    fn sub_target_icon_is_optional_and_uses_the_shared_wire_convention() {
+        let ordinary = serde_json::to_value(SubTarget::new("one", "One")).expect("target");
+        assert_eq!(ordinary.get("icon"), None);
+
+        let decorated = serde_json::to_value(
+            SubTarget::new("ap-one", "Access point")
+                .of_kind("device")
+                .with_icon("lucide:wifi"),
+        )
+        .expect("decorated target");
+        assert_eq!(decorated["icon"], "lucide:wifi");
+        assert_eq!(decorated["kind"], "device");
     }
 
     #[test]

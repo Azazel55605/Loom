@@ -1,7 +1,7 @@
-use std::{error::Error as _, fmt, sync::Arc, time::Duration};
+use std::{error::Error as _, fmt, future::Future, sync::Arc, time::Duration};
 
 use reqwest::StatusCode;
-use serde::de::DeserializeOwned;
+use serde::{de::DeserializeOwned, Deserialize};
 use serde_json::Value;
 use thiserror::Error;
 use tokio::sync::Semaphore;
@@ -10,6 +10,18 @@ const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 const API_KEY_HEADER: &str = "X-API-KEY";
 const INTEGRATION_PATH: &str = "proxy/network/integration/v1";
 const MAX_CONCURRENT_CALLS: usize = 10;
+
+/// The offset-based page envelope shared by every Integration API listing.
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct Page<T> {
+    #[serde(default)]
+    pub(crate) offset: usize,
+    #[serde(default)]
+    pub(crate) count: usize,
+    pub(crate) total_count: usize,
+    pub(crate) data: Vec<T>,
+}
 
 /// Failures at the official UniFi Network Integration API boundary.
 #[derive(Debug, Clone, Error, PartialEq, Eq)]
@@ -100,6 +112,21 @@ impl UniFiNetworkClient {
             })
     }
 
+    /// Fetches an entire Integration API collection using its documented
+    /// `offset`/`limit` envelope. Sites, devices, clients, and vouchers all use
+    /// the same pagination contract; keeping the loop here prevents a new list
+    /// call from accidentally becoming a first-page-only call.
+    pub(crate) async fn fetch_all_pages<T: DeserializeOwned>(
+        &self,
+        path: &str,
+        limit: usize,
+    ) -> Result<Vec<T>, UniFiNetworkError> {
+        fetch_all_pages_with(path, limit, |page_path| async move {
+            self.get::<Page<T>>(&page_path).await
+        })
+        .await
+    }
+
     pub(crate) async fn post_json(&self, path: &str, body: Value) -> Result<(), UniFiNetworkError> {
         let _permit = self.call_permit().await?;
         let endpoint = self.endpoint(path);
@@ -174,6 +201,39 @@ impl UniFiNetworkClient {
     }
 }
 
+async fn fetch_all_pages_with<T, Fetch, Fut>(
+    path: &str,
+    limit: usize,
+    mut fetch: Fetch,
+) -> Result<Vec<T>, UniFiNetworkError>
+where
+    Fetch: FnMut(String) -> Fut,
+    Fut: Future<Output = Result<Page<T>, UniFiNetworkError>>,
+{
+    let mut offset = 0usize;
+    let mut items = Vec::new();
+    let separator = if path.contains('?') { '&' } else { '?' };
+
+    loop {
+        let page = fetch(format!("{path}{separator}offset={offset}&limit={limit}")).await?;
+        let next_offset = page.offset.saturating_add(page.count);
+        items.extend(page.data);
+
+        if page.count == 0 || next_offset >= page.total_count {
+            break;
+        }
+        if next_offset <= offset {
+            return Err(UniFiNetworkError::ApiError {
+                status: 200,
+                message: "paginated response did not advance its offset".to_owned(),
+            });
+        }
+        offset = next_offset;
+    }
+
+    Ok(items)
+}
+
 fn api_path(endpoint: &str) -> &str {
     endpoint
         .find("/proxy/network/integration/")
@@ -224,6 +284,7 @@ async fn response_message(response: reqwest::Response) -> String {
 mod tests {
     use super::*;
     use reqwest::Url;
+    use std::{collections::VecDeque, sync::Mutex};
 
     #[test]
     fn endpoint_uses_the_official_local_versioned_base_path() {
@@ -258,5 +319,51 @@ mod tests {
             UniFiNetworkClient::connect("https://console.example.com", "not-a-real-key", false)
                 .expect("client");
         assert_eq!(client.call_limit.available_permits(), MAX_CONCURRENT_CALLS);
+    }
+
+    #[tokio::test]
+    async fn pagination_aggregates_every_page_and_advances_by_the_envelope_count() {
+        let pages = Mutex::new(VecDeque::from([
+            Page {
+                offset: 0,
+                count: 2,
+                total_count: 5,
+                data: vec!["one", "two"],
+            },
+            Page {
+                offset: 2,
+                count: 2,
+                total_count: 5,
+                data: vec!["three", "four"],
+            },
+            Page {
+                offset: 4,
+                count: 1,
+                total_count: 5,
+                data: vec!["five"],
+            },
+        ]));
+        let requested = Mutex::new(Vec::new());
+
+        let items = fetch_all_pages_with("sites/site/devices", 2, |path| {
+            requested.lock().expect("request log").push(path);
+            std::future::ready(Ok(pages
+                .lock()
+                .expect("page queue")
+                .pop_front()
+                .expect("page")))
+        })
+        .await
+        .expect("pages");
+
+        assert_eq!(items, ["one", "two", "three", "four", "five"]);
+        assert_eq!(
+            *requested.lock().expect("request log"),
+            [
+                "sites/site/devices?offset=0&limit=2",
+                "sites/site/devices?offset=2&limit=2",
+                "sites/site/devices?offset=4&limit=2",
+            ]
+        );
     }
 }

@@ -3,6 +3,7 @@ import * as React from "react";
 import { Badge } from "@loom/ui-kit/components/ui/badge";
 import { Button } from "@loom/ui-kit/components/ui/button";
 import { Input } from "@loom/ui-kit/components/ui/input";
+import { ConnectorIcon } from "@loom/ui-kit/components/ConnectorIcon";
 
 export type SearchablePickerOption = {
   id: string;
@@ -16,6 +17,8 @@ export type SearchablePickerOption = {
    * saying so.
    */
   badge?: string;
+  /** Optional curated generic icon reference supplied by the option source. */
+  icon?: string;
 };
 
 /** Shared search-and-select list used by discovery and sub-target pickers. */
@@ -65,7 +68,11 @@ export function SearchablePickerList({
               // option label plus a badge can never push the row — and with it
               // the whole dialog — past its own edge. Flex `min-w-0` did not
               // hold here; this is the shape that does.
-              className="grid h-auto w-full grid-cols-[minmax(0,1fr)_auto] items-center gap-2 whitespace-normal text-left"
+              className={
+                option.icon === undefined
+                  ? "grid h-auto w-full grid-cols-[minmax(0,1fr)_auto] items-center gap-2 whitespace-normal text-left"
+                  : "grid h-auto w-full grid-cols-[auto_minmax(0,1fr)_auto] items-center gap-2 whitespace-normal text-left"
+              }
               disabled={disabled}
               aria-pressed={option.id === selectedId}
               onClick={() => onSelect(option.id)}
@@ -75,6 +82,9 @@ export function SearchablePickerList({
                   breaking does not shrink the row's *minimum* width — which
                   propagates up the flex chain and stretches the whole dialog
                   past its own edge. Observed, then fixed. */}
+              {option.icon === undefined ? null : (
+                <ConnectorIcon typeIcon={option.icon} iconOverride={null} size={18} />
+              )}
               <span className="min-w-0 break-words">{option.label}</span>
               {option.badge === undefined ? null : (
                 // Right-aligned in its own auto column, so at a narrow width the
