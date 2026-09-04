@@ -47,20 +47,34 @@ export function StatTileWidget({
   const numeric = typeof value === "number" ? formatNumericReading(value, unit) : null;
   const text = numeric?.text ?? formatReading(value);
   const displayedUnit = numeric?.unit ?? unit;
+  const lines = text.split("\n");
+  const isMultiline = lines.length > 1;
   const resolvedSize = size ?? (value === undefined || text.length > 12 ? "sm" : "md");
 
   return (
     <div className={cn("flex min-w-0 flex-col justify-center gap-1", className)}>
       <div className="flex min-w-0 flex-wrap items-baseline gap-x-1 gap-y-0">
-        <span
-          className={cn(
-            statTileValue({ size: resolvedSize }),
-            "min-w-0 max-w-full whitespace-pre-line [overflow-wrap:anywhere]",
-            text.includes("\n") && "leading-snug",
-          )}
-        >
-          {text}
-        </span>
+        {isMultiline ? (
+          <span className="grid min-w-0 max-w-full gap-1 text-sm font-medium leading-snug">
+            {lines.map((line, index) => (
+              <span
+                className="block min-w-0 rounded-md bg-muted/50 px-2 py-1 [overflow-wrap:anywhere]"
+                key={`${index}-${line}`}
+              >
+                {line}
+              </span>
+            ))}
+          </span>
+        ) : (
+          <span
+            className={cn(
+              statTileValue({ size: resolvedSize }),
+              "min-w-0 max-w-full [overflow-wrap:anywhere]",
+            )}
+          >
+            {text}
+          </span>
+        )}
         {displayedUnit && value !== undefined ? (
           <span className="shrink-0 text-sm text-muted-foreground">{displayedUnit}</span>
         ) : null}

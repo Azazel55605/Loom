@@ -30,6 +30,13 @@ at `https://developer.ui.com/network/v9.4.17/openapi.json`:
   `totalCount`, and `data`; no cursor or next-page token is involved. Loom
   advances by the number of rows actually present in `data`, making pagination
   robust when a console's `count` disagrees with its payload.
+- Some real Network releases omit an adopted online AP from the paginated
+  devices collection even though active client rows still carry that device's
+  UUID in `uplinkDeviceId`. The official per-device detail route accepts that
+  UUID, so Loom best-effort reconciles missing uplinks through
+  `GET /sites/{siteId}/devices/{deviceId}`. It does not call undocumented legacy
+  APIs and cannot recover an omitted device that currently has no client
+  reference.
 - A device overview explicitly identifies capabilities through `features`:
   `accessPoint`, `switching`, and `gateway`. Classification therefore must not
   guess from the model string. Device detail exposes radio standard,

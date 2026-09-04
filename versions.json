@@ -3,7 +3,7 @@
   "connector-docker": "0.4.3",
   "connector-pihole": "0.3.0",
   "connector-truenas": "0.2.0",
-  "connector-unifi-network": "0.5.2",
+  "connector-unifi-network": "0.5.3",
   "web-backend": "0.3.5",
   "web-frontend": "0.3.5",
   "desktop": "0.3.2",

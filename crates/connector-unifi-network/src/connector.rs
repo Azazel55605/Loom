@@ -1,4 +1,4 @@
-use std::sync::Mutex;
+use std::{collections::HashSet, sync::Mutex};
 
 use async_trait::async_trait;
 use futures_util::future::join_all;
@@ -139,8 +139,9 @@ impl UniFiNetworkConnector {
     }
 
     async fn read_status(&self) -> Result<PollReadings, UniFiNetworkError> {
-        let devices = self.list_all_devices().await?;
+        let (devices, clients) = self.list_network_inventory().await?;
         self.remember_devices(devices.clone());
+        self.remember_clients(clients.clone());
 
         // This deliberately fetches detail for every known device, whether or
         // not somebody has placed that target on a dashboard. That is simple
@@ -160,10 +161,7 @@ impl UniFiNetworkConnector {
                 )
             }
         }));
-        let clients = self.list_all_clients();
-        let (device_readings, clients) = tokio::join!(device_readings, clients);
-        let clients = clients?;
-        self.remember_clients(clients.clone());
+        let device_readings = device_readings.await;
 
         Ok(PollReadings {
             summary: map_site_summary(&devices, clients.len()),
@@ -181,7 +179,13 @@ impl UniFiNetworkConnector {
     }
 
     async fn list_all_devices(&self) -> Result<Vec<DeviceOverview>, UniFiNetworkError> {
-        self.list_all_devices_for_site(&self.site.id).await
+        let mut devices = self.list_all_devices_for_site(&self.site.id).await?;
+        if let Ok(clients) = self.list_all_clients().await {
+            self.recover_missing_client_uplinks(&self.site.id, &mut devices, &clients)
+                .await;
+            self.remember_clients(clients);
+        }
+        Ok(devices)
     }
 
     async fn list_all_devices_for_site(
@@ -237,6 +241,53 @@ impl UniFiNetworkConnector {
             .await?;
         clients.retain(|client| !client.id.trim().is_empty());
         Ok(clients)
+    }
+
+    async fn list_network_inventory(
+        &self,
+    ) -> Result<(Vec<DeviceOverview>, Vec<ClientOverview>), UniFiNetworkError> {
+        self.list_network_inventory_for_site(&self.site.id).await
+    }
+
+    async fn list_network_inventory_for_site(
+        &self,
+        site_id: &str,
+    ) -> Result<(Vec<DeviceOverview>, Vec<ClientOverview>), UniFiNetworkError> {
+        let (devices, clients) = tokio::join!(
+            self.list_all_devices_for_site(site_id),
+            self.list_all_clients_for_site(site_id),
+        );
+        let mut devices = devices?;
+        let clients = clients?;
+        self.recover_missing_client_uplinks(site_id, &mut devices, &clients)
+            .await;
+        Ok((devices, clients))
+    }
+
+    /// Some real Network releases omit an adopted AP from the paginated
+    /// devices collection even while connected clients name it as their
+    /// uplink. Both the client uplink id and per-device detail route are part
+    /// of the official Integration API, so reconcile those references rather
+    /// than falling back to an undocumented legacy endpoint.
+    ///
+    /// Recovery is best-effort: one stale uplink reference must not turn an
+    /// otherwise useful inventory into a connector-wide failure.
+    async fn recover_missing_client_uplinks(
+        &self,
+        site_id: &str,
+        devices: &mut Vec<DeviceOverview>,
+        clients: &[ClientOverview],
+    ) {
+        let missing_ids = missing_uplink_device_ids(devices, clients);
+        let recovered = join_all(missing_ids.into_iter().map(|device_id| async move {
+            let path = format!("sites/{site_id}/devices/{device_id}");
+            let details = self.client.get::<DeviceDetails>(&path).await.ok()?;
+            (details.id == device_id)
+                .then(|| device_overview_from_details(details))
+                .flatten()
+        }))
+        .await;
+        devices.extend(recovered.into_iter().flatten());
     }
 
     fn remember_clients(&self, clients: Vec<ClientOverview>) {
@@ -397,6 +448,14 @@ impl loom_core::connector::Connector for UniFiNetworkConnector {
             self.list_all_devices_for_site(&site.id),
             self.list_all_clients_for_site(&site.id),
         );
+        let devices = match (devices, clients.as_ref()) {
+            (Ok(mut devices), Ok(clients)) => {
+                self.recover_missing_client_uplinks(&site.id, &mut devices, clients)
+                    .await;
+                Ok(devices)
+            }
+            (devices, _) => devices,
+        };
         connection_test_from_reads(devices, clients)
     }
 
@@ -771,6 +830,18 @@ struct UplinkStatistics {
 #[serde(rename_all = "camelCase")]
 struct DeviceDetails {
     #[serde(default)]
+    id: String,
+    #[serde(default)]
+    name: Option<String>,
+    #[serde(default)]
+    model: Option<String>,
+    #[serde(default)]
+    state: Option<String>,
+    #[serde(default)]
+    mac_address: Option<String>,
+    #[serde(default)]
+    features: Map<String, Value>,
+    #[serde(default)]
     interfaces: DeviceInterfaces,
 }
 
@@ -919,6 +990,47 @@ fn connected_client_count(clients: &[ClientOverview], device_id: &str) -> usize 
         .iter()
         .filter(|client| client.uplink_device_id.as_deref() == Some(device_id))
         .count()
+}
+
+fn missing_uplink_device_ids(
+    devices: &[DeviceOverview],
+    clients: &[ClientOverview],
+) -> Vec<String> {
+    let known = devices
+        .iter()
+        .map(|device| device.id.as_str())
+        .collect::<HashSet<_>>();
+    let mut missing = HashSet::new();
+    clients
+        .iter()
+        .filter_map(|client| client.uplink_device_id.as_deref())
+        .map(str::trim)
+        .filter(|device_id| !device_id.is_empty() && !known.contains(device_id))
+        .filter(|device_id| missing.insert((*device_id).to_owned()))
+        .map(str::to_owned)
+        .collect()
+}
+
+fn device_overview_from_details(details: DeviceDetails) -> Option<DeviceOverview> {
+    if details.id.trim().is_empty() {
+        return None;
+    }
+    let mut features = ["gateway", "accessPoint", "switching"]
+        .into_iter()
+        .filter(|feature| details.features.contains_key(*feature))
+        .map(str::to_owned)
+        .collect::<Vec<_>>();
+    if features.is_empty() && !details.interfaces.radios.is_empty() {
+        features.push("accessPoint".to_owned());
+    }
+    Some(DeviceOverview {
+        state: details.state,
+        id: details.id,
+        name: details.name,
+        model: details.model,
+        mac_address: details.mac_address,
+        features,
+    })
 }
 
 fn device_target_id(device_id: &str) -> String {
@@ -1599,7 +1711,7 @@ fn format_radios(radios: &[RadioOverview]) -> String {
                 .channel
                 .map_or_else(|| "auto".to_owned(), |channel| channel.to_string());
             format!(
-                "{} GHz · Channel {channel} · {} MHz · {}",
+                "{} GHz · Ch {channel} · {} MHz · {}",
                 radio.frequency_ghz,
                 radio.channel_width_mhz,
                 describe_wifi_standard(&radio.wlan_standard)
@@ -1617,10 +1729,7 @@ fn describe_wifi_standard(standard: &str) -> String {
         "802.11be" => Some("Wi-Fi 7"),
         _ => None,
     };
-    generation.map_or_else(
-        || standard.to_owned(),
-        |label| format!("{label} ({standard})"),
-    )
+    generation.map_or_else(|| standard.to_owned(), str::to_owned)
 }
 
 fn health_for_device_state(state: &str) -> HealthState {
@@ -2077,13 +2186,68 @@ mod tests {
         .expect("official device detail");
         assert_eq!(
             format_radios(&details.interfaces.radios),
-            "6 GHz · Channel 37 · 160 MHz · Wi-Fi 7 (802.11be)\n2.4 GHz · Channel auto · 20 MHz · Wi-Fi 6 (802.11ax)"
+            "6 GHz · Ch 37 · 160 MHz · Wi-Fi 7\n2.4 GHz · Ch auto · 20 MHz · Wi-Fi 6"
         );
     }
 
     #[test]
     fn legacy_radio_standards_remain_explicit_when_they_have_no_wifi_generation_name() {
         assert_eq!(describe_wifi_standard("802.11a"), "802.11a");
+    }
+
+    #[test]
+    fn missing_client_uplinks_identify_unlisted_devices_once() {
+        let devices = vec![DeviceOverview {
+            id: "known-device".to_owned(),
+            name: None,
+            model: None,
+            state: None,
+            mac_address: None,
+            features: Vec::new(),
+        }];
+        let client = |id: &str, uplink: Option<&str>| ClientOverview {
+            id: id.to_owned(),
+            name: String::new(),
+            mac_address: None,
+            ip_address: None,
+            uplink_device_id: uplink.map(str::to_owned),
+            access: ClientAccessOverview {
+                access_type: "WIRELESS".to_owned(),
+                authorized: None,
+            },
+        };
+        let clients = vec![
+            client("one", Some("known-device")),
+            client("two", Some("missing-device")),
+            client("three", Some("missing-device")),
+            client("four", Some("")),
+            client("five", None),
+        ];
+
+        assert_eq!(
+            missing_uplink_device_ids(&devices, &clients),
+            ["missing-device"]
+        );
+    }
+
+    #[test]
+    fn official_device_detail_can_recover_an_omitted_access_point() {
+        let details: DeviceDetails = serde_json::from_value(json!({
+            "id": "missing-ap",
+            "name": "Upstairs",
+            "model": "U7 Pro",
+            "state": "ONLINE",
+            "macAddress": "00:11:22:33:44:55",
+            "features": {"accessPoint": {}},
+            "interfaces": {"ports": [], "radios": []}
+        }))
+        .expect("official device detail");
+
+        let recovered = device_overview_from_details(details).expect("recoverable device");
+        assert_eq!(recovered.id, "missing-ap");
+        assert_eq!(recovered.state.as_deref(), Some("ONLINE"));
+        assert_eq!(recovered.features, ["accessPoint"]);
+        assert_eq!(device_type(&recovered), DeviceType::AccessPoint);
     }
 
     #[test]

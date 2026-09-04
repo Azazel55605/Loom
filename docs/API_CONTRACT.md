@@ -1030,7 +1030,13 @@ actually returned so an inconsistent envelope `count` cannot skip a row. Sites,
 devices, and clients default to 25 rows and allow 200; vouchers default to 100
 and allow 1000. The host view
 publishes `deviceCount`, `onlineDeviceCount`, and `clientCount` from the complete
-device/client collections.
+device/client collections. Some real Network releases omit an online adopted AP
+from that devices collection while active clients still reference its UUID as
+their `uplinkDeviceId`. Loom reconciles those official references through
+`GET /sites/{siteId}/devices/{deviceId}` and merges successfully resolved device
+details into the inventory. This is deliberately best-effort: a stale client
+reference cannot fail the entire connector, and an omitted device with no active
+client reference cannot be discovered by this fallback.
 
 Each returned device is an addressable `device:{deviceId}` sub-target. A poll
 also reads `/sites/{siteId}/devices/{deviceId}/statistics/latest` for every
@@ -1043,9 +1049,10 @@ publish `connectedClientCount`, derived from the complete client collection's
 frequency, channel, and channel width fields. The current API publishes no
 per-port throughput counters, so Loom does not invent a switch aggregate.
 `frequencyGHz` accepts both the documented string form and the numeric form
-returned by some real consoles. Radio summaries preserve one line per radio and
-spell out frequency, channel, channel width, and the Wi-Fi generation/802.11
-standard so compact tiles do not merge adjacent radios into an ambiguous value.
+returned by some real consoles. Radio summaries preserve one compact line per
+radio with frequency, abbreviated channel, channel width, and friendly Wi-Fi
+generation so compact tiles do not merge adjacent radios into an ambiguous
+value.
 `ONLINE` is Healthy;
 `PENDING_ADOPTION`, `UPDATING`, `GETTING_READY`, `ADOPTING`, and `DELETING` are
 Degraded; `OFFLINE`, `CONNECTION_INTERRUPTED`, and `ISOLATED` are Down. Unknown
