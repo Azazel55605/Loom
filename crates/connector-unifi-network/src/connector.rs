@@ -1476,12 +1476,23 @@ fn connection_test_from_reads(
     devices: Result<Vec<DeviceOverview>, UniFiNetworkError>,
     clients: Result<Vec<ClientOverview>, UniFiNetworkError>,
 ) -> ConnectionTestResult {
-    let read_devices = tested_read_capability(
-        CAPABILITY_READ_DEVICES,
-        "List devices",
-        "device listing",
-        devices,
-    );
+    let read_devices = match devices {
+        Ok(devices) => available_capability(
+            CAPABILITY_READ_DEVICES,
+            "List devices",
+            Some(format!(
+                "The configured site returned {} adopted device{}.",
+                devices.len(),
+                if devices.len() == 1 { "" } else { "s" }
+            )),
+        ),
+        Err(error) => CapabilityStatus {
+            key: CAPABILITY_READ_DEVICES.to_owned(),
+            label: "List devices".to_owned(),
+            available: false,
+            note: Some(format!("device listing failed: {error}")),
+        },
+    };
     let read_clients = tested_read_capability(
         CAPABILITY_READ_CLIENTS,
         "List clients",
@@ -1588,12 +1599,28 @@ fn format_radios(radios: &[RadioOverview]) -> String {
                 .channel
                 .map_or_else(|| "auto".to_owned(), |channel| channel.to_string());
             format!(
-                "{} GHz ch {channel} / {} MHz ({})",
-                radio.frequency_ghz, radio.channel_width_mhz, radio.wlan_standard
+                "{} GHz · Channel {channel} · {} MHz · {}",
+                radio.frequency_ghz,
+                radio.channel_width_mhz,
+                describe_wifi_standard(&radio.wlan_standard)
             )
         })
         .collect::<Vec<_>>()
-        .join(", ")
+        .join("\n")
+}
+
+fn describe_wifi_standard(standard: &str) -> String {
+    let generation = match standard {
+        "802.11n" => Some("Wi-Fi 4"),
+        "802.11ac" => Some("Wi-Fi 5"),
+        "802.11ax" => Some("Wi-Fi 6"),
+        "802.11be" => Some("Wi-Fi 7"),
+        _ => None,
+    };
+    generation.map_or_else(
+        || standard.to_owned(),
+        |label| format!("{label} ({standard})"),
+    )
 }
 
 fn health_for_device_state(state: &str) -> HealthState {
@@ -1708,7 +1735,12 @@ mod tests {
         );
 
         assert!(result.reachable);
-        assert!(capability(&result, CAPABILITY_READ_DEVICES).available);
+        let devices = capability(&result, CAPABILITY_READ_DEVICES);
+        assert!(devices.available);
+        assert!(devices
+            .note
+            .as_deref()
+            .is_some_and(|note| note.contains("1 adopted device.")));
         let clients = capability(&result, CAPABILITY_READ_CLIENTS);
         assert!(!clients.available);
         assert!(clients
@@ -2045,8 +2077,13 @@ mod tests {
         .expect("official device detail");
         assert_eq!(
             format_radios(&details.interfaces.radios),
-            "6 GHz ch 37 / 160 MHz (802.11be), 2.4 GHz ch auto / 20 MHz (802.11ax)"
+            "6 GHz · Channel 37 · 160 MHz · Wi-Fi 7 (802.11be)\n2.4 GHz · Channel auto · 20 MHz · Wi-Fi 6 (802.11ax)"
         );
+    }
+
+    #[test]
+    fn legacy_radio_standards_remain_explicit_when_they_have_no_wifi_generation_name() {
+        assert_eq!(describe_wifi_standard("802.11a"), "802.11a");
     }
 
     #[test]

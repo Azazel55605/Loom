@@ -1043,7 +1043,9 @@ publish `connectedClientCount`, derived from the complete client collection's
 frequency, channel, and channel width fields. The current API publishes no
 per-port throughput counters, so Loom does not invent a switch aggregate.
 `frequencyGHz` accepts both the documented string form and the numeric form
-returned by some real consoles.
+returned by some real consoles. Radio summaries preserve one line per radio and
+spell out frequency, channel, channel width, and the Wi-Fi generation/802.11
+standard so compact tiles do not merge adjacent radios into an ambiguous value.
 `ONLINE` is Healthy;
 `PENDING_ADOPTION`, `UPDATING`, `GETTING_READY`, `ADOPTING`, and `DELETING` are
 Degraded; `OFFLINE`, `CONNECTION_INTERRUPTED`, and `ISOLATED` are Down. Unknown

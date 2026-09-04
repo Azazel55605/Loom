@@ -166,27 +166,38 @@ export function formatReading(value: unknown): string {
 }
 
 const BYTE_UNITS = ["B", "KiB", "MiB", "GiB", "TiB", "PiB"] as const;
+const BIT_RATE_UNITS = ["bps", "Kbps", "Mbps", "Gbps", "Tbps", "Pbps"] as const;
 
-/** Scales an exact byte count for display while leaving the API value intact. */
-export function formatByteReading(value: number): { text: string; unit: string } {
-  if (!Number.isFinite(value)) return { text: "—", unit: "B" };
-  if (value === 0) return { text: "0", unit: "B" };
+function formatScaledReading(
+  value: number,
+  base: number,
+  units: readonly string[],
+): { text: string; unit: string } {
+  if (!Number.isFinite(value)) return { text: "—", unit: units[0] };
+  if (value === 0) return { text: "0", unit: units[0] };
 
   const magnitude = Math.abs(value);
-  const exponent = Math.min(
-    Math.floor(Math.log(magnitude) / Math.log(1024)),
-    BYTE_UNITS.length - 1,
-  );
-  const scaled = value / 1024 ** exponent;
+  const exponent = Math.min(Math.floor(Math.log(magnitude) / Math.log(base)), units.length - 1);
+  const scaled = value / base ** exponent;
   const maximumFractionDigits = Math.abs(scaled) >= 100 ? 0 : Math.abs(scaled) >= 10 ? 1 : 2;
 
   return {
     text: new Intl.NumberFormat(undefined, { maximumFractionDigits }).format(scaled),
-    unit: BYTE_UNITS[exponent],
+    unit: units[exponent],
   };
 }
 
-/** Formats any numeric widget reading, scaling the API's canonical byte unit. */
+/** Scales an exact byte count for display while leaving the API value intact. */
+export function formatByteReading(value: number): { text: string; unit: string } {
+  return formatScaledReading(value, 1024, BYTE_UNITS);
+}
+
+/** Scales bits per second with SI network-rate units; the API value remains bps. */
+export function formatBitRateReading(value: number): { text: string; unit: string } {
+  return formatScaledReading(value, 1000, BIT_RATE_UNITS);
+}
+
+/** Formats numeric widget readings, scaling canonical byte and bit-rate units. */
 export function formatNumericReading(
   value: number,
   unit?: string | null,
@@ -194,6 +205,10 @@ export function formatNumericReading(
   if (unit === "bytes") {
     const bytes = formatByteReading(value);
     return { ...bytes, separator: " " };
+  }
+  if (unit === "bps") {
+    const bitRate = formatBitRateReading(value);
+    return { ...bitRate, separator: " " };
   }
   return {
     text: Number.isInteger(value) ? String(value) : value.toFixed(2),

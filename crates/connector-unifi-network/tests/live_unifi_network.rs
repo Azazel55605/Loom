@@ -73,7 +73,7 @@ async fn a_real_unifi_console_reports_site_counts_and_obeys_the_contract() {
         assert_eq!(
             targets.len(),
             expected,
-            "pagination must return every device the live console is expected to expose"
+            "the configured site returned these targets instead: {targets:#?}"
         );
     }
     for target in &targets {

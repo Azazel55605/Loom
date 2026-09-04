@@ -31,7 +31,7 @@ export function ProgressBarWidget({ label, unit, value, config, className }: Dis
   const readingText =
     reading === null
       ? "—"
-      : unit === "bytes"
+      : unit === "bytes" || unit === "bps"
         ? formatNumericReadingText(reading, unit)
         : `${Number.isInteger(reading) ? reading : reading.toFixed(1)}${unit ?? ""}`;
 

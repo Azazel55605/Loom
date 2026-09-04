@@ -55,7 +55,8 @@ export function StatTileWidget({
         <span
           className={cn(
             statTileValue({ size: resolvedSize }),
-            "min-w-0 max-w-full whitespace-normal [overflow-wrap:anywhere]",
+            "min-w-0 max-w-full whitespace-pre-line [overflow-wrap:anywhere]",
+            text.includes("\n") && "leading-snug",
           )}
         >
           {text}

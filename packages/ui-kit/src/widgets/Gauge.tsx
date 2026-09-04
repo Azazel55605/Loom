@@ -83,7 +83,7 @@ export function GaugeWidget({
   const formatted =
     reading === null
       ? null
-      : unit === "bytes"
+      : unit === "bytes" || unit === "bps"
         ? formatNumericReading(reading, unit)
         : {
             text: Number.isInteger(reading) ? String(reading) : reading.toFixed(1),
@@ -94,7 +94,7 @@ export function GaugeWidget({
   const readingText =
     reading === null
       ? "no reading"
-      : unit === "bytes"
+      : unit === "bytes" || unit === "bps"
         ? formatNumericReadingText(reading, unit)
         : `${text}${unit ?? ""}`;
 
