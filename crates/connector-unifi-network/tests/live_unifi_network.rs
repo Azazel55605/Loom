@@ -22,7 +22,8 @@ use loom_connector_unifi_network::{
     DATA_POINT_RADIO_TX_RETRY_PERCENT, DATA_POINT_STATE, DATA_POINT_UPTIME, DATA_POINT_WAN_COUNT,
     RESOURCE_KIND_ACL_RULES, RESOURCE_KIND_CLIENTS, RESOURCE_KIND_DNS_POLICIES,
     RESOURCE_KIND_FIREWALL_POLICIES, RESOURCE_KIND_FIREWALL_ZONES, RESOURCE_KIND_NETWORKS,
-    RESOURCE_KIND_PENDING_DEVICES, RESOURCE_KIND_PORTS, RESOURCE_KIND_VOUCHERS, RESOURCE_KIND_WANS,
+    RESOURCE_KIND_PENDING_DEVICES, RESOURCE_KIND_PORTS, RESOURCE_KIND_SITE_TO_SITE_TUNNELS,
+    RESOURCE_KIND_VOUCHERS, RESOURCE_KIND_VPN_SERVERS, RESOURCE_KIND_WANS,
     RESOURCE_KIND_WLAN_BROADCASTS,
 };
 use loom_core::connector::{Connector, HealthState};
@@ -237,6 +238,25 @@ async fn a_real_unifi_console_reports_site_counts_and_obeys_the_contract() {
             && row.fields.get("securityType").is_some_and(Value::is_string)
             && row.fields.get("frequencies").is_some_and(Value::is_string)
     }));
+    let vpn_servers = connector
+        .list_resource_items(RESOURCE_KIND_VPN_SERVERS, None)
+        .await
+        .expect("the live site should list VPN servers, even when empty");
+    assert!(vpn_servers.iter().all(|row| {
+        row.fields.get("name").is_some_and(Value::is_string)
+            && row.fields.get("type").is_some_and(Value::is_string)
+            && row.fields.get("enabled").is_some_and(Value::is_boolean)
+    }));
+    let site_to_site_tunnels = connector
+        .list_resource_items(RESOURCE_KIND_SITE_TO_SITE_TUNNELS, None)
+        .await
+        .expect("the live site should list site-to-site tunnels, even when empty");
+    assert!(site_to_site_tunnels.iter().all(|row| {
+        row.fields.get("name").is_some_and(Value::is_string)
+            && row.fields.get("type").is_some_and(Value::is_string)
+            && !row.fields.contains_key("remotePeer")
+            && !row.fields.contains_key("enabled")
+    }));
     let mut port_count = 0usize;
     for target in &targets {
         let ports = connector
@@ -255,7 +275,7 @@ async fn a_real_unifi_console_reports_site_counts_and_obeys_the_contract() {
     contract_targets.extend(targets.iter().map(|target| Some(target.id.clone())));
     loom_connector_test_kit::assert_connector_contract(&connector, &contract_targets).await;
     eprintln!(
-        "{test_name}: {:#}; {} client rows, {} voucher rows, {} WAN rows, {} pending-device rows, {} ACL rows, {} DNS rows, {} zone rows, {} policy rows, {} network rows, {} WLAN rows, {} port rows",
+        "{test_name}: {:#}; {} client rows, {} voucher rows, {} WAN rows, {} pending-device rows, {} ACL rows, {} DNS rows, {} zone rows, {} policy rows, {} network rows, {} WLAN rows, {} VPN-server rows, {} site-to-site tunnel rows, {} port rows",
         status.details,
         clients.len(),
         vouchers.len(),
@@ -267,6 +287,8 @@ async fn a_real_unifi_console_reports_site_counts_and_obeys_the_contract() {
         firewall_policies.len(),
         networks.len(),
         wlan_broadcasts.len(),
+        vpn_servers.len(),
+        site_to_site_tunnels.len(),
         port_count
     );
 }

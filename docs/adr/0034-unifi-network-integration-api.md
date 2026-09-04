@@ -76,6 +76,11 @@ document and refreshed against the Network 10.4.57 document at
   (`ipv4Address`, `ttlSeconds`), CNAME records (`targetDomain`, `ttlSeconds`),
   and forward domains (`ipAddress`). AAAA, MX, SRV, and TXT remain visible and
   deletable but are not offered misleadingly through a conditional mega-form.
+- VPN servers and site-to-site tunnels are read-only paginated collections in
+  10.4.57. VPN servers expose `id`, `name`, `type`, and `enabled`. Site-to-site
+  tunnel overviews expose only `id`, `name`, `type`, and metadata: the schema
+  has no remote-peer or enabled field and publishes no tunnel detail route.
+  Loom therefore presents only the two truthful display columns for tunnels.
 - Local consoles may present self-signed certificates. Loom's
   `allowInsecureCert` option relaxes certificate verification only for that
   configured connector; the origin remains HTTPS and the API key is never sent

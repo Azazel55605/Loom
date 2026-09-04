@@ -1093,6 +1093,8 @@ schema.
 | `firewallPolicies` | Host only | `name`, `action`, `sourceZone`, `destinationZone`, `enabled`, `loggingEnabled` | Row: `deleteFirewallPolicy`, `toggleLogging` | Paginated `GET /sites/{siteId}/firewall/policies`. Zone IDs are resolved to names. Logging is the API's sole partial policy update and PATCHes only `{ "loggingEnabled": bool }`; full policy creation is deliberately unavailable. |
 | `networks` | Host only | `name`, `vlanId`, `management`, `enabled` | Row: disruptive `deleteNetwork` | Paginated `GET /sites/{siteId}/networks`. Deletion explicitly uses `force=false`, allowing UniFi to reject referenced networks instead of silently disrupting their consumers. |
 | `wlanBroadcasts` | Host only | `name`, `enabled`, `hidden`, `securityType`, `frequencies` | Row: disruptive `toggleEnabled` | The paginated WLAN overview omits hidden state, so Loom fetches each `/wifi/broadcasts/{id}` detail under the connector's ten-call concurrency cap. Toggle removes response-only `id`/`metadata`, flips only `enabled`, and PUTs every other mutable configuration value back unchanged. |
+| `vpnServers` | Host only | `name`, `type`, `enabled` | None | Read-only paginated `GET /sites/{siteId}/vpn/servers`. Network 10.4.57 exposes exactly these display fields plus the row ID and metadata. |
+| `siteToSiteTunnels` | Host only | `name`, `type` | None | Read-only paginated `GET /sites/{siteId}/vpn/site-to-site-tunnels`. Its 10.4.57 overview exposes no remote-peer or enabled field and there is no detail endpoint, so Loom does not fabricate either requested-looking value. |
 
 `createVoucher` creates one voucher and requires only `name` and
 `timeLimitMinutes`; `authorizedGuestLimit`, `dataUsageLimitMBytes`,

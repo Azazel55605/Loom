@@ -71,6 +71,8 @@ pub const RESOURCE_KIND_FIREWALL_ZONES: &str = "firewallZones";
 pub const RESOURCE_KIND_FIREWALL_POLICIES: &str = "firewallPolicies";
 pub const RESOURCE_KIND_NETWORKS: &str = "networks";
 pub const RESOURCE_KIND_WLAN_BROADCASTS: &str = "wlanBroadcasts";
+pub const RESOURCE_KIND_VPN_SERVERS: &str = "vpnServers";
+pub const RESOURCE_KIND_SITE_TO_SITE_TUNNELS: &str = "siteToSiteTunnels";
 
 pub const CAPABILITY_READ_DEVICES: &str = "readDevices";
 pub const CAPABILITY_READ_CLIENTS: &str = "readClients";
@@ -440,6 +442,26 @@ impl UniFiNetworkConnector {
         }))
         .await;
         details.into_iter().collect()
+    }
+
+    async fn list_all_vpn_servers(&self) -> Result<Vec<VpnServerOverview>, UniFiNetworkError> {
+        self.client
+            .fetch_all_pages::<VpnServerOverview>(
+                &format!("sites/{}/vpn/servers", self.site.id),
+                PAGE_LIMIT,
+            )
+            .await
+    }
+
+    async fn list_all_site_to_site_tunnels(
+        &self,
+    ) -> Result<Vec<SiteToSiteTunnelOverview>, UniFiNetworkError> {
+        self.client
+            .fetch_all_pages::<SiteToSiteTunnelOverview>(
+                &format!("sites/{}/vpn/site-to-site-tunnels", self.site.id),
+                PAGE_LIMIT,
+            )
+            .await
     }
 
     async fn list_sub_targets_live(&self) -> Result<Vec<SubTarget>, ConnectorError> {
@@ -918,6 +940,8 @@ impl loom_core::connector::Connector for UniFiNetworkConnector {
                 firewall_policies_kind(),
                 networks_kind(),
                 wlan_broadcasts_kind(),
+                vpn_servers_kind(),
+                site_to_site_tunnels_kind(),
             ],
             Some(target) if device_id_from_target(target).is_some() => vec![ports_kind()],
             _ => Vec::new(),
@@ -992,6 +1016,14 @@ impl loom_core::connector::Connector for UniFiNetworkConnector {
             )),
             (RESOURCE_KIND_WLAN_BROADCASTS, None) => Ok(wifi_broadcast_resource_items(
                 self.list_all_wifi_broadcasts()
+                    .await
+                    .map_err(connector_error)?,
+            )),
+            (RESOURCE_KIND_VPN_SERVERS, None) => Ok(vpn_server_resource_items(
+                self.list_all_vpn_servers().await.map_err(connector_error)?,
+            )),
+            (RESOURCE_KIND_SITE_TO_SITE_TUNNELS, None) => Ok(site_to_site_tunnel_resource_items(
+                self.list_all_site_to_site_tunnels()
                     .await
                     .map_err(connector_error)?,
             )),
@@ -1459,6 +1491,23 @@ struct WifiBroadcastDetails {
     id: String,
     #[serde(flatten)]
     config: Map<String, Value>,
+}
+
+#[derive(Debug, Deserialize)]
+struct VpnServerOverview {
+    id: String,
+    name: String,
+    #[serde(rename = "type")]
+    server_type: String,
+    enabled: bool,
+}
+
+#[derive(Debug, Deserialize)]
+struct SiteToSiteTunnelOverview {
+    id: String,
+    name: String,
+    #[serde(rename = "type")]
+    tunnel_type: String,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -2016,6 +2065,34 @@ fn wlan_broadcasts_kind() -> ResourceKindDescriptor {
     )])
 }
 
+fn vpn_servers_kind() -> ResourceKindDescriptor {
+    ResourceKindDescriptor::new(
+        RESOURCE_KIND_VPN_SERVERS,
+        "VPN Servers",
+        vec![
+            ColumnDescriptor::new("name", "Name", ColumnValueType::Text),
+            ColumnDescriptor::new("type", "Type", ColumnValueType::Text),
+            ColumnDescriptor::new("enabled", "Enabled", ColumnValueType::Bool),
+        ],
+    )
+    .applicable_to(ApplicableTarget::HostOnly)
+}
+
+fn site_to_site_tunnels_kind() -> ResourceKindDescriptor {
+    // Network 10.4.57 publishes no remote-peer or enabled field for this
+    // collection and exposes no detail route. Keep the table truthful instead
+    // of filling requested-looking columns with guesses or placeholders.
+    ResourceKindDescriptor::new(
+        RESOURCE_KIND_SITE_TO_SITE_TUNNELS,
+        "Site-to-Site Tunnels",
+        vec![
+            ColumnDescriptor::new("name", "Name", ColumnValueType::Text),
+            ColumnDescriptor::new("type", "Type", ColumnValueType::Text),
+        ],
+    )
+    .applicable_to(ApplicableTarget::HostOnly)
+}
+
 fn create_a_record_action() -> ConnectorAction {
     dns_creation_action(
         ACTION_CREATE_A_RECORD,
@@ -2566,6 +2643,33 @@ fn wifi_config_string(config: &Map<String, Value>, key: &str) -> String {
         .and_then(Value::as_str)
         .unwrap_or("—")
         .to_owned()
+}
+
+fn vpn_server_resource_items(mut servers: Vec<VpnServerOverview>) -> Vec<ResourceItem> {
+    servers.sort_by_key(|server| server.name.to_lowercase());
+    servers
+        .into_iter()
+        .map(|server| {
+            ResourceItem::new(server.id)
+                .with_field("name", server.name)
+                .with_field("type", server.server_type)
+                .with_field("enabled", server.enabled)
+        })
+        .collect()
+}
+
+fn site_to_site_tunnel_resource_items(
+    mut tunnels: Vec<SiteToSiteTunnelOverview>,
+) -> Vec<ResourceItem> {
+    tunnels.sort_by_key(|tunnel| tunnel.name.to_lowercase());
+    tunnels
+        .into_iter()
+        .map(|tunnel| {
+            ResourceItem::new(tunnel.id)
+                .with_field("name", tunnel.name)
+                .with_field("type", tunnel.tunnel_type)
+        })
+        .collect()
 }
 
 fn guest_authorization_body(action_id: &str, params: &Value) -> Result<Value, ConnectorError> {
@@ -3209,7 +3313,7 @@ mod tests {
         assert_eq!(connector.metadata().id, TYPE_ID);
         assert_eq!(connector.data_points().len(), 4);
         assert!(connector.supports_sub_targets());
-        assert_eq!(connector.resource_kinds(None).len(), 10);
+        assert_eq!(connector.resource_kinds(None).len(), 12);
         assert!(connector.setup_guide().is_some());
     }
 
@@ -3679,6 +3783,8 @@ mod tests {
             firewall_policies_kind(),
             networks_kind(),
             wlan_broadcasts_kind(),
+            vpn_servers_kind(),
+            site_to_site_tunnels_kind(),
         ];
         assert!(host
             .iter()
@@ -3702,6 +3808,10 @@ mod tests {
         assert_eq!(host[7].row_actions.len(), 2);
         assert!(host[8].row_actions[0].is_disruptive);
         assert!(host[9].row_actions[0].is_disruptive);
+        assert!(host[10].row_actions.is_empty());
+        assert!(host[10].kind_actions.is_empty());
+        assert!(host[11].row_actions.is_empty());
+        assert!(host[11].kind_actions.is_empty());
 
         let ports = ports_kind();
         assert_eq!(ports.applicable_target, ApplicableTarget::TargetOnly);
@@ -3945,5 +4055,41 @@ mod tests {
             rows[0].fields.get("frequencies"),
             Some(&json!("2.4 GHz, 5 GHz"))
         );
+    }
+
+    #[test]
+    fn vpn_overview_shapes_map_only_fields_the_current_api_actually_exposes() {
+        let servers: Page<VpnServerOverview> = serde_json::from_value(json!({
+            "offset": 0,
+            "limit": 25,
+            "count": 2,
+            "totalCount": 2,
+            "data": [
+                {"id":"vpn-b","name":"Remote staff","type":"WIREGUARD","enabled":true,"metadata":{"origin":"USER_DEFINED"}},
+                {"id":"vpn-a","name":"Legacy access","type":"L2TP","enabled":false,"metadata":{"origin":"USER_DEFINED"}}
+            ]
+        }))
+        .expect("VPN server page");
+        let server_rows = vpn_server_resource_items(servers.data);
+        assert_eq!(server_rows[0].id, "vpn-a");
+        assert_eq!(server_rows[0].fields.get("type"), Some(&json!("L2TP")));
+        assert_eq!(server_rows[1].fields.get("enabled"), Some(&json!(true)));
+
+        let tunnels: Page<SiteToSiteTunnelOverview> = serde_json::from_value(json!({
+            "offset": 0,
+            "limit": 25,
+            "count": 2,
+            "totalCount": 2,
+            "data": [
+                {"id":"tunnel-b","name":"Warehouse","type":"IPSEC","metadata":{"origin":"USER_DEFINED"}},
+                {"id":"tunnel-a","name":"Branch","type":"WIREGUARD","metadata":{"origin":"USER_DEFINED"}}
+            ]
+        }))
+        .expect("site-to-site tunnel page");
+        let tunnel_rows = site_to_site_tunnel_resource_items(tunnels.data);
+        assert_eq!(tunnel_rows[0].id, "tunnel-a");
+        assert_eq!(tunnel_rows[0].fields.get("type"), Some(&json!("WIREGUARD")));
+        assert!(!tunnel_rows[0].fields.contains_key("remotePeer"));
+        assert!(!tunnel_rows[0].fields.contains_key("enabled"));
     }
 }
