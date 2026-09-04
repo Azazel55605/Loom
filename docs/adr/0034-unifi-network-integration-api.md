@@ -50,7 +50,12 @@ document and refreshed against the Network 10.4.57 document at
   the MAC-backed copy with the same MAC rather than double-counting it.
 - A device overview explicitly identifies capabilities through `features`:
   `accessPoint`, `switching`, and `gateway`. Classification therefore must not
-  guess from the model string. Device detail exposes radio standard,
+  guess from the model string. These values are independent capabilities, not
+  mutually exclusive device types: one physical appliance may be a gateway,
+  switch, and access point simultaneously. Loom merges the overview array with
+  the detail response's feature map, keeps one physical sub-target, composes
+  widgets and resources from every capability, and uses gateway then access
+  point then switch only as presentation-icon precedence. Device detail exposes radio standard,
   frequency, channel, and channel width. Although the 9.4.17 schema describes
   `frequencyGHz` as a string, real consoles also return it as a JSON number
   (for example `2.4`), so the client accepts both representations. Latest

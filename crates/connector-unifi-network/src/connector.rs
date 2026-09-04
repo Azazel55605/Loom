@@ -176,7 +176,6 @@ impl UniFiNetworkConnector {
         let (inventory, wans) = tokio::join!(self.list_network_inventory(), self.list_all_wans());
         let (devices, clients) = inventory?;
         let wans = wans?;
-        self.remember_devices(devices.clone());
         self.remember_clients(clients.clone());
 
         // This deliberately fetches detail for every known device, whether or
@@ -201,18 +200,32 @@ impl UniFiNetworkConnector {
         }));
         let device_readings = device_readings.await;
 
-        Ok(PollReadings {
-            summary: map_site_summary(&devices, clients.len(), wans.len()),
-            devices: devices
-                .into_iter()
-                .zip(device_readings)
-                .map(|(device, (statistics, details))| DeviceReading {
+        let summary = map_site_summary(&devices, clients.len(), wans.len());
+        let device_readings = devices
+            .into_iter()
+            .zip(device_readings)
+            .map(|(mut device, (statistics, details))| {
+                if let Some(details) = &details {
+                    merge_device_detail_metadata(&mut device, details);
+                }
+                DeviceReading {
                     connected_client_count: connected_client_count(&clients, &device.id),
                     device,
                     statistics,
                     details,
-                })
+                }
+            })
+            .collect::<Vec<_>>();
+        self.remember_devices(
+            device_readings
+                .iter()
+                .map(|reading| reading.device.clone())
                 .collect(),
+        );
+
+        Ok(PollReadings {
+            summary,
+            devices: device_readings,
         })
     }
 
@@ -235,6 +248,9 @@ impl UniFiNetworkConnector {
             .fetch_all_pages::<DeviceOverview>(&format!("sites/{site_id}/devices"), PAGE_LIMIT)
             .await?;
         normalize_device_keys(&mut devices);
+        if site_id == self.site.id {
+            merge_known_device_metadata(&mut devices, &self.device_snapshot());
+        }
         Ok(devices)
     }
 
@@ -250,17 +266,6 @@ impl UniFiNetworkConnector {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .clone()
-    }
-
-    fn device_type_for_target(&self, target_id: &str) -> DeviceType {
-        let Some(device_id) = device_key_from_target(target_id) else {
-            return DeviceType::NetworkDevice;
-        };
-        self.device_snapshot()
-            .iter()
-            .find(|device| device.id == device_id)
-            .map(device_type)
-            .unwrap_or(DeviceType::NetworkDevice)
     }
 
     async fn list_all_clients(&self) -> Result<Vec<ClientOverview>, UniFiNetworkError> {
@@ -585,7 +590,7 @@ impl loom_core::connector::Connector for UniFiNetworkConnector {
                             );
                         }
                     }
-                    if device_type(&reading.device) == DeviceType::AccessPoint {
+                    if device_has_feature(&reading.device, "accessPoint") {
                         if let Some(statistics) = &reading.statistics {
                             set_optional_number(
                                 &mut details,
@@ -1159,10 +1164,28 @@ impl loom_core::connector::Connector for UniFiNetworkConnector {
                         DisplayWidgetType::StatTile,
                     ),
                 ];
-                match target_id.map_or(DeviceType::NetworkDevice, |target| {
-                    self.device_type_for_target(target)
-                }) {
-                    DeviceType::AccessPoint => bindings.extend([
+                bindings.extend([
+                    WidgetBinding::display(
+                        DATA_POINT_CPU_UTILIZATION,
+                        DisplayWidgetType::ProgressBar,
+                    ),
+                    WidgetBinding::display(
+                        DATA_POINT_MEMORY_UTILIZATION,
+                        DisplayWidgetType::ProgressBar,
+                    ),
+                ]);
+                let device = target_id
+                    .and_then(device_key_from_target)
+                    .and_then(|device_id| {
+                        self.device_snapshot()
+                            .into_iter()
+                            .find(|device| device.id == device_id)
+                    });
+                if device
+                    .as_ref()
+                    .is_some_and(|device| device_has_feature(device, "accessPoint"))
+                {
+                    bindings.extend([
                         WidgetBinding::display(
                             DATA_POINT_CONNECTED_CLIENT_COUNT,
                             DisplayWidgetType::StatTile,
@@ -1172,24 +1195,12 @@ impl loom_core::connector::Connector for UniFiNetworkConnector {
                             DATA_POINT_RADIO_TX_RETRY_PERCENT,
                             DisplayWidgetType::StatTile,
                         ),
-                        WidgetBinding::display(
-                            DATA_POINT_CPU_UTILIZATION,
-                            DisplayWidgetType::ProgressBar,
-                        ),
-                        WidgetBinding::display(
-                            DATA_POINT_MEMORY_UTILIZATION,
-                            DisplayWidgetType::ProgressBar,
-                        ),
-                    ]),
-                    DeviceType::Switch | DeviceType::Gateway => bindings.extend([
-                        WidgetBinding::display(
-                            DATA_POINT_CPU_UTILIZATION,
-                            DisplayWidgetType::ProgressBar,
-                        ),
-                        WidgetBinding::display(
-                            DATA_POINT_MEMORY_UTILIZATION,
-                            DisplayWidgetType::ProgressBar,
-                        ),
+                    ]);
+                }
+                if device.as_ref().is_some_and(|device| {
+                    device_has_feature(device, "gateway") || device_has_feature(device, "switching")
+                }) {
+                    bindings.extend([
                         WidgetBinding::display(
                             DATA_POINT_UPLINK_RX_RATE,
                             DisplayWidgetType::StatTile,
@@ -1198,17 +1209,7 @@ impl loom_core::connector::Connector for UniFiNetworkConnector {
                             DATA_POINT_UPLINK_TX_RATE,
                             DisplayWidgetType::StatTile,
                         ),
-                    ]),
-                    DeviceType::NetworkDevice => bindings.extend([
-                        WidgetBinding::display(
-                            DATA_POINT_CPU_UTILIZATION,
-                            DisplayWidgetType::ProgressBar,
-                        ),
-                        WidgetBinding::display(
-                            DATA_POINT_MEMORY_UTILIZATION,
-                            DisplayWidgetType::ProgressBar,
-                        ),
-                    ]),
+                    ]);
                 }
                 if target_id.and_then(device_id_from_target).is_some() {
                     bindings.push(WidgetBinding::action(
@@ -1701,6 +1702,35 @@ fn api_device_id(device: &DeviceOverview) -> Option<&str> {
     (!device.id.starts_with("mac:")).then_some(device.id.as_str())
 }
 
+fn merge_device_features(device: &mut DeviceOverview, features: impl IntoIterator<Item = String>) {
+    for feature in features {
+        if !device.features.contains(&feature) {
+            device.features.push(feature);
+        }
+    }
+}
+
+fn merge_device_detail_metadata(device: &mut DeviceOverview, details: &DeviceDetails) {
+    merge_device_features(device, details.features.keys().cloned());
+    if device.name.as_deref().is_none_or(str::is_empty) {
+        device.name.clone_from(&details.name);
+    }
+    if device.model.as_deref().is_none_or(str::is_empty) {
+        device.model.clone_from(&details.model);
+    }
+    if device.mac_address.as_deref().is_none_or(str::is_empty) {
+        device.mac_address.clone_from(&details.mac_address);
+    }
+}
+
+fn merge_known_device_metadata(devices: &mut [DeviceOverview], known: &[DeviceOverview]) {
+    for device in devices {
+        if let Some(previous) = known.iter().find(|previous| previous.id == device.id) {
+            merge_device_features(device, previous.features.iter().cloned());
+        }
+    }
+}
+
 fn merge_recovered_devices(
     devices: &mut Vec<DeviceOverview>,
     recovered: impl IntoIterator<Item = DeviceOverview>,
@@ -1837,19 +1867,19 @@ fn device_disambiguator(device: &DeviceOverview) -> String {
 }
 
 fn device_type(device: &DeviceOverview) -> DeviceType {
-    if device.features.iter().any(|feature| feature == "gateway") {
+    if device_has_feature(device, "gateway") {
         DeviceType::Gateway
-    } else if device
-        .features
-        .iter()
-        .any(|feature| feature == "accessPoint")
-    {
+    } else if device_has_feature(device, "accessPoint") {
         DeviceType::AccessPoint
-    } else if device.features.iter().any(|feature| feature == "switching") {
+    } else if device_has_feature(device, "switching") {
         DeviceType::Switch
     } else {
         DeviceType::NetworkDevice
     }
+}
+
+fn device_has_feature(device: &DeviceOverview, feature: &str) -> bool {
+    device.features.iter().any(|candidate| candidate == feature)
 }
 
 fn device_icon(device: &DeviceOverview) -> &'static str {
@@ -1923,7 +1953,7 @@ fn device_data_points(device: &DeviceOverview) -> Vec<DataPointDescriptor> {
         )
         .for_target(&target_id),
     ];
-    if device_type(device) == DeviceType::AccessPoint {
+    if device_has_feature(device, "accessPoint") {
         points.extend([
             DataPointDescriptor::new(
                 DATA_POINT_CONNECTED_CLIENT_COUNT,
@@ -3612,6 +3642,71 @@ mod tests {
             DeviceType::Gateway
         );
         assert_eq!(device_type(&device("U7", &[])), DeviceType::NetworkDevice);
+    }
+
+    #[test]
+    fn combined_appliances_keep_every_capability_with_one_gateway_identity() {
+        let mut device = DeviceOverview {
+            id: "device-one".to_owned(),
+            name: Some("Combined appliance".to_owned()),
+            model: Some("UX".to_owned()),
+            state: Some("ONLINE".to_owned()),
+            mac_address: Some("00:11:22:33:44:55".to_owned()),
+            features: vec!["switching".to_owned()],
+        };
+        let details: DeviceDetails = serde_json::from_value(json!({
+            "id": "device-one",
+            "name": "Combined appliance",
+            "model": "UX",
+            "state": "ONLINE",
+            "macAddress": "00:11:22:33:44:55",
+            "features": {
+                "gateway": {},
+                "switching": {},
+                "accessPoint": {}
+            },
+            "interfaces": {"ports": [], "radios": []}
+        }))
+        .expect("combined device details");
+
+        merge_device_detail_metadata(&mut device, &details);
+
+        assert!(device_has_feature(&device, "gateway"));
+        assert!(device_has_feature(&device, "switching"));
+        assert!(device_has_feature(&device, "accessPoint"));
+        assert_eq!(device_type(&device), DeviceType::Gateway);
+        assert_eq!(device_icon(&device), "lucide:router");
+        assert!(device_data_points(&device)
+            .iter()
+            .any(|point| point.id == DATA_POINT_RADIOS));
+
+        let connector = UniFiNetworkConnector::from_config_value_for_connection_test(json!({
+            "host": "https://console.example.com",
+            "apiKey": "not-a-real-key"
+        }))
+        .expect("local-only connector");
+        connector.remember_devices(vec![device]);
+        let layout = connector.default_layout_for(Some("device:device-one"));
+        let display_ids = layout
+            .bindings
+            .iter()
+            .filter_map(|binding| match binding {
+                WidgetBinding::Display { data_point_id, .. } => Some(data_point_id.as_str()),
+                WidgetBinding::Action { .. } => None,
+            })
+            .collect::<HashSet<_>>();
+        for expected in [
+            DATA_POINT_RADIOS,
+            DATA_POINT_RADIO_TX_RETRY_PERCENT,
+            DATA_POINT_UPLINK_RX_RATE,
+            DATA_POINT_UPLINK_TX_RATE,
+        ] {
+            assert!(display_ids.contains(expected), "missing {expected}");
+        }
+        assert!(layout.bindings.iter().any(|binding| matches!(
+            binding,
+            WidgetBinding::Action { action_id, .. } if action_id == ACTION_RESTART
+        )));
     }
 
     #[test]

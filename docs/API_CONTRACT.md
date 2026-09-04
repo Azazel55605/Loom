@@ -1061,13 +1061,17 @@ value.
 `ONLINE` is Healthy;
 `PENDING_ADOPTION`, `UPDATING`, `GETTING_READY`, `ADOPTING`, and `DELETING` are
 Degraded; `OFFLINE`, `CONNECTION_INTERRUPTED`, and `ISOLATED` are Down. Unknown
-future state values remain Unknown rather than being guessed. Device type and
-its generic icon come from the documented `features` values (`accessPoint` ->
-`lucide:wifi`, `switching` -> `lucide:ethernet-port`, `gateway` ->
-`lucide:router`); an absent/unrecognised feature set uses `lucide:network`
-rather than guessing from a model name. When two devices would otherwise have
-the same label, only those colliding labels receive the last two MAC octets as
-a suffix.
+future state values remain Unknown rather than being guessed. Device
+capabilities come independently from every documented `features` value:
+`accessPoint`, `switching`, and `gateway` can coexist on one physical target.
+The detail response's feature map is merged with the collection overview so a
+combined appliance composes radio, switching/uplink, and gateway behavior
+instead of being forced into one exclusive type. Presentation still has one
+deterministic primary icon (`gateway` -> `lucide:router`, then `accessPoint` ->
+`lucide:wifi`, then `switching` -> `lucide:ethernet-port`); an absent or
+unrecognised feature set uses `lucide:network` rather than guessing from a
+model name. When two devices would otherwise have the same label, only those
+colliding labels receive the last two MAC octets as a suffix.
 
 Device targets expose a parameterless, disruptive `restart` action. It invokes
 `POST /sites/{siteId}/devices/{deviceId}/actions` with
