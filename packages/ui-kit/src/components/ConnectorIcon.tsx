@@ -56,6 +56,7 @@ const BRAND_ICONS: Record<string, () => Promise<{ default: string }>> = {
   docker: () => import("../assets/icons/brand/docker.svg?raw"),
   pihole: () => import("../assets/icons/brand/pihole.svg?raw"),
   truenas: () => import("../assets/icons/brand/truenas.svg?raw"),
+  unifi: () => import("../assets/icons/brand/unifi.svg?raw"),
 };
 
 /** Resolved brand markup, so only the first render of a given brand waits. */

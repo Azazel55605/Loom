@@ -1,21 +1,20 @@
 [package]
-name = "loom-connector-pihole"
-description = "Loom connector for Pi-hole v6 statistics and DNS blocking control."
+name = "loom-connector-unifi-network"
+description = "Loom connector for the official local UniFi Network Integration API."
 edition.workspace = true
 license.workspace = true
-version = "0.3.0"
+version = "0.1.1"
 repository.workspace = true
 rust-version.workspace = true
 
 [dependencies]
 async-trait.workspace = true
-chrono.workspace = true
 loom-core.workspace = true
 reqwest = { workspace = true, features = ["json"] }
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
-tokio.workspace = true
 
 [dev-dependencies]
 loom-connector-test-kit.workspace = true
+tokio.workspace = true

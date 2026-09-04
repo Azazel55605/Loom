@@ -1371,8 +1371,8 @@ mod tests {
         let types = body.as_array().expect("array");
         assert_eq!(
             types.len(),
-            4,
-            "the catalog should contain Debug, Docker, TrueNAS, and Pi-hole"
+            5,
+            "the catalog should contain Debug, Docker, TrueNAS, Pi-hole, and UniFi Network"
         );
         assert!(types.iter().all(|entry| {
             entry["typeId"] != "docker-host" && entry["typeId"] != "docker-container"
@@ -1478,6 +1478,20 @@ mod tests {
             "application-password"
         );
         assert_eq!(pihole["discoverableType"], serde_json::Value::Null);
+
+        let unifi = by_id("unifi-network");
+        assert_eq!(unifi["displayName"], "UniFi Network");
+        assert_eq!(unifi["icon"], "brand:unifi");
+        assert_eq!(
+            unifi["configSchema"]["properties"]["apiKey"]["x-loom-sensitive"],
+            true
+        );
+        assert_eq!(
+            unifi["configSchema"]["properties"]["site"]["default"],
+            "default"
+        );
+        assert_eq!(unifi["setupGuide"], serde_json::Value::Null);
+        assert_eq!(unifi["discoverableType"], serde_json::Value::Null);
     }
 
     #[tokio::test]

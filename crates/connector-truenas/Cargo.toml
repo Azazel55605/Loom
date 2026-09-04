@@ -3,7 +3,7 @@ name = "loom-connector-truenas"
 description = "TLS-only JSON-RPC-over-WebSocket transport for TrueNAS."
 edition.workspace = true
 license.workspace = true
-version = "0.1.6"
+version = "0.2.0"
 repository.workspace = true
 rust-version.workspace = true
 

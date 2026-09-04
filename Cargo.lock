@@ -1260,7 +1260,7 @@ dependencies = [
 
 [[package]]
 name = "loom-connector-pihole"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "async-trait",
  "chrono",
@@ -1283,7 +1283,7 @@ dependencies = [
 
 [[package]]
 name = "loom-connector-truenas"
-version = "0.1.6"
+version = "0.2.0"
 dependencies = [
  "async-trait",
  "chrono",
@@ -1297,6 +1297,20 @@ dependencies = [
  "tokio-tungstenite",
  "uuid",
  "webpki-roots 1.0.9",
+]
+
+[[package]]
+name = "loom-connector-unifi-network"
+version = "0.1.1"
+dependencies = [
+ "async-trait",
+ "loom-connector-test-kit",
+ "loom-core",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "thiserror",
+ "tokio",
 ]
 
 [[package]]
@@ -1328,6 +1342,7 @@ dependencies = [
  "loom-connector-docker",
  "loom-connector-pihole",
  "loom-connector-truenas",
+ "loom-connector-unifi-network",
  "loom-core",
  "rand 0.8.7",
  "serde",

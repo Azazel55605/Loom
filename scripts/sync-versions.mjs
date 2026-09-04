@@ -40,6 +40,9 @@ const TARGETS = {
   "connector-docker": [{ path: "crates/connector-docker/Cargo.toml", kind: "cargo" }],
   "connector-pihole": [{ path: "crates/connector-pihole/Cargo.toml", kind: "cargo" }],
   "connector-truenas": [{ path: "crates/connector-truenas/Cargo.toml", kind: "cargo" }],
+  "connector-unifi-network": [
+    { path: "crates/connector-unifi-network/Cargo.toml", kind: "cargo" },
+  ],
   "web-backend": [{ path: "crates/web-backend/Cargo.toml", kind: "cargo" }],
   "web-frontend": [
     { path: "apps/web-frontend/package.json", kind: "json", field: "version" },

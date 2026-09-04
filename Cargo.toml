@@ -5,6 +5,7 @@ members = [
     "crates/connector-docker",
     "crates/connector-pihole",
     "crates/connector-truenas",
+    "crates/connector-unifi-network",
     "crates/connector-test-kit",
     "crates/web-backend",
 ]
@@ -20,6 +21,7 @@ loom-core = { path = "crates/core" }
 loom-connector-docker = { path = "crates/connector-docker" }
 loom-connector-pihole = { path = "crates/connector-pihole" }
 loom-connector-truenas = { path = "crates/connector-truenas" }
+loom-connector-unifi-network = { path = "crates/connector-unifi-network" }
 # Test-only reusable assertions for every implementation of Core's connector contract.
 loom-connector-test-kit = { path = "crates/connector-test-kit" }
 # Authenticated encryption for connector configuration fields marked sensitive.

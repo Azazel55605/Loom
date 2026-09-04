@@ -996,8 +996,8 @@ to the connector's factory, which is the only thing that knows what the keys
 mean. A configuration that satisfies the schema's shape can still be refused
 (see [`POST /connector-instances`](#post-connector-instances)).
 
-Today the array holds four: the debug fixture, the unified Docker connector,
-the TrueNAS connector, and the minimal host-level Pi-hole connector. It was an array from day one so that registering a real connector
+Today the array holds five: the debug fixture, the unified Docker connector,
+the TrueNAS connector, the Pi-hole connector, and the minimal host-level UniFi Network connector. It was an array from day one so that registering a real connector
 type is an insertion rather than a reshape of this response, which is exactly
 what adding Docker turned out to be.
 
@@ -1015,6 +1015,29 @@ is created, not here.
 | `docker` | One Docker daemon connection and its host-level aggregate view. Containers are addressable sub-targets of that instance. | Required `dockerHost` (`unix://` or `tcp://`) only. | A real daemon connection and ping. |
 | `pihole` | One Pi-hole v6 instance with host-level statistics and DNS blocking control. | Required `baseUrl` including `http://` or `https://`, sensitive `password`, and optional `allowInsecureCert` (default `false`); an application password is recommended. | `POST /api/auth`, retaining `session.sid` for `X-FTL-SID` authentication. |
 | `truenas` | One TrueNAS host with an aggregate host view plus addressable pool and dataset sub-targets. | Required bare `host`, required API-key owner `username`, sensitive `apiKey`, and optional `allowInsecureCert` (default `false`). | A mandatory-TLS WebSocket connection and `auth.login_ex` API-key authentication. |
+| `unifi-network` | One local UniFi Network console site with host-level device and connected-client counts. | Required HTTPS `host` origin, sensitive `apiKey`, optional site UUID/internal reference/name (default `default`), and optional `allowInsecureCert` (default `false`). | `GET /proxy/network/integration/v1/sites` with `X-API-KEY`, followed by resolution of the configured site. |
+
+The UniFi Network connector uses the official local Integration API. Its base is
+`https://<console>/proxy/network/integration/v1`; API keys are generated in
+**UniFi Network > Settings > Control Plane > Integrations**. Ubiquiti first
+documented this API/key flow with Network 9.1.105, while the current published
+OpenAPI is versioned with the installed Network application. A configured
+`site` may be its UUID, legacy `internalReference`, or display name; Loom
+resolves that to the UUID required by subsequent calls. One poll pages through
+`/sites/{siteId}/devices`, counts documented `ONLINE` states, and reads
+`/sites/{siteId}/clients`'s `totalCount`. It publishes `deviceCount`,
+`onlineDeviceCount`, and `clientCount`.
+
+The official API also documents device restart, PoE port power-cycle, guest
+authorization, and voucher mutations. This first host-only connector exposes
+no actions because each available operation requires a concrete device, port,
+client, or voucher target; those are deferred until Loom models those targets.
+There is no official site-summary or WAN-status endpoint in the current local
+Network specification, so no WAN field is inferred from undocumented APIs.
+
+Local consoles may use a locally issued or self-signed HTTPS certificate.
+`allowInsecureCert` relaxes peer verification only for that connector instance,
+remains off by default, and never permits plaintext transport.
 
 The Pi-hole connector publishes `queriesToday`, `queriesBlockedToday`,
 `blockPercentage`, `domainsOnBlocklist`, `uniqueClients`, `blockingEnabled`,

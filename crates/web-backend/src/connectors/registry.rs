@@ -17,6 +17,7 @@ use std::sync::Arc;
 use loom_connector_docker::DockerConnector;
 use loom_connector_pihole::PiHoleConnector;
 use loom_connector_truenas::TrueNasConnector;
+use loom_connector_unifi_network::UniFiNetworkConnector;
 use loom_core::connector::debug::DebugConnector;
 use loom_core::connector::{Connector, ConnectorError, SetupGuide};
 use serde_json::Value;
@@ -80,7 +81,7 @@ pub type ConnectorTypeRegistry = Arc<HashMap<&'static str, ConnectorTypeRegistra
 
 /// The types compiled into this build.
 ///
-/// Four today: the debug fixture, Docker, TrueNAS, and Pi-hole. Further integrations
+/// Five today: the debug fixture, Docker, TrueNAS, Pi-hole, and UniFi Network. Further integrations
 /// (a reverse proxy, a hypervisor) register here alongside them,
 /// and nothing else in the backend has to change when they do — that is the
 /// point of the indirection.
@@ -201,6 +202,30 @@ pub fn builtin_registry() -> ConnectorTypeRegistry {
             }),
             schema: loom_connector_pihole::config_schema(),
             setup_guide: Some(loom_connector_pihole::setup_guide()),
+            discoverable_type: None,
+            discovery_target_field: None,
+        },
+    );
+
+    // UniFi Network verifies both its API key and selected site during
+    // construction. Like the other network connectors, the descriptors remain
+    // available without contacting a console.
+    types.insert(
+        loom_connector_unifi_network::TYPE_ID,
+        ConnectorTypeRegistration {
+            type_id: loom_connector_unifi_network::TYPE_ID,
+            display_name: loom_connector_unifi_network::DISPLAY_NAME,
+            icon: Some(loom_connector_unifi_network::ICON.to_owned()),
+            factory: |config| {
+                Box::pin(async move {
+                    UniFiNetworkConnector::from_config_value(config)
+                        .await
+                        .map(|connector| Box::new(connector) as Box<dyn Connector>)
+                })
+            },
+            connection_test_factory: None,
+            schema: loom_connector_unifi_network::config_schema(),
+            setup_guide: None,
             discoverable_type: None,
             discovery_target_field: None,
         },
@@ -328,6 +353,33 @@ mod tests {
         assert_eq!(guide.variants.len(), 1);
         assert_eq!(guide.variants[0].id, "application-password");
         assert!(registration.connection_test_factory.is_some());
+        assert!(registration.discoverable_type.is_none());
+    }
+
+    #[test]
+    fn the_unifi_network_type_is_registered_with_an_encrypted_api_key_schema() {
+        let registry = builtin_registry();
+        let registration = registry
+            .get(loom_connector_unifi_network::TYPE_ID)
+            .expect("the UniFi Network type must be registered");
+
+        assert_eq!(registration.type_id, "unifi-network");
+        assert_eq!(registration.display_name, "UniFi Network");
+        assert_eq!(registration.icon.as_deref(), Some("brand:unifi"));
+        assert_eq!(
+            registration.schema["properties"]["apiKey"]["x-loom-sensitive"],
+            true
+        );
+        assert_eq!(
+            registration.schema["properties"]["site"]["default"],
+            "default"
+        );
+        assert_eq!(
+            registration.schema["properties"]["allowInsecureCert"]["default"],
+            false
+        );
+        assert!(registration.setup_guide.is_none());
+        assert!(registration.connection_test_factory.is_none());
         assert!(registration.discoverable_type.is_none());
     }
 
