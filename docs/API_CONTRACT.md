@@ -1144,9 +1144,12 @@ remains off by default, and never permits plaintext transport.
 
 The Pi-hole connector publishes `queriesToday`, `queriesBlockedToday`,
 `blockPercentage`, `domainsOnBlocklist`, `uniqueClients`, `blockingEnabled`,
-and `queriesHistory`. One poll fetches `/api/stats/summary`, `/api/history`, and
+`queriesHistory`, and `blockedQueriesHistory`. One poll fetches
+`/api/stats/summary`, `/api/history`, and
 `/api/dns/blocking` concurrently; an expired SID is reauthenticated once and
-the failed request retried. Its `setBlocking` action permanently enables or
+the failed request retried. Both history series come from the same `/api/history`
+buckets (`total` and `blocked` respectively), so the second chart adds no poll
+request. Its `setBlocking` action permanently enables or
 disables blocking through `POST /api/dns/blocking` with `timer: null`. Pi-hole
 `allowInsecureCert` relaxes certificate validation for self-signed or otherwise
 untrusted homelab HTTPS endpoints while retaining encrypted transport. It is
@@ -1163,12 +1166,14 @@ Pi-hole application-password sessions have no per-operation permission model.
 
 ### Pi-hole resource kinds
 
-Both kinds are host-only; Pi-hole has no Loom sub-targets.
+All kinds are host-only; Pi-hole has no Loom sub-targets.
 
 | Kind | Columns | Actions | Source |
 | --- | --- | --- | --- |
 | `domains` | `domain` (text), `type` (`allow`/`deny` text), `comment` (text), `enabled` (bool) | Row: `toggleDomainEnabled`, `removeDomain`. Kind: `addDomain` with `domain`, `listType`, and optional `comment`. | `GET /api/domains`; exact entries only. Mutations use `/api/domains/{type}/exact[/{domain}]`. |
-| `clients` | `client` (resolved hostname when present, otherwise IP), `queryCount` (number) | Read-only. | `GET /api/stats/top_clients`; each row maps `name`/`ip` and `count`. |
+| `topClients` | `client` (resolved hostname when present, otherwise IP), `queryCount` (number) | Read-only. | `GET /api/stats/top_clients?blocked=false`; each row maps `name`/`ip` and `count`. |
+| `topBlockedDomains` | `domain` (text), `blockCount` (number) | Read-only. | `GET /api/stats/top_domains?blocked=true`; each row maps `domain` and `count`. |
+| `topBlockedClients` | `client` (resolved hostname when present, otherwise IP), `blockedCount` (number) | Read-only. | `GET /api/stats/top_clients?blocked=true`; each row maps `name`/`ip` and `count`. |
 
 The Pi-hole API's combined domain response also contains `kind: "regex"`
 entries. They are deliberately not flattened into this four-column exact-domain
@@ -1238,12 +1243,19 @@ naming the configured endpoint.
 
 The host view publishes
 `totalContainers`, `runningContainers`, `stoppedContainers`, `totalImages`,
-`diskUsageBytes`, `imageDiskUsageBytes`, and `dockerVersion`.
+`diskUsageBytes`, `imageDiskUsageBytes`, `imageStorageBreakdown`,
+`containerStateBreakdown`, and `dockerVersion`.
 `imageDiskUsageBytes` is the image share of `diskUsageBytes` — reported
 separately because it is the part a user can act on, since images are what the
 Images table prunes and "102 GiB of Docker" does not say whether pruning would
 help. Both come from one `/system/df` read, so they cannot drift apart, and the
-image figure can never exceed the total it is part of. Each container returned by the live
+image figure can never exceed the total it is part of. `imageStorageBreakdown`
+is a byte-valued `categoryBreakdown` grouped by repository; several tags of
+the same image in one repository count that image once. `containerStateBreakdown`
+contains only states currently observed on the host. These four
+`/system/df`-backed readings are omitted when that call fails or is forbidden;
+the host becomes Degraded and its diagnostic names the failure instead of
+publishing a misleading zero. Each container returned by the live
 sub-target endpoint has target-scoped `status`, `cpuPercent`, `cpuHistory`,
 `memoryUsageBytes`, `memoryHistory`, `uptime`, and `logs`, plus start/stop/
 restart/pause/unpause actions. Stored configuration containing a stale

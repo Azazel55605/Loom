@@ -30,8 +30,16 @@ reference used for this decision.
   /api/domains/{type}/{kind}/{domain}`, returning 204 on success.
 - Current top clients come from the dedicated `GET /api/stats/top_clients`
   endpoint, not from summary or history. Its response is `clients: [{ ip, name,
-  count }]` plus aggregate query counts. Loom displays a non-empty resolved
-  `name`, otherwise `ip`, and maps `count` to `queryCount`.
+  count }]` plus aggregate query counts. The optional `blocked` query parameter
+  selects permitted-query (`false`, also the default) or blocked-query (`true`)
+  rankings. Loom displays a non-empty resolved `name`, otherwise `ip`.
+- Current top domains come from `GET /api/stats/top_domains`, returning
+  `domains: [{ domain, count }]` plus aggregate query counts. It uses the same
+  `blocked` selector; Loom requests `blocked=true` for its blocked-domain
+  ranking.
+- `GET /api/history` already returns `timestamp`, `total`, `cached`, `blocked`,
+  and `forwarded` in every bucket. Query-volume and blocked-query charts are
+  therefore two projections of one response, not separate API calls.
 - The current web interface exposes application-password generation at
   **Settings > Web interface / API > Configure app password**. Pi-hole describes
   this separately revocable password as suitable for applications that cannot
@@ -39,11 +47,13 @@ reference used for this decision.
 
 ## Decision
 
-Publish two host-only resource kinds from `PiHoleConnector`:
+Publish four host-only resource kinds from `PiHoleConnector`:
 
 - `domains`, containing exact `allow` and `deny` entries with add, toggle, and
   remove actions;
-- `clients`, a read-only top-client table.
+- `topClients`, a read-only permitted-query top-client table;
+- `topBlockedDomains`, a read-only blocked-domain ranking; and
+- `topBlockedClients`, a read-only blocked-query client ranking.
 
 The four requested domain columns contain no `kind`, so regex rules are excluded
 rather than rendered indistinguishably from exact entries. A future regex editor

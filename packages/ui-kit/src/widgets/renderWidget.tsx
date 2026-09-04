@@ -52,6 +52,10 @@ export type RenderWidgetOptions = {
   unavailableReason?: string | null;
   className?: string;
   size?: "compact" | "expanded";
+  /** True only while no status snapshot has arrived. Once a snapshot exists,
+   * an omitted value is unavailable data and the primitive renders its own
+   * dash/empty state instead of an endless loading skeleton. */
+  loading?: boolean;
   /**
    * Opens this placement's detail view, for the widgets that only show part of
    * what they have.
@@ -93,6 +97,7 @@ export function renderWidget({
   unavailableReason,
   className,
   size = "compact",
+  loading = true,
   onExpand,
 }: RenderWidgetOptions) {
   if ("display" in binding) {
@@ -114,7 +119,7 @@ export function renderWidget({
       className,
     };
 
-    if (shared.value === undefined) {
+    if (shared.value === undefined && loading) {
       if (typeof widgetType !== "string") return <MetricChartSkeleton className={className} expanded={size === "expanded"} />;
       switch (widgetType) {
         case "statTile": return <StatTileSkeleton className={className} />;

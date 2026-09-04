@@ -303,7 +303,7 @@ export function ConnectorDetailModal({
                       ? "min-w-0 sm:col-span-2 lg:col-span-3"
                       : "min-w-0"}
                   >
-                    {renderWidget({ binding, statusDetails, dataPoints: targetDataPoints, actions: targetActions, onExecute: runAction, disabled: !canControl, unavailableReason: availability.unavailableReason, size: "expanded", className: "min-h-[5rem]" })}
+                    {renderWidget({ binding, statusDetails, dataPoints: targetDataPoints, actions: targetActions, onExecute: runAction, disabled: !canControl, unavailableReason: availability.unavailableReason, size: "expanded", loading: reading.status === null, className: "min-h-[5rem]" })}
                   </div>
                 ))}
               </div>
@@ -328,7 +328,11 @@ export function ConnectorDetailModal({
                       </TabsList>
                     </div>
                     {browsableKinds.map((kind) => (
-                      <TabsContent key={kind.kind} value={kind.kind} className="pt-3">
+                      <TabsContent
+                        key={kind.kind}
+                        value={kind.kind}
+                        className="h-[clamp(15rem,34dvh,24rem)] min-h-0 overflow-y-auto pt-3"
+                      >
                         <ResourceKindBrowser
                           instanceId={instance.id}
                           targetId={placement.targetId}
@@ -348,7 +352,10 @@ export function ConnectorDetailModal({
                         />
                       </TabsContent>
                     ))}
-                    <TabsContent value="history" className="pt-3">
+                    <TabsContent
+                      value="history"
+                      className="h-[clamp(15rem,34dvh,24rem)] min-h-0 overflow-y-auto pt-3"
+                    >
                       <InstanceActionHistory
                         instanceId={instance.id}
                         actions={detail.data?.actions ?? []}

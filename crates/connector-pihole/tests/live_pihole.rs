@@ -11,10 +11,11 @@
 
 use loom_connector_pihole::{
     PiHoleConnector, ACTION_ADD_DOMAIN, ACTION_REMOVE_DOMAIN, ACTION_SET_BLOCKING,
-    ACTION_TOGGLE_DOMAIN_ENABLED, DATA_POINT_BLOCKING_ENABLED, DATA_POINT_BLOCK_PERCENTAGE,
-    DATA_POINT_DOMAINS_ON_BLOCKLIST, DATA_POINT_QUERIES_BLOCKED_TODAY, DATA_POINT_QUERIES_HISTORY,
-    DATA_POINT_QUERIES_TODAY, DATA_POINT_UNIQUE_CLIENTS, RESOURCE_KIND_CLIENTS,
-    RESOURCE_KIND_DOMAINS,
+    ACTION_TOGGLE_DOMAIN_ENABLED, DATA_POINT_BLOCKED_QUERIES_HISTORY, DATA_POINT_BLOCKING_ENABLED,
+    DATA_POINT_BLOCK_PERCENTAGE, DATA_POINT_DOMAINS_ON_BLOCKLIST, DATA_POINT_QUERIES_BLOCKED_TODAY,
+    DATA_POINT_QUERIES_HISTORY, DATA_POINT_QUERIES_TODAY, DATA_POINT_UNIQUE_CLIENTS,
+    RESOURCE_KIND_DOMAINS, RESOURCE_KIND_TOP_BLOCKED_CLIENTS, RESOURCE_KIND_TOP_BLOCKED_DOMAINS,
+    RESOURCE_KIND_TOP_CLIENTS,
 };
 use loom_core::connector::{Connector, HealthState};
 use serde_json::{json, Value};
@@ -53,6 +54,9 @@ async fn a_real_pihole_reports_host_statistics_and_obeys_the_contract() {
     assert!(status
         .data_point_value(DATA_POINT_QUERIES_HISTORY)
         .is_some_and(Value::is_array));
+    assert!(status
+        .data_point_value(DATA_POINT_BLOCKED_QUERIES_HISTORY)
+        .is_some_and(Value::is_array));
 
     loom_connector_test_kit::assert_connector_contract(&connector, &[None]).await;
 
@@ -66,12 +70,28 @@ async fn a_real_pihole_reports_host_statistics_and_obeys_the_contract() {
             && row.fields.get("enabled").is_some_and(Value::is_boolean)
     }));
     let clients = connector
-        .list_resource_items(RESOURCE_KIND_CLIENTS, None)
+        .list_resource_items(RESOURCE_KIND_TOP_CLIENTS, None)
         .await
         .expect("the live Pi-hole should list top clients");
     assert!(clients.iter().all(|row| {
         row.fields.get("client").is_some_and(Value::is_string)
             && row.fields.get("queryCount").is_some_and(Value::is_number)
+    }));
+    let blocked_domains = connector
+        .list_resource_items(RESOURCE_KIND_TOP_BLOCKED_DOMAINS, None)
+        .await
+        .expect("the live Pi-hole should list top blocked domains");
+    assert!(blocked_domains.iter().all(|row| {
+        row.fields.get("domain").is_some_and(Value::is_string)
+            && row.fields.get("blockCount").is_some_and(Value::is_number)
+    }));
+    let blocked_clients = connector
+        .list_resource_items(RESOURCE_KIND_TOP_BLOCKED_CLIENTS, None)
+        .await
+        .expect("the live Pi-hole should list top blocked clients");
+    assert!(blocked_clients.iter().all(|row| {
+        row.fields.get("client").is_some_and(Value::is_string)
+            && row.fields.get("blockedCount").is_some_and(Value::is_number)
     }));
     eprintln!("{test_name}: {:#}", status.details);
 }

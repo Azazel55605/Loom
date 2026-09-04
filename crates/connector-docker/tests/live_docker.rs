@@ -429,6 +429,15 @@ async fn a_running_container_reports_healthy_with_every_data_point() {
                     assert!(point["value"].is_number(), "{point} needs a value");
                 }
             }
+            loom_core::connector::DataPointValueType::CategoryBreakdown => {
+                let categories = value
+                    .as_array()
+                    .unwrap_or_else(|| panic!("{} should be an array", descriptor.id));
+                for category in categories {
+                    assert!(category["label"].is_string(), "{category} needs a label");
+                    assert!(category["value"].is_number(), "{category} needs a value");
+                }
+            }
             other => panic!(
                 "{} declares an unexpected value type {other:?}",
                 descriptor.id
@@ -530,7 +539,7 @@ async fn one_host_instance_reports_the_daemon_and_lists_real_sub_targets() {
             .iter()
             .filter(|point| point.target_id.is_none())
             .count(),
-        7
+        9
     );
     assert_eq!(
         points

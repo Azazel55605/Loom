@@ -483,6 +483,7 @@ export function PlacementTile({
                   // cannot be reached at all. A button that fails on click
                   // teaches nothing; one that says why before the click does.
                   unavailableReason: availability.unavailableReason,
+                  loading: status === null,
                   onExpand: () => openDetail("logs"),
                   className:
                     // A chart needs room; the scalar widgets do not. Spanning

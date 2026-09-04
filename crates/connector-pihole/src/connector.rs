@@ -23,12 +23,17 @@ pub const DATA_POINT_DOMAINS_ON_BLOCKLIST: &str = "domainsOnBlocklist";
 pub const DATA_POINT_UNIQUE_CLIENTS: &str = "uniqueClients";
 pub const DATA_POINT_BLOCKING_ENABLED: &str = "blockingEnabled";
 pub const DATA_POINT_QUERIES_HISTORY: &str = "queriesHistory";
+pub const DATA_POINT_BLOCKED_QUERIES_HISTORY: &str = "blockedQueriesHistory";
 pub const ACTION_SET_BLOCKING: &str = "setBlocking";
 pub const ACTION_ADD_DOMAIN: &str = "addDomain";
 pub const ACTION_REMOVE_DOMAIN: &str = "removeDomain";
 pub const ACTION_TOGGLE_DOMAIN_ENABLED: &str = "toggleDomainEnabled";
 pub const RESOURCE_KIND_DOMAINS: &str = "domains";
-pub const RESOURCE_KIND_CLIENTS: &str = "clients";
+pub const RESOURCE_KIND_TOP_CLIENTS: &str = "topClients";
+pub const RESOURCE_KIND_TOP_BLOCKED_DOMAINS: &str = "topBlockedDomains";
+pub const RESOURCE_KIND_TOP_BLOCKED_CLIENTS: &str = "topBlockedClients";
+/// Backward-compatible Rust name for the top-clients resource kind.
+pub const RESOURCE_KIND_CLIENTS: &str = RESOURCE_KIND_TOP_CLIENTS;
 
 pub const CAPABILITY_READ_STATS: &str = "readStats";
 pub const CAPABILITY_READ_DOMAINS: &str = "readDomains";
@@ -42,7 +47,9 @@ const PATH_SUMMARY: &str = "stats/summary";
 const PATH_HISTORY: &str = "history";
 const PATH_BLOCKING: &str = "dns/blocking";
 const PATH_DOMAINS: &str = "domains";
-const PATH_TOP_CLIENTS: &str = "stats/top_clients";
+const PATH_TOP_CLIENTS: &str = "stats/top_clients?blocked=false";
+const PATH_TOP_BLOCKED_CLIENTS: &str = "stats/top_clients?blocked=true";
+const PATH_TOP_BLOCKED_DOMAINS: &str = "stats/top_domains?blocked=true";
 const RESOURCE_ID_PARAM: &str = "resourceId";
 
 /// Setup instructions published with the connector type catalog.
@@ -359,7 +366,7 @@ impl loom_core::connector::Connector for PiHoleConnector {
                     .map_err(|error| ConnectorError::Internal(error.to_string()))?;
                 Ok(domain_resource_items(response.domains))
             }
-            RESOURCE_KIND_CLIENTS => {
+            RESOURCE_KIND_TOP_CLIENTS => {
                 let response = self
                     .client
                     .get_json(PATH_TOP_CLIENTS)
@@ -367,7 +374,29 @@ impl loom_core::connector::Connector for PiHoleConnector {
                     .map_err(connector_error)?;
                 let response: TopClientsResponse = parse_response(PATH_TOP_CLIENTS, response)
                     .map_err(|error| ConnectorError::Internal(error.to_string()))?;
-                Ok(client_resource_items(response.clients))
+                Ok(client_resource_items(response.clients, "queryCount"))
+            }
+            RESOURCE_KIND_TOP_BLOCKED_CLIENTS => {
+                let response = self
+                    .client
+                    .get_json(PATH_TOP_BLOCKED_CLIENTS)
+                    .await
+                    .map_err(connector_error)?;
+                let response: TopClientsResponse =
+                    parse_response(PATH_TOP_BLOCKED_CLIENTS, response)
+                        .map_err(|error| ConnectorError::Internal(error.to_string()))?;
+                Ok(client_resource_items(response.clients, "blockedCount"))
+            }
+            RESOURCE_KIND_TOP_BLOCKED_DOMAINS => {
+                let response = self
+                    .client
+                    .get_json(PATH_TOP_BLOCKED_DOMAINS)
+                    .await
+                    .map_err(connector_error)?;
+                let response: TopDomainsResponse =
+                    parse_response(PATH_TOP_BLOCKED_DOMAINS, response)
+                        .map_err(|error| ConnectorError::Internal(error.to_string()))?;
+                Ok(domain_ranking_resource_items(response.domains))
             }
             _ => Ok(Vec::new()),
         }
@@ -436,6 +465,11 @@ impl loom_core::connector::Connector for PiHoleConnector {
                 "Query volume",
                 DataPointValueType::TimeSeries,
             ),
+            DataPointDescriptor::new(
+                DATA_POINT_BLOCKED_QUERIES_HISTORY,
+                "Blocked queries",
+                DataPointValueType::TimeSeries,
+            ),
         ]
     }
 
@@ -451,6 +485,12 @@ impl loom_core::connector::Connector for PiHoleConnector {
             WidgetBinding::display(DATA_POINT_UNIQUE_CLIENTS, DisplayWidgetType::StatTile),
             WidgetBinding::display(
                 DATA_POINT_QUERIES_HISTORY,
+                DisplayWidgetType::MetricChart {
+                    chart_type: ChartType::Line,
+                },
+            ),
+            WidgetBinding::display(
+                DATA_POINT_BLOCKED_QUERIES_HISTORY,
                 DisplayWidgetType::MetricChart {
                     chart_type: ChartType::Line,
                 },
@@ -502,6 +542,7 @@ struct HistoryResponse {
 struct HistoryBucket {
     timestamp: f64,
     total: u64,
+    blocked: u64,
 }
 
 #[derive(Debug, Deserialize)]
@@ -536,6 +577,17 @@ struct TopClientsResponse {
 struct TopClient {
     ip: String,
     name: Option<String>,
+    count: u64,
+}
+
+#[derive(Debug, Deserialize)]
+struct TopDomainsResponse {
+    domains: Vec<TopDomain>,
+}
+
+#[derive(Debug, Deserialize)]
+struct TopDomain {
+    domain: String,
     count: u64,
 }
 
@@ -596,11 +648,29 @@ fn resource_kinds() -> Vec<ResourceKindDescriptor> {
             snapshot_data_point_ids: Vec::new(),
         }]),
         ResourceKindDescriptor::new(
-            RESOURCE_KIND_CLIENTS,
-            "Clients",
+            RESOURCE_KIND_TOP_CLIENTS,
+            "Top Clients",
             vec![
                 ColumnDescriptor::new("client", "Client", ColumnValueType::Text),
                 ColumnDescriptor::new("queryCount", "Queries", ColumnValueType::Number),
+            ],
+        )
+        .applicable_to(ApplicableTarget::HostOnly),
+        ResourceKindDescriptor::new(
+            RESOURCE_KIND_TOP_BLOCKED_DOMAINS,
+            "Top Blocked Domains",
+            vec![
+                ColumnDescriptor::new("domain", "Domain", ColumnValueType::Text),
+                ColumnDescriptor::new("blockCount", "Blocked", ColumnValueType::Number),
+            ],
+        )
+        .applicable_to(ApplicableTarget::HostOnly),
+        ResourceKindDescriptor::new(
+            RESOURCE_KIND_TOP_BLOCKED_CLIENTS,
+            "Top Blocked Clients",
+            vec![
+                ColumnDescriptor::new("client", "Client", ColumnValueType::Text),
+                ColumnDescriptor::new("blockedCount", "Blocked", ColumnValueType::Number),
             ],
         )
         .applicable_to(ApplicableTarget::HostOnly),
@@ -658,7 +728,7 @@ fn domain_resource_items(domains: Vec<DomainEntry>) -> Vec<ResourceItem> {
         .collect()
 }
 
-fn client_resource_items(clients: Vec<TopClient>) -> Vec<ResourceItem> {
+fn client_resource_items(clients: Vec<TopClient>, count_field: &str) -> Vec<ResourceItem> {
     clients
         .into_iter()
         .map(|client| {
@@ -669,7 +739,18 @@ fn client_resource_items(clients: Vec<TopClient>) -> Vec<ResourceItem> {
                 .unwrap_or_else(|| client.ip.clone());
             ResourceItem::new(client.ip)
                 .with_field("client", label)
-                .with_field("queryCount", client.count)
+                .with_field(count_field, client.count)
+        })
+        .collect()
+}
+
+fn domain_ranking_resource_items(domains: Vec<TopDomain>) -> Vec<ResourceItem> {
+    domains
+        .into_iter()
+        .map(|domain| {
+            ResourceItem::new(domain.domain.clone())
+                .with_field("domain", domain.domain)
+                .with_field("blockCount", domain.count)
         })
         .collect()
 }
@@ -759,13 +840,10 @@ fn map_status_details(
                     format!("history timestamp {millis} is outside the supported range")
                 })?
                 .to_rfc3339_opts(SecondsFormat::Millis, true);
-            Ok((
-                millis,
-                json!({ "timestamp": timestamp, "value": bucket.total }),
-            ))
+            Ok((millis, timestamp, bucket.total, bucket.blocked))
         })
         .collect::<Result<Vec<_>, String>>()?;
-    points.sort_by_key(|(millis, _)| *millis);
+    points.sort_by_key(|(millis, _, _, _)| *millis);
 
     let mut details = Value::Object(Map::new());
     for (id, value) in [
@@ -789,7 +867,25 @@ fn map_status_details(
         ),
         (
             DATA_POINT_QUERIES_HISTORY,
-            Value::Array(points.into_iter().map(|(_, point)| point).collect()),
+            Value::Array(
+                points
+                    .iter()
+                    .map(|(_, timestamp, total, _)| {
+                        json!({ "timestamp": timestamp, "value": total })
+                    })
+                    .collect(),
+            ),
+        ),
+        (
+            DATA_POINT_BLOCKED_QUERIES_HISTORY,
+            Value::Array(
+                points
+                    .iter()
+                    .map(|(_, timestamp, _, blocked)| {
+                        json!({ "timestamp": timestamp, "value": blocked })
+                    })
+                    .collect(),
+            ),
         ),
     ] {
         set_detail(&mut details, None, id, value);
@@ -880,6 +976,13 @@ mod tests {
         assert!(series[0]["timestamp"]
             .as_str()
             .is_some_and(|timestamp| timestamp.ends_with('Z')));
+        let blocked_series = get_detail(&details, None, DATA_POINT_BLOCKED_QUERIES_HISTORY)
+            .and_then(Value::as_array)
+            .expect("blocked time series");
+        assert_eq!(blocked_series.len(), 2);
+        assert_eq!(blocked_series[0]["value"], 413);
+        assert_eq!(blocked_series[1]["value"], 43);
+        assert_eq!(blocked_series[0]["timestamp"], series[0]["timestamp"]);
     }
 
     #[test]
@@ -971,7 +1074,7 @@ mod tests {
         }))
         .expect("official top-clients shape");
 
-        let rows = client_resource_items(response.clients);
+        let rows = client_resource_items(response.clients, "queryCount");
         assert_eq!(rows[0].id, "192.0.2.20");
         assert_eq!(rows[0].fields["client"], "workstation.example");
         assert_eq!(rows[0].fields["queryCount"], 5896);
@@ -980,9 +1083,42 @@ mod tests {
     }
 
     #[test]
+    fn blocked_rankings_map_current_v6_top_item_shapes() {
+        let clients: TopClientsResponse = serde_json::from_value(json!({
+            "clients": [
+                { "ip": "192.0.2.40", "name": "phone.example", "count": 87 },
+                { "ip": "192.0.2.41", "name": null, "count": 12 }
+            ],
+            "total_queries": 994,
+            "blocked_queries": 99,
+            "took": 0.001
+        }))
+        .expect("official blocked top-clients shape");
+        let client_rows = client_resource_items(clients.clients, "blockedCount");
+        assert_eq!(client_rows[0].fields["client"], "phone.example");
+        assert_eq!(client_rows[0].fields["blockedCount"], 87);
+        assert_eq!(client_rows[1].fields["client"], "192.0.2.41");
+
+        let domains: TopDomainsResponse = serde_json::from_value(json!({
+            "domains": [
+                { "domain": "telemetry.example", "count": 123 },
+                { "domain": "ads.example", "count": 45 }
+            ],
+            "total_queries": 994,
+            "blocked_queries": 168,
+            "took": 0.001
+        }))
+        .expect("official blocked top-domains shape");
+        let domain_rows = domain_ranking_resource_items(domains.domains);
+        assert_eq!(domain_rows[0].id, "telemetry.example");
+        assert_eq!(domain_rows[0].fields["domain"], "telemetry.example");
+        assert_eq!(domain_rows[0].fields["blockCount"], 123);
+    }
+
+    #[test]
     fn resource_descriptors_and_setup_guide_are_host_only_and_generic() {
         let kinds = resource_kinds();
-        assert_eq!(kinds.len(), 2);
+        assert_eq!(kinds.len(), 4);
         assert!(kinds
             .iter()
             .all(|kind| kind.applicable_target == ApplicableTarget::HostOnly));
@@ -994,10 +1130,21 @@ mod tests {
         assert_eq!(domains.kind_actions[0].id, ACTION_ADD_DOMAIN);
         let clients = kinds
             .iter()
-            .find(|kind| kind.kind == RESOURCE_KIND_CLIENTS)
-            .expect("clients kind");
+            .find(|kind| kind.kind == RESOURCE_KIND_TOP_CLIENTS)
+            .expect("top clients kind");
         assert!(clients.row_actions.is_empty());
         assert!(clients.kind_actions.is_empty());
+        for kind in [
+            RESOURCE_KIND_TOP_BLOCKED_DOMAINS,
+            RESOURCE_KIND_TOP_BLOCKED_CLIENTS,
+        ] {
+            let descriptor = kinds
+                .iter()
+                .find(|descriptor| descriptor.kind == kind)
+                .expect("blocked ranking kind");
+            assert!(descriptor.row_actions.is_empty());
+            assert!(descriptor.kind_actions.is_empty());
+        }
 
         let guide = setup_guide();
         assert_eq!(guide.variants.len(), 1);

@@ -121,6 +121,8 @@ pub const DATA_POINT_DISK_USAGE_BYTES: &str = "diskUsageBytes";
 /// prunes, and "29 GB of Docker" does not tell anyone whether pruning would
 /// help.
 pub const DATA_POINT_IMAGE_DISK_USAGE_BYTES: &str = "imageDiskUsageBytes";
+pub const DATA_POINT_IMAGE_STORAGE_BREAKDOWN: &str = "imageStorageBreakdown";
+pub const DATA_POINT_CONTAINER_STATE_BREAKDOWN: &str = "containerStateBreakdown";
 pub const DATA_POINT_DOCKER_VERSION: &str = "dockerVersion";
 
 /// Stack data point ids.
@@ -598,9 +600,11 @@ impl MemberReading {
 
 #[derive(Debug, Clone)]
 struct CachedHostDetails {
-    disk_usage: i64,
-    image_disk_usage: i64,
-    version: String,
+    disk_usage: Option<i64>,
+    image_disk_usage: Option<i64>,
+    image_storage_breakdown: Option<Vec<Value>>,
+    container_state_breakdown: Option<Vec<Value>>,
+    version: Option<String>,
     errors: Vec<String>,
     refreshed_at: Instant,
 }
@@ -2170,6 +2174,18 @@ impl Connector for DockerConnector {
                 DATA_POINT_IMAGE_DISK_USAGE_BYTES,
                 DisplayWidgetType::StatTile,
             ),
+            WidgetBinding::display(
+                DATA_POINT_IMAGE_STORAGE_BREAKDOWN,
+                DisplayWidgetType::MetricChart {
+                    chart_type: ChartType::Bar,
+                },
+            ),
+            WidgetBinding::display(
+                DATA_POINT_CONTAINER_STATE_BREAKDOWN,
+                DisplayWidgetType::MetricChart {
+                    chart_type: ChartType::Bar,
+                },
+            ),
             WidgetBinding::display(DATA_POINT_DOCKER_VERSION, DisplayWidgetType::StatTile),
         ])
     }
@@ -2260,11 +2276,76 @@ fn host_data_points() -> Vec<DataPointDescriptor> {
         )
         .with_unit("bytes"),
         DataPointDescriptor::new(
+            DATA_POINT_IMAGE_STORAGE_BREAKDOWN,
+            "Image storage by repository",
+            DataPointValueType::CategoryBreakdown,
+        )
+        .with_unit("bytes"),
+        DataPointDescriptor::new(
+            DATA_POINT_CONTAINER_STATE_BREAKDOWN,
+            "Containers by state",
+            DataPointValueType::CategoryBreakdown,
+        ),
+        DataPointDescriptor::new(
             DATA_POINT_DOCKER_VERSION,
             "Docker version",
             DataPointValueType::String,
         ),
     ]
+}
+
+/// Groups the image rows already returned by `/system/df` by repository.
+///
+/// A single image can carry several tags in the same repository. Its bytes are
+/// counted once for that repository, because the chart describes storage, not
+/// tag count. An image referenced by repositories with different names is
+/// represented in each: Docker does not expose layer-exclusive bytes from
+/// which a mathematically exact cross-repository allocation could be made.
+fn image_storage_breakdown(items: Option<&[Value]>) -> Vec<Value> {
+    let mut totals: BTreeMap<String, i64> = BTreeMap::new();
+    for image in items.unwrap_or_default() {
+        let Some(size) = image.get("Size").and_then(Value::as_i64) else {
+            continue;
+        };
+        let repositories: std::collections::BTreeSet<String> = image
+            .get("RepoTags")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(Value::as_str)
+            .filter(|reference| !reference.is_empty() && !reference.starts_with("<none>"))
+            .map(|reference| crate::resources::split_reference(reference).0)
+            .collect();
+        if repositories.is_empty() {
+            *totals.entry("Untagged".to_owned()).or_default() += size;
+        } else {
+            for repository in repositories {
+                *totals.entry(repository).or_default() += size;
+            }
+        }
+    }
+    totals
+        .into_iter()
+        .map(|(label, value)| json!({ "label": label, "value": value }))
+        .collect()
+}
+
+/// Counts only states that Docker actually returned in `/system/df`.
+fn container_state_breakdown(items: Option<&[Value]>) -> Vec<Value> {
+    let mut totals: BTreeMap<String, u64> = BTreeMap::new();
+    for state in items
+        .unwrap_or_default()
+        .iter()
+        .filter_map(|container| container.get("State"))
+        .filter_map(Value::as_str)
+        .filter(|state| !state.is_empty())
+    {
+        *totals.entry(state.to_owned()).or_default() += 1;
+    }
+    totals
+        .into_iter()
+        .map(|(label, value)| json!({ "label": label, "value": value }))
+        .collect()
 }
 
 fn container_data_points(target_id: &str) -> Vec<DataPointDescriptor> {
@@ -2466,7 +2547,7 @@ impl DockerConnector {
             }
         };
         let slow_details = self.host_details().await;
-        let partial_errors = slow_details.errors;
+        let partial_errors = &slow_details.errors;
 
         let health = if partial_errors.is_empty() {
             HealthState::Healthy
@@ -2475,30 +2556,41 @@ impl DockerConnector {
         };
         let mut details = Value::Object(Map::new());
         for (id, value) in [
-            (
-                DATA_POINT_TOTAL_CONTAINERS,
-                json!(info.containers.unwrap_or_default()),
-            ),
-            (
-                DATA_POINT_RUNNING_CONTAINERS,
-                json!(info.containers_running.unwrap_or_default()),
-            ),
-            (
-                DATA_POINT_STOPPED_CONTAINERS,
-                json!(info.containers_stopped.unwrap_or_default()),
-            ),
-            (
-                DATA_POINT_TOTAL_IMAGES,
-                json!(info.images.unwrap_or_default()),
-            ),
-            (DATA_POINT_DISK_USAGE_BYTES, json!(slow_details.disk_usage)),
+            (DATA_POINT_TOTAL_CONTAINERS, info.containers),
+            (DATA_POINT_RUNNING_CONTAINERS, info.containers_running),
+            (DATA_POINT_STOPPED_CONTAINERS, info.containers_stopped),
+            (DATA_POINT_TOTAL_IMAGES, info.images),
+            (DATA_POINT_DISK_USAGE_BYTES, slow_details.disk_usage),
             (
                 DATA_POINT_IMAGE_DISK_USAGE_BYTES,
-                json!(slow_details.image_disk_usage),
+                slow_details.image_disk_usage,
             ),
-            (DATA_POINT_DOCKER_VERSION, json!(slow_details.version)),
         ] {
-            set_detail(&mut details, None, id, value);
+            if let Some(value) = value {
+                set_detail(&mut details, None, id, json!(value));
+            }
+        }
+        for (id, value) in [
+            (
+                DATA_POINT_IMAGE_STORAGE_BREAKDOWN,
+                slow_details.image_storage_breakdown.as_ref(),
+            ),
+            (
+                DATA_POINT_CONTAINER_STATE_BREAKDOWN,
+                slow_details.container_state_breakdown.as_ref(),
+            ),
+        ] {
+            if let Some(value) = value {
+                set_detail(&mut details, None, id, json!(value));
+            }
+        }
+        if let Some(version) = &slow_details.version {
+            set_detail(
+                &mut details,
+                None,
+                DATA_POINT_DOCKER_VERSION,
+                json!(version),
+            );
         }
         if !partial_errors.is_empty() {
             set_detail(
@@ -2529,39 +2621,60 @@ impl DockerConnector {
         // One `/system/df` read answers both numbers. Splitting the image share
         // out costs nothing here and would cost a second call to that
         // deliberately-rate-limited endpoint if it were read anywhere else.
-        let (disk_usage, image_disk_usage) = match usage {
-            Ok(usage) => {
-                let images = usage
-                    .image_usage
-                    .as_ref()
-                    .and_then(|value| value.total_size)
-                    .unwrap_or(0);
-                let total = [
-                    Some(images),
-                    usage.container_usage.and_then(|value| value.total_size),
-                    usage.volume_usage.and_then(|value| value.total_size),
-                    usage.build_cache_usage.and_then(|value| value.total_size),
-                ]
-                .into_iter()
-                .flatten()
-                .sum::<i64>();
-                (total, images)
-            }
-            Err(error) => {
-                errors.push(optional_host_read_failure("Docker disk usage", &error));
-                (0, 0)
-            }
-        };
+        let (disk_usage, image_disk_usage, image_storage_breakdown, container_state_breakdown) =
+            match usage {
+                Ok(usage) => {
+                    let images = usage
+                        .image_usage
+                        .as_ref()
+                        .and_then(|value| value.total_size);
+                    let image_breakdown = image_storage_breakdown(
+                        usage
+                            .image_usage
+                            .as_ref()
+                            .and_then(|value| value.items.as_deref()),
+                    );
+                    let state_breakdown = container_state_breakdown(
+                        usage
+                            .container_usage
+                            .as_ref()
+                            .and_then(|value| value.items.as_deref()),
+                    );
+                    let sizes = [
+                        images,
+                        usage
+                            .container_usage
+                            .as_ref()
+                            .and_then(|value| value.total_size),
+                        usage
+                            .volume_usage
+                            .as_ref()
+                            .and_then(|value| value.total_size),
+                        usage
+                            .build_cache_usage
+                            .as_ref()
+                            .and_then(|value| value.total_size),
+                    ];
+                    let total = sizes.iter().flatten().copied().reduce(i64::saturating_add);
+                    (total, images, Some(image_breakdown), Some(state_breakdown))
+                }
+                Err(error) => {
+                    errors.push(optional_host_read_failure("Docker disk usage", &error));
+                    (None, None, None, None)
+                }
+            };
         let version = match version {
-            Ok(version) => version.version.unwrap_or_else(|| "unknown".to_owned()),
+            Ok(version) => version.version,
             Err(error) => {
                 errors.push(optional_host_read_failure("Docker version check", &error));
-                "unavailable".to_owned()
+                None
             }
         };
         let refreshed = CachedHostDetails {
             disk_usage,
             image_disk_usage,
+            image_storage_breakdown,
+            container_state_breakdown,
             version,
             errors,
             refreshed_at: Instant::now(),
@@ -2691,17 +2804,10 @@ fn unavailable_details(reason: &str) -> Value {
 /// Host-mode values when a daemon-wide read could not be completed.
 fn unavailable_host_details(reason: &str) -> Value {
     let mut details = Value::Object(Map::new());
-    for (id, value) in [
-        (DATA_POINT_TOTAL_CONTAINERS, json!(0)),
-        (DATA_POINT_RUNNING_CONTAINERS, json!(0)),
-        (DATA_POINT_STOPPED_CONTAINERS, json!(0)),
-        (DATA_POINT_TOTAL_IMAGES, json!(0)),
-        (DATA_POINT_DISK_USAGE_BYTES, json!(0)),
-        (DATA_POINT_DOCKER_VERSION, json!("unavailable")),
-        ("error", json!(reason)),
-    ] {
-        set_detail(&mut details, None, id, value);
-    }
+    // A failed read has no numeric value. Publishing zero here makes an
+    // unavailable daemon indistinguishable from a genuinely empty one and
+    // defeats every widget's existing no-data state.
+    set_detail(&mut details, None, "error", json!(reason));
     details
 }
 
@@ -3296,6 +3402,70 @@ mod tests {
             ),
             "Docker disk usage timed out. Container status and actions remain available."
         );
+    }
+
+    #[test]
+    fn host_breakdowns_use_only_observed_rows_and_do_not_double_count_tags() {
+        let images = json!([
+            { "RepoTags": ["registry.example/app:1", "registry.example/app:latest"], "Size": 100 },
+            { "RepoTags": ["registry.example/worker:1"], "Size": 40 },
+            { "RepoTags": ["<none>:<none>"], "Size": 10 }
+        ]);
+        assert_eq!(
+            image_storage_breakdown(images.as_array().map(Vec::as_slice)),
+            vec![
+                json!({ "label": "Untagged", "value": 10 }),
+                json!({ "label": "registry.example/app", "value": 100 }),
+                json!({ "label": "registry.example/worker", "value": 40 }),
+            ]
+        );
+
+        let containers = json!([
+            { "State": "running" },
+            { "State": "running" },
+            { "State": "paused" },
+            { "State": "" },
+            {}
+        ]);
+        assert_eq!(
+            container_state_breakdown(containers.as_array().map(Vec::as_slice)),
+            vec![
+                json!({ "label": "paused", "value": 1 }),
+                json!({ "label": "running", "value": 2 }),
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn a_denied_system_df_is_diagnostic_not_zero_disk_usage() {
+        let host = mock_proxy(MockProxyPermissions {
+            containers: true,
+            logs: true,
+            info: true,
+            system: false,
+            images: false,
+            volumes: false,
+            networks: false,
+        })
+        .await;
+        let status = detached(&host, &[]).status().await.expect("host status");
+
+        assert_eq!(status.health, HealthState::Degraded);
+        for id in [
+            DATA_POINT_DISK_USAGE_BYTES,
+            DATA_POINT_IMAGE_DISK_USAGE_BYTES,
+            DATA_POINT_IMAGE_STORAGE_BREAKDOWN,
+            DATA_POINT_CONTAINER_STATE_BREAKDOWN,
+        ] {
+            assert!(
+                status.data_point_value(id).is_none(),
+                "{id} must be absent when /system/df was denied"
+            );
+        }
+        assert!(status
+            .data_point_value("error")
+            .and_then(Value::as_str)
+            .is_some_and(|error| error.contains("Docker disk usage is unavailable")));
     }
 
     fn labelled(name: &str, project: Option<&str>) -> ContainerSummary {
@@ -3991,7 +4161,7 @@ mod tests {
                 .iter()
                 .filter(|point| point.target_id.is_none())
                 .count(),
-            7
+            9
         );
         for target in ["web", "db"] {
             let targeted: Vec<_> = points
@@ -4000,7 +4170,7 @@ mod tests {
                 .collect();
             assert_eq!(targeted.len(), 8);
         }
-        assert_eq!(connector.default_layout_for(None).bindings.len(), 7);
+        assert_eq!(connector.default_layout_for(None).bindings.len(), 9);
         assert_eq!(connector.default_layout_for(Some("web")).bindings.len(), 7);
     }
 }
