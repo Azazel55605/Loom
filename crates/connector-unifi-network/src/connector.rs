@@ -3,9 +3,10 @@ use std::sync::Mutex;
 use async_trait::async_trait;
 use futures_util::future::join_all;
 use loom_core::connector::{
-    details::set_detail, ActionResult, ActionWidgetType, ConnectorAction, ConnectorError,
-    ConnectorMetadata, ConnectorStatus, DataPointDescriptor, DataPointValueType, DisplayField,
-    DisplayWidgetType, HealthState, NetworkTarget, SubTarget, WidgetBinding, WidgetLayout,
+    details::set_detail, ActionResult, ActionWidgetType, ApplicableTarget, ColumnDescriptor,
+    ColumnValueType, ConnectorAction, ConnectorError, ConnectorMetadata, ConnectorStatus,
+    DataPointDescriptor, DataPointValueType, DisplayField, DisplayWidgetType, HealthState,
+    NetworkTarget, ResourceItem, ResourceKindDescriptor, SubTarget, WidgetBinding, WidgetLayout,
 };
 use serde::Deserialize;
 use serde_json::{json, Map, Value};
@@ -23,8 +24,18 @@ pub const DATA_POINT_STATE: &str = "state";
 pub const DATA_POINT_MODEL: &str = "model";
 pub const DATA_POINT_UPTIME: &str = "uptime";
 pub const ACTION_RESTART: &str = "restart";
+pub const ACTION_CYCLE_POE: &str = "cyclePoe";
+pub const ACTION_AUTHORIZE_GUEST: &str = "authorizeGuest";
+pub const ACTION_CREATE_VOUCHER: &str = "createVoucher";
+pub const ACTION_REVOKE_VOUCHER: &str = "revokeVoucher";
+
+pub const RESOURCE_KIND_PORTS: &str = "ports";
+pub const RESOURCE_KIND_CLIENTS: &str = "clients";
+pub const RESOURCE_KIND_VOUCHERS: &str = "vouchers";
 
 const PAGE_LIMIT: usize = 200;
+const VOUCHER_PAGE_LIMIT: usize = 1_000;
+const RESOURCE_ID_PARAM: &str = "resourceId";
 
 /// One configured local UniFi Network console and selected site.
 pub struct UniFiNetworkConnector {
@@ -32,6 +43,7 @@ pub struct UniFiNetworkConnector {
     client: UniFiNetworkClient,
     site: SiteOverview,
     known_devices: Mutex<Vec<DeviceOverview>>,
+    known_clients: Mutex<Vec<ClientOverview>>,
 }
 
 impl UniFiNetworkConnector {
@@ -67,6 +79,7 @@ impl UniFiNetworkConnector {
             client,
             site,
             known_devices: Mutex::new(Vec::new()),
+            known_clients: Mutex::new(Vec::new()),
         })
     }
 
@@ -86,13 +99,13 @@ impl UniFiNetworkConnector {
             );
             async move { self.client.get::<DeviceStatistics>(&path).await }
         }));
-        let clients_path = format!("sites/{}/clients?limit=1", self.site.id);
-        let clients = self.client.get::<CountPage>(&clients_path);
+        let clients = self.list_all_clients();
         let (statistics, clients) = tokio::join!(statistics, clients);
         let clients = clients?;
+        self.remember_clients(clients.clone());
 
         Ok(PollReadings {
-            summary: map_site_summary(&devices, clients.total_count),
+            summary: map_site_summary(&devices, clients.len()),
             devices: devices
                 .into_iter()
                 .zip(statistics)
@@ -134,6 +147,80 @@ impl UniFiNetworkConnector {
             .known_devices
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner()) = devices;
+    }
+
+    fn device_snapshot(&self) -> Vec<DeviceOverview> {
+        self.known_devices
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone()
+    }
+
+    async fn list_all_clients(&self) -> Result<Vec<ClientOverview>, UniFiNetworkError> {
+        let mut offset = 0usize;
+        let mut clients = Vec::new();
+        loop {
+            let page: Page<ClientOverview> = self
+                .client
+                .get(&format!(
+                    "sites/{}/clients?offset={offset}&limit={PAGE_LIMIT}",
+                    self.site.id
+                ))
+                .await?;
+            let total_count = page.total_count;
+            let count = page.data.len();
+            clients.extend(page.data);
+            if count == 0 || clients.len() >= total_count {
+                break;
+            }
+            offset += count;
+        }
+        clients.retain(|client| !client.id.trim().is_empty());
+        Ok(clients)
+    }
+
+    fn remember_clients(&self, clients: Vec<ClientOverview>) {
+        *self
+            .known_clients
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = clients;
+    }
+
+    async fn clients_for_resources(&self) -> Result<Vec<ClientOverview>, ConnectorError> {
+        let cached = self
+            .known_clients
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone();
+        if !cached.is_empty() {
+            return Ok(cached);
+        }
+        let clients = self.list_all_clients().await.map_err(connector_error)?;
+        self.remember_clients(clients.clone());
+        Ok(clients)
+    }
+
+    async fn list_all_vouchers(&self) -> Result<Vec<VoucherOverview>, UniFiNetworkError> {
+        let mut offset = 0usize;
+        let mut vouchers = Vec::new();
+        loop {
+            let page: Page<VoucherOverview> = self
+                .client
+                .get(&format!(
+                    "sites/{}/hotspot/vouchers?offset={offset}&limit={VOUCHER_PAGE_LIMIT}",
+                    self.site.id
+                ))
+                .await?;
+            let total_count = page.total_count;
+            let count = page.data.len();
+            vouchers.extend(page.data);
+            if count == 0 || vouchers.len() >= total_count {
+                break;
+            }
+            offset += count;
+        }
+        vouchers.retain(|voucher| !voucher.id.trim().is_empty());
+        Ok(vouchers)
     }
 
     async fn list_sub_targets_live(&self) -> Result<Vec<SubTarget>, ConnectorError> {
@@ -202,30 +289,151 @@ impl loom_core::connector::Connector for UniFiNetworkConnector {
         &self,
         action_id: &str,
         target_id: Option<&str>,
-        _params: Value,
+        params: Value,
     ) -> Result<ActionResult, ConnectorError> {
-        if action_id != ACTION_RESTART {
-            return Err(ConnectorError::invalid_action(action_id));
+        match action_id {
+            ACTION_RESTART => {
+                let Some(device_id) = target_id.and_then(device_id_from_target) else {
+                    return Err(ConnectorError::invalid_action(action_id));
+                };
+                let devices = self.list_all_devices().await.map_err(connector_error)?;
+                let Some(device) = devices.iter().find(|device| device.id == device_id) else {
+                    return Err(ConnectorError::invalid_action(action_id));
+                };
+                let label = device_label(device);
+                self.remember_devices(devices.clone());
+                self.client
+                    .post_json(
+                        &format!("sites/{}/devices/{device_id}/actions", self.site.id),
+                        json!({ "action": "RESTART" }),
+                    )
+                    .await
+                    .map_err(connector_error)?;
+                Ok(ActionResult::ok(format!(
+                    "Restart requested for {label}. The device will briefly disconnect attached clients; restarting a gateway may temporarily disconnect the network itself."
+                )))
+            }
+            ACTION_CYCLE_POE => {
+                let Some(device_id) = target_id.and_then(device_id_from_target) else {
+                    return Err(ConnectorError::invalid_action(action_id));
+                };
+                let port_idx = required_resource_id(action_id, &params)?
+                    .parse::<u32>()
+                    .map_err(|_| invalid_param(action_id, "`resourceId` must be a port number"))?;
+                self.client
+                    .post_json(
+                        &format!(
+                            "sites/{}/devices/{device_id}/interfaces/ports/{port_idx}/actions",
+                            self.site.id
+                        ),
+                        json!({ "action": "POWER_CYCLE" }),
+                    )
+                    .await
+                    .map_err(connector_error)?;
+                Ok(ActionResult::ok(format!(
+                    "PoE power-cycle requested for port {port_idx}. The powered device and anything behind it will disconnect briefly."
+                )))
+            }
+            ACTION_AUTHORIZE_GUEST => {
+                if target_id.is_some() {
+                    return Err(ConnectorError::invalid_action(action_id));
+                }
+                let client_id = required_resource_id(action_id, &params)?;
+                let clients = self.clients_for_resources().await?;
+                if !clients.iter().any(|client| client.id == client_id) {
+                    return Err(invalid_param(
+                        action_id,
+                        "`resourceId` is not a connected client returned by this site",
+                    ));
+                }
+                self.client
+                    .post_json(
+                        &format!("sites/{}/clients/{client_id}/actions", self.site.id),
+                        guest_authorization_body(action_id, &params)?,
+                    )
+                    .await
+                    .map_err(connector_error)?;
+                Ok(ActionResult::ok(
+                    "Guest network access was authorized with the requested limits.",
+                ))
+            }
+            ACTION_CREATE_VOUCHER => {
+                if target_id.is_some() {
+                    return Err(ConnectorError::invalid_action(action_id));
+                }
+                self.client
+                    .post_json(
+                        &format!("sites/{}/hotspot/vouchers", self.site.id),
+                        voucher_creation_body(action_id, &params)?,
+                    )
+                    .await
+                    .map_err(connector_error)?;
+                Ok(ActionResult::ok("Created one hotspot voucher."))
+            }
+            ACTION_REVOKE_VOUCHER => {
+                if target_id.is_some() {
+                    return Err(ConnectorError::invalid_action(action_id));
+                }
+                let voucher_id = required_resource_id(action_id, &params)?;
+                let vouchers = self.list_all_vouchers().await.map_err(connector_error)?;
+                if !vouchers.iter().any(|voucher| voucher.id == voucher_id) {
+                    return Err(invalid_param(
+                        action_id,
+                        "`resourceId` is not a voucher returned by this site",
+                    ));
+                }
+                self.client
+                    .delete(&format!(
+                        "sites/{}/hotspot/vouchers/{voucher_id}",
+                        self.site.id
+                    ))
+                    .await
+                    .map_err(connector_error)?;
+                Ok(ActionResult::ok("Revoked the hotspot voucher."))
+            }
+            _ => Err(ConnectorError::invalid_action(action_id)),
         }
-        let Some(device_id) = target_id.and_then(device_id_from_target) else {
-            return Err(ConnectorError::invalid_action(action_id));
-        };
-        let devices = self.list_all_devices().await.map_err(connector_error)?;
-        let Some(device) = devices.iter().find(|device| device.id == device_id) else {
-            return Err(ConnectorError::invalid_action(action_id));
-        };
-        let label = device_label(device);
-        self.remember_devices(devices.clone());
-        self.client
-            .post_json(
-                &format!("sites/{}/devices/{device_id}/actions", self.site.id),
-                json!({ "action": "RESTART" }),
-            )
-            .await
-            .map_err(connector_error)?;
-        Ok(ActionResult::ok(format!(
-            "Restart requested for {label}. The device will briefly disconnect attached clients; restarting a gateway may temporarily disconnect the network itself."
-        )))
+    }
+
+    fn resource_kinds(&self, target_id: Option<&str>) -> Vec<ResourceKindDescriptor> {
+        match target_id {
+            None => vec![clients_kind(), vouchers_kind()],
+            Some(target) if device_id_from_target(target).is_some() => vec![ports_kind()],
+            _ => Vec::new(),
+        }
+    }
+
+    async fn list_resource_items(
+        &self,
+        kind: &str,
+        target_id: Option<&str>,
+    ) -> Result<Vec<ResourceItem>, ConnectorError> {
+        match (kind, target_id) {
+            (RESOURCE_KIND_PORTS, Some(target)) => {
+                let Some(device_id) = device_id_from_target(target) else {
+                    return Ok(Vec::new());
+                };
+                let details: DeviceDetails = self
+                    .client
+                    .get(&format!("sites/{}/devices/{device_id}", self.site.id))
+                    .await
+                    .map_err(connector_error)?;
+                Ok(port_resource_items(details.interfaces.ports))
+            }
+            (RESOURCE_KIND_CLIENTS, None) => {
+                let clients = self.clients_for_resources().await?;
+                let mut devices = self.device_snapshot();
+                if devices.is_empty() {
+                    devices = self.list_all_devices().await.map_err(connector_error)?;
+                    self.remember_devices(devices.clone());
+                }
+                Ok(client_resource_items(clients, &devices))
+            }
+            (RESOURCE_KIND_VOUCHERS, None) => Ok(voucher_resource_items(
+                self.list_all_vouchers().await.map_err(connector_error)?,
+            )),
+            _ => Ok(Vec::new()),
+        }
     }
 
     fn supports_sub_targets(&self) -> bool {
@@ -364,11 +572,65 @@ struct DeviceStatistics {
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
-struct CountPage {
-    // Client rows are deliberately not decoded here. The endpoint's
-    // polymorphic rows vary by wired/wireless/VPN type and the host-level
-    // connector needs only the documented collection total.
-    total_count: usize,
+struct DeviceDetails {
+    #[serde(default)]
+    interfaces: DeviceInterfaces,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct DeviceInterfaces {
+    #[serde(default)]
+    ports: Vec<PortOverview>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct PortOverview {
+    idx: u32,
+    state: String,
+    #[serde(default)]
+    poe: Option<PortPoeOverview>,
+}
+
+#[derive(Debug, Deserialize)]
+struct PortPoeOverview {
+    enabled: bool,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ClientOverview {
+    id: String,
+    #[serde(default)]
+    name: String,
+    #[serde(default)]
+    mac_address: Option<String>,
+    #[serde(default)]
+    ip_address: Option<String>,
+    #[serde(default)]
+    uplink_device_id: Option<String>,
+    access: ClientAccessOverview,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct ClientAccessOverview {
+    #[serde(rename = "type")]
+    access_type: String,
+    #[serde(default)]
+    authorized: Option<bool>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct VoucherOverview {
+    id: String,
+    code: String,
+    created_at: String,
+    #[serde(default)]
+    expires_at: Option<String>,
+    #[serde(default)]
+    authorized_guest_limit: Option<u64>,
+    authorized_guest_count: u64,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -473,6 +735,382 @@ fn restart_action(target_id: &str) -> ConnectorAction {
         .snapshotting([DATA_POINT_STATE])
 }
 
+fn ports_kind() -> ResourceKindDescriptor {
+    ResourceKindDescriptor::new(
+        RESOURCE_KIND_PORTS,
+        "Ports",
+        vec![
+            ColumnDescriptor::new("port", "Port", ColumnValueType::Number),
+            ColumnDescriptor::new("poeEnabled", "PoE enabled", ColumnValueType::Bool),
+            ColumnDescriptor::new("linkStatus", "Link", ColumnValueType::Text),
+        ],
+    )
+    .applicable_to(ApplicableTarget::TargetOnly)
+    .with_row_actions(vec![resource_row_action(
+        ACTION_CYCLE_POE,
+        "Power-cycle PoE",
+        "Briefly cuts power to the device attached to this port.",
+        true,
+    )])
+}
+
+fn clients_kind() -> ResourceKindDescriptor {
+    ResourceKindDescriptor::new(
+        RESOURCE_KIND_CLIENTS,
+        "Clients",
+        vec![
+            ColumnDescriptor::new("name", "Name", ColumnValueType::Text),
+            ColumnDescriptor::new("mac", "MAC", ColumnValueType::Text),
+            ColumnDescriptor::new("ipAddress", "IP address", ColumnValueType::Text),
+            ColumnDescriptor::new("connectedTo", "Connected to", ColumnValueType::Text),
+            ColumnDescriptor::new("isGuest", "Guest", ColumnValueType::Bool),
+            ColumnDescriptor::new("authorized", "Authorized", ColumnValueType::Bool),
+        ],
+    )
+    .applicable_to(ApplicableTarget::HostOnly)
+    .with_row_actions(vec![authorize_guest_action()])
+}
+
+fn vouchers_kind() -> ResourceKindDescriptor {
+    ResourceKindDescriptor::new(
+        RESOURCE_KIND_VOUCHERS,
+        "Vouchers",
+        vec![
+            ColumnDescriptor::new("code", "Code", ColumnValueType::Text),
+            ColumnDescriptor::new("expiresAt", "Expires", ColumnValueType::Timestamp),
+            ColumnDescriptor::new("usesRemaining", "Uses remaining", ColumnValueType::Number),
+            ColumnDescriptor::new("createdAt", "Created", ColumnValueType::Timestamp),
+        ],
+    )
+    .applicable_to(ApplicableTarget::HostOnly)
+    .with_row_actions(vec![resource_row_action(
+        ACTION_REVOKE_VOUCHER,
+        "Revoke",
+        "Permanently revoke this hotspot voucher.",
+        false,
+    )])
+    .with_kind_actions(vec![create_voucher_action()])
+}
+
+fn authorize_guest_action() -> ConnectorAction {
+    ConnectorAction {
+        id: ACTION_AUTHORIZE_GUEST.to_owned(),
+        target_id: None,
+        label: "Authorize guest".to_owned(),
+        description: Some(
+            "Authorize this guest client, replacing any existing authorization and resetting its traffic counters."
+                .to_owned(),
+        ),
+        params_schema: json!({
+            "type": "object",
+            "properties": {
+                RESOURCE_ID_PARAM: resource_id_schema("Client"),
+                "timeLimitMinutes": integer_schema(
+                    "Access duration (minutes)",
+                    "Optional; the site's default is used when omitted.",
+                    1,
+                    1_000_000
+                ),
+                "dataUsageLimitMBytes": integer_schema(
+                    "Data limit (MB)",
+                    "Optional total data allowance.",
+                    1,
+                    1_048_576
+                ),
+                "rxRateLimitKbps": integer_schema(
+                    "Download limit (Kbps)",
+                    "Optional download rate limit.",
+                    2,
+                    100_000
+                ),
+                "txRateLimitKbps": integer_schema(
+                    "Upload limit (Kbps)",
+                    "Optional upload rate limit.",
+                    2,
+                    100_000
+                )
+            },
+            "required": [RESOURCE_ID_PARAM],
+            "additionalProperties": false
+        }),
+        is_disruptive: false,
+        snapshot_data_point_ids: Vec::new(),
+    }
+}
+
+fn create_voucher_action() -> ConnectorAction {
+    ConnectorAction {
+        id: ACTION_CREATE_VOUCHER.to_owned(),
+        target_id: None,
+        label: "Create voucher".to_owned(),
+        description: Some(
+            "Create one hotspot voucher with explicit duration and usage limits.".to_owned(),
+        ),
+        params_schema: json!({
+            "type": "object",
+            "properties": {
+                "name": {
+                    "type": "string",
+                    "title": "Name",
+                    "description": "A note used to identify the voucher.",
+                    "minLength": 1
+                },
+                "timeLimitMinutes": integer_schema(
+                    "Access duration (minutes)",
+                    "Time from first activation until the voucher expires.",
+                    1,
+                    1_000_000
+                ),
+                "authorizedGuestLimit": {
+                    "type": "integer",
+                    "title": "Usage quota",
+                    "description": "How many different guests may use this voucher.",
+                    "minimum": 1
+                },
+                "dataUsageLimitMBytes": integer_schema(
+                    "Data limit (MB)",
+                    "Optional total data allowance.",
+                    1,
+                    1_048_576
+                ),
+                "rxRateLimitKbps": integer_schema(
+                    "Download limit (Kbps)",
+                    "Optional download rate limit.",
+                    2,
+                    100_000
+                ),
+                "txRateLimitKbps": integer_schema(
+                    "Upload limit (Kbps)",
+                    "Optional upload rate limit.",
+                    2,
+                    100_000
+                )
+            },
+            "required": ["name", "timeLimitMinutes", "authorizedGuestLimit"],
+            "additionalProperties": false
+        }),
+        is_disruptive: false,
+        snapshot_data_point_ids: Vec::new(),
+    }
+}
+
+fn resource_row_action(
+    id: &str,
+    label: &str,
+    description: &str,
+    is_disruptive: bool,
+) -> ConnectorAction {
+    ConnectorAction {
+        id: id.to_owned(),
+        target_id: None,
+        label: label.to_owned(),
+        description: Some(description.to_owned()),
+        params_schema: json!({
+            "type": "object",
+            "properties": {
+                RESOURCE_ID_PARAM: resource_id_schema("Resource")
+            },
+            "required": [RESOURCE_ID_PARAM],
+            "additionalProperties": false
+        }),
+        is_disruptive,
+        snapshot_data_point_ids: Vec::new(),
+    }
+}
+
+fn resource_id_schema(title: &str) -> Value {
+    json!({
+        "type": "string",
+        "title": title,
+        "description": "The selected row; supplied automatically by Loom."
+    })
+}
+
+fn integer_schema(title: &str, description: &str, minimum: u64, maximum: u64) -> Value {
+    json!({
+        "type": "integer",
+        "title": title,
+        "description": description,
+        "minimum": minimum,
+        "maximum": maximum
+    })
+}
+
+fn port_resource_items(mut ports: Vec<PortOverview>) -> Vec<ResourceItem> {
+    ports.sort_by_key(|port| port.idx);
+    ports
+        .into_iter()
+        .map(|port| {
+            ResourceItem::new(port.idx.to_string())
+                .with_field("port", port.idx)
+                .with_field(
+                    "poeEnabled",
+                    port.poe.as_ref().is_some_and(|poe| poe.enabled),
+                )
+                .with_field("linkStatus", port.state)
+        })
+        .collect()
+}
+
+fn client_resource_items(
+    mut clients: Vec<ClientOverview>,
+    devices: &[DeviceOverview],
+) -> Vec<ResourceItem> {
+    clients.sort_by(|left, right| {
+        client_label(left)
+            .to_ascii_lowercase()
+            .cmp(&client_label(right).to_ascii_lowercase())
+    });
+    clients
+        .into_iter()
+        .map(|client| {
+            let is_guest = client.access.access_type == "GUEST";
+            let connected_to = client
+                .uplink_device_id
+                .as_deref()
+                .and_then(|id| devices.iter().find(|device| device.id == id))
+                .map(device_label)
+                .unwrap_or_default();
+            ResourceItem::new(client.id.clone())
+                .with_field("name", client_label(&client))
+                .with_field("mac", client.mac_address.unwrap_or_default())
+                .with_field("ipAddress", client.ip_address.unwrap_or_default())
+                .with_field("connectedTo", connected_to)
+                .with_field("isGuest", is_guest)
+                .with_field(
+                    "authorized",
+                    is_guest && client.access.authorized.unwrap_or(false),
+                )
+        })
+        .collect()
+}
+
+fn client_label(client: &ClientOverview) -> String {
+    let name = client.name.trim();
+    if !name.is_empty() {
+        return name.to_owned();
+    }
+    client
+        .mac_address
+        .as_deref()
+        .or(client.ip_address.as_deref())
+        .unwrap_or("Unknown client")
+        .to_owned()
+}
+
+fn voucher_resource_items(mut vouchers: Vec<VoucherOverview>) -> Vec<ResourceItem> {
+    vouchers.sort_by(|left, right| right.created_at.cmp(&left.created_at));
+    vouchers
+        .into_iter()
+        .map(|voucher| {
+            let uses_remaining = voucher
+                .authorized_guest_limit
+                .map(|limit| json!(limit.saturating_sub(voucher.authorized_guest_count)))
+                .unwrap_or(Value::Null);
+            ResourceItem::new(voucher.id)
+                .with_field("code", voucher.code)
+                .with_field(
+                    "expiresAt",
+                    voucher.expires_at.map(Value::String).unwrap_or(Value::Null),
+                )
+                .with_field("usesRemaining", uses_remaining)
+                .with_field("createdAt", voucher.created_at)
+        })
+        .collect()
+}
+
+fn guest_authorization_body(action_id: &str, params: &Value) -> Result<Value, ConnectorError> {
+    let mut body = Map::from_iter([(
+        "action".to_owned(),
+        Value::String("AUTHORIZE_GUEST_ACCESS".to_owned()),
+    )]);
+    copy_optional_integer_params(
+        action_id,
+        params,
+        &mut body,
+        &[
+            "timeLimitMinutes",
+            "dataUsageLimitMBytes",
+            "rxRateLimitKbps",
+            "txRateLimitKbps",
+        ],
+    )?;
+    Ok(Value::Object(body))
+}
+
+fn voucher_creation_body(action_id: &str, params: &Value) -> Result<Value, ConnectorError> {
+    let name = required_string_param(action_id, params, "name")?;
+    let time_limit = required_integer_param(action_id, params, "timeLimitMinutes")?;
+    let guest_limit = required_integer_param(action_id, params, "authorizedGuestLimit")?;
+    let mut body = Map::from_iter([
+        ("count".to_owned(), json!(1)),
+        ("name".to_owned(), json!(name)),
+        ("timeLimitMinutes".to_owned(), json!(time_limit)),
+        ("authorizedGuestLimit".to_owned(), json!(guest_limit)),
+    ]);
+    copy_optional_integer_params(
+        action_id,
+        params,
+        &mut body,
+        &["dataUsageLimitMBytes", "rxRateLimitKbps", "txRateLimitKbps"],
+    )?;
+    Ok(Value::Object(body))
+}
+
+fn required_resource_id<'a>(action_id: &str, params: &'a Value) -> Result<&'a str, ConnectorError> {
+    required_string_param(action_id, params, RESOURCE_ID_PARAM)
+}
+
+fn required_string_param<'a>(
+    action_id: &str,
+    params: &'a Value,
+    key: &str,
+) -> Result<&'a str, ConnectorError> {
+    params
+        .get(key)
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| invalid_param(action_id, format!("`{key}` must be a non-empty string")))
+}
+
+fn required_integer_param(
+    action_id: &str,
+    params: &Value,
+    key: &str,
+) -> Result<u64, ConnectorError> {
+    params
+        .get(key)
+        .and_then(Value::as_u64)
+        .filter(|value| *value > 0)
+        .ok_or_else(|| invalid_param(action_id, format!("`{key}` must be a positive integer")))
+}
+
+fn copy_optional_integer_params(
+    action_id: &str,
+    params: &Value,
+    body: &mut Map<String, Value>,
+    keys: &[&str],
+) -> Result<(), ConnectorError> {
+    for key in keys {
+        let Some(value) = params.get(*key) else {
+            continue;
+        };
+        let number = value.as_u64().filter(|number| *number > 0).ok_or_else(|| {
+            invalid_param(action_id, format!("`{key}` must be a positive integer"))
+        })?;
+        body.insert((*key).to_owned(), json!(number));
+    }
+    Ok(())
+}
+
+fn invalid_param(action_id: &str, reason: impl Into<String>) -> ConnectorError {
+    ConnectorError::InvalidParams {
+        action_id: action_id.to_owned(),
+        reason: reason.into(),
+    }
+}
+
 fn health_for_device_state(state: &str) -> HealthState {
     match state {
         "ONLINE" => HealthState::Healthy,
@@ -575,7 +1213,7 @@ mod tests {
             ]
         }))
         .expect("official device page shape");
-        let clients: CountPage = serde_json::from_value(json!({
+        let clients: Page<ClientOverview> = serde_json::from_value(json!({
             "offset": 0,
             "limit": 1,
             "count": 1,
@@ -632,12 +1270,13 @@ mod tests {
                 name: "Default".to_owned(),
             },
             known_devices: Mutex::new(Vec::new()),
+            known_clients: Mutex::new(Vec::new()),
         };
 
         assert_eq!(connector.metadata().id, TYPE_ID);
         assert_eq!(connector.data_points().len(), 3);
         assert!(connector.supports_sub_targets());
-        assert!(connector.resource_kinds(None).is_empty());
+        assert_eq!(connector.resource_kinds(None).len(), 2);
         assert!(connector.setup_guide().is_none());
     }
 
@@ -707,5 +1346,206 @@ mod tests {
         assert_eq!(format_uptime(Some(7_500)), "2h 5m");
         assert_eq!(format_uptime(Some(59)), "0m");
         assert_eq!(format_uptime(None), "Unavailable");
+    }
+
+    #[test]
+    fn official_device_details_map_ports_without_inventing_missing_fields() {
+        let details: DeviceDetails = serde_json::from_value(json!({
+            "id": "11111111-1111-1111-1111-111111111111",
+            "name": "Switch",
+            "model": "USW",
+            "state": "ONLINE",
+            "interfaces": {
+                "ports": [
+                    {
+                        "idx": 2,
+                        "state": "DOWN",
+                        "connector": "RJ45",
+                        "maxSpeedMbps": 1000
+                    },
+                    {
+                        "idx": 1,
+                        "state": "UP",
+                        "connector": "RJ45",
+                        "maxSpeedMbps": 1000,
+                        "speedMbps": 1000,
+                        "poe": {
+                            "standard": "802.3at",
+                            "type": 2,
+                            "enabled": true,
+                            "state": "UP"
+                        }
+                    }
+                ]
+            }
+        }))
+        .expect("official device detail shape");
+
+        let rows = port_resource_items(details.interfaces.ports);
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0].id, "1");
+        assert_eq!(rows[0].fields.get("port"), Some(&json!(1)));
+        assert_eq!(rows[0].fields.get("poeEnabled"), Some(&json!(true)));
+        assert_eq!(rows[0].fields.get("linkStatus"), Some(&json!("UP")));
+        assert_eq!(rows[1].fields.get("poeEnabled"), Some(&json!(false)));
+        assert!(!rows[0].fields.contains_key("poePowerWatts"));
+    }
+
+    #[test]
+    fn official_client_shapes_map_guest_access_and_uplink_labels() {
+        let page: Page<ClientOverview> = serde_json::from_value(json!({
+            "totalCount": 2,
+            "data": [
+                {
+                    "type": "WIRELESS",
+                    "id": "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+                    "name": "Guest phone",
+                    "macAddress": "00:00:00:00:00:01",
+                    "ipAddress": "192.0.2.20",
+                    "uplinkDeviceId": "11111111-1111-1111-1111-111111111111",
+                    "access": {"type": "GUEST", "authorized": true}
+                },
+                {
+                    "type": "VPN",
+                    "id": "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb",
+                    "name": "Remote user",
+                    "ipAddress": "192.0.2.30",
+                    "access": {"type": "DEFAULT"}
+                }
+            ]
+        }))
+        .expect("official polymorphic client overview shape");
+        let devices = vec![DeviceOverview {
+            id: "11111111-1111-1111-1111-111111111111".to_owned(),
+            name: Some("Workshop AP".to_owned()),
+            model: Some("U7 Pro".to_owned()),
+            state: Some("ONLINE".to_owned()),
+        }];
+
+        let rows = client_resource_items(page.data, &devices);
+        let guest = rows
+            .iter()
+            .find(|row| row.id == "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa")
+            .expect("guest row");
+        assert_eq!(guest.fields.get("name"), Some(&json!("Guest phone")));
+        assert_eq!(guest.fields.get("mac"), Some(&json!("00:00:00:00:00:01")));
+        assert_eq!(guest.fields.get("connectedTo"), Some(&json!("Workshop AP")));
+        assert_eq!(guest.fields.get("isGuest"), Some(&json!(true)));
+        assert_eq!(guest.fields.get("authorized"), Some(&json!(true)));
+        let vpn = rows
+            .iter()
+            .find(|row| row.id == "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb")
+            .expect("VPN row");
+        assert_eq!(vpn.fields.get("mac"), Some(&json!("")));
+        assert_eq!(vpn.fields.get("isGuest"), Some(&json!(false)));
+        assert_eq!(vpn.fields.get("authorized"), Some(&json!(false)));
+    }
+
+    #[test]
+    fn official_voucher_shape_maps_remaining_uses_and_nullable_expiry() {
+        let page: Page<VoucherOverview> = serde_json::from_value(json!({
+            "totalCount": 2,
+            "data": [
+                {
+                    "id": "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+                    "createdAt": "2026-09-04T10:00:00Z",
+                    "name": "Visitor",
+                    "code": "1234567890",
+                    "authorizedGuestLimit": 3,
+                    "authorizedGuestCount": 1,
+                    "activatedAt": "2026-09-04T10:05:00Z",
+                    "expiresAt": "2026-09-04T11:05:00Z",
+                    "expired": false,
+                    "timeLimitMinutes": 60
+                },
+                {
+                    "id": "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb",
+                    "createdAt": "2026-09-03T10:00:00Z",
+                    "name": "Unlimited users",
+                    "code": "0987654321",
+                    "authorizedGuestCount": 0,
+                    "expired": false,
+                    "timeLimitMinutes": 60
+                }
+            ]
+        }))
+        .expect("official voucher detail page shape");
+
+        let rows = voucher_resource_items(page.data);
+        assert_eq!(rows[0].fields.get("code"), Some(&json!("1234567890")));
+        assert_eq!(rows[0].fields.get("usesRemaining"), Some(&json!(2)));
+        assert_eq!(
+            rows[0].fields.get("expiresAt"),
+            Some(&json!("2026-09-04T11:05:00Z"))
+        );
+        assert_eq!(rows[1].fields.get("usesRemaining"), Some(&Value::Null));
+        assert_eq!(rows[1].fields.get("expiresAt"), Some(&Value::Null));
+    }
+
+    #[test]
+    fn resource_kinds_are_scoped_and_publish_only_confirmed_actions() {
+        let host = [clients_kind(), vouchers_kind()];
+        assert!(host
+            .iter()
+            .all(|kind| kind.applicable_target == ApplicableTarget::HostOnly));
+        assert_eq!(
+            host[0]
+                .row_actions
+                .iter()
+                .map(|action| action.id.as_str())
+                .collect::<Vec<_>>(),
+            [ACTION_AUTHORIZE_GUEST]
+        );
+        assert_eq!(host[1].row_actions[0].id, ACTION_REVOKE_VOUCHER);
+        assert_eq!(host[1].kind_actions[0].id, ACTION_CREATE_VOUCHER);
+
+        let ports = ports_kind();
+        assert_eq!(ports.applicable_target, ApplicableTarget::TargetOnly);
+        assert_eq!(ports.row_actions[0].id, ACTION_CYCLE_POE);
+        assert!(ports.row_actions[0].target_id.is_none());
+        assert!(ports.row_actions[0].is_disruptive);
+    }
+
+    #[test]
+    fn write_payloads_match_the_official_discriminated_request_shapes() {
+        assert_eq!(
+            guest_authorization_body(
+                ACTION_AUTHORIZE_GUEST,
+                &json!({
+                    "resourceId": "not-sent-in-the-body",
+                    "timeLimitMinutes": 30,
+                    "dataUsageLimitMBytes": 512,
+                    "rxRateLimitKbps": 10_000,
+                    "txRateLimitKbps": 2_000
+                })
+            )
+            .expect("valid guest authorization"),
+            json!({
+                "action": "AUTHORIZE_GUEST_ACCESS",
+                "timeLimitMinutes": 30,
+                "dataUsageLimitMBytes": 512,
+                "rxRateLimitKbps": 10_000,
+                "txRateLimitKbps": 2_000
+            })
+        );
+        assert_eq!(
+            voucher_creation_body(
+                ACTION_CREATE_VOUCHER,
+                &json!({
+                    "name": "Visitor",
+                    "timeLimitMinutes": 60,
+                    "authorizedGuestLimit": 2,
+                    "rxRateLimitKbps": 5_000
+                })
+            )
+            .expect("valid voucher creation"),
+            json!({
+                "count": 1,
+                "name": "Visitor",
+                "timeLimitMinutes": 60,
+                "authorizedGuestLimit": 2,
+                "rxRateLimitKbps": 5_000
+            })
+        );
     }
 }

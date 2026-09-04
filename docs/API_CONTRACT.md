@@ -1040,10 +1040,24 @@ future state values remain Unknown rather than being guessed.
 Device targets expose a parameterless, disruptive `restart` action. It invokes
 `POST /sites/{siteId}/devices/{deviceId}/actions` with
 `{ "action": "RESTART" }` and warns that attached clients—and potentially the
-network when restarting a gateway—will disconnect briefly. PoE port cycling,
-guest authorization, and voucher mutations remain deferred to resource kinds.
+network when restarting a gateway—will disconnect briefly.
 There is no official site-summary or WAN-status endpoint in the current local
 Network specification, so no WAN field is inferred from undocumented APIs.
+
+### UniFi Network resource kinds
+
+| Kind | Scope | Columns | Actions | Official source |
+| --- | --- | --- | --- | --- |
+| `ports` | Device target only | `port`, `poeEnabled`, `linkStatus` | Row: disruptive `cyclePoe` | The device detail's `interfaces.ports`; `POST /sites/{siteId}/devices/{deviceId}/interfaces/ports/{portIdx}/actions` with `POWER_CYCLE`. The 9.4.17 schema publishes neither port names nor PoE watt draw, so Loom does not fabricate either column. |
+| `clients` | Host only | `name`, `mac`, `ipAddress`, `connectedTo`, `isGuest`, `authorized` | Row: `authorizeGuest` | The same paginated `/sites/{siteId}/clients` collection used by the host poll. Authorization posts `AUTHORIZE_GUEST_ACCESS`, with optional duration, data allowance, and RX/TX rate limits. VPN/Teleport rows legitimately have no MAC or uplink device. |
+| `vouchers` | Host only | `code`, `expiresAt`, `usesRemaining`, `createdAt` | Row: `revokeVoucher`; kind: `createVoucher` | `GET`/`POST /sites/{siteId}/hotspot/vouchers` and `DELETE /sites/{siteId}/hotspot/vouchers/{voucherId}`. Remaining uses are the optional authorized-guest limit minus the authorized count; an unlimited voucher reports no numeric remainder. |
+
+`createVoucher` creates one voucher and requires `name`, `timeLimitMinutes`,
+and `authorizedGuestLimit`; optional parameters are `dataUsageLimitMBytes`,
+`rxRateLimitKbps`, and `txRateLimitKbps`. `authorizeGuest` takes the same four
+optional limit fields supported by the API. The official client action enum
+contains guest authorize/unauthorize only—there is no client block/unblock
+operation, so Loom exposes none.
 
 Local consoles may use a locally issued or self-signed HTTPS certificate.
 `allowInsecureCert` relaxes peer verification only for that connector instance,

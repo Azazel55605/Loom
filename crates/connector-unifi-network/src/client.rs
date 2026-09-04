@@ -127,6 +127,32 @@ impl UniFiNetworkClient {
         Ok(())
     }
 
+    pub(crate) async fn delete(&self, path: &str) -> Result<(), UniFiNetworkError> {
+        let _permit = self.call_permit().await?;
+        let endpoint = self.endpoint(path);
+        let response = self
+            .http
+            .delete(&endpoint)
+            .header(API_KEY_HEADER, self.api_key.as_ref())
+            .header(reqwest::header::ACCEPT, "application/json")
+            .send()
+            .await
+            .map_err(connection_error)?;
+        let status = response.status();
+        if matches!(status, StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN) {
+            return Err(UniFiNetworkError::AuthFailed(
+                response_message(response).await,
+            ));
+        }
+        if !status.is_success() {
+            return Err(UniFiNetworkError::ApiError {
+                status: status.as_u16(),
+                message: response_message(response).await,
+            });
+        }
+        Ok(())
+    }
+
     async fn call_permit(&self) -> Result<tokio::sync::SemaphorePermit<'_>, UniFiNetworkError> {
         // One connector clone is shared by the host poll and every target
         // consumer. The official API documents no endpoint-specific rate
