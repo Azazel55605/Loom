@@ -116,6 +116,14 @@ pub async fn assert_connector_contract(
     }
 
     for target in &scopes {
+        // A resource-kind binding resolves against a third namespace, and it
+        // has to be read per target: `resource_kinds` takes one precisely so a
+        // kind can be absent at one scope and present at another.
+        let kind_ids: HashSet<String> = connector
+            .resource_kinds(*target)
+            .into_iter()
+            .map(|kind| kind.kind)
+            .collect();
         let layout = connector.default_layout_for(*target);
         for binding in &layout.bindings {
             match binding {
@@ -127,6 +135,11 @@ pub async fn assert_connector_contract(
                 WidgetBinding::Action { action_id, .. } => assert!(
                     action_keys.contains(&(action_id.as_str(), *target)),
                     "connector `{connector_id}` layout for target {} binds missing action `{action_id}`",
+                    target_label(*target)
+                ),
+                WidgetBinding::ResourceKindDisplay { resource_kind } => assert!(
+                    kind_ids.contains(resource_kind),
+                    "connector `{connector_id}` layout for target {} binds missing resource kind `{resource_kind}`",
                     target_label(*target)
                 ),
             }

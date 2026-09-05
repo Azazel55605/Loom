@@ -401,7 +401,9 @@ function parseExactDate(value: string): Date | null {
     : null;
 }
 
-function auditPlacement(instance: ConnectorInstanceSummary): DashboardPlacement {
+function auditPlacement(
+  instance: ConnectorInstanceSummary,
+): DashboardPlacement & { connector: ConnectorInstanceSummary } {
   return {
     id: `audit:${instance.id}`,
     connector: instance,
@@ -411,6 +413,11 @@ function auditPlacement(instance: ConnectorInstanceSummary): DashboardPlacement 
     width: instance.metadata.minSize[0],
     height: instance.metadata.minSize[1],
     widgetBindings: [],
+    // A synthetic placement, so it has none of the things a real one carries:
+    // nothing clicks it, and its name comes from the connector.
+    placementAction: null,
+    label: null,
+    icon: null,
     createdAt: instance.createdAt,
     groupId: null,
   };

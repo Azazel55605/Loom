@@ -25,8 +25,15 @@ export function DashboardsIndexView({
     queryFn: ({ signal }) => api.getDashboards(signal),
   });
 
-  const destination = dashboards.data?.find((dashboard) => dashboard.pinned)
-    ?? dashboards.data?.find((dashboard) => dashboard.role === "owner");
+  // Hidden dashboards are skipped when choosing where to land. One is usually
+  // the destination of a button tile rather than somewhere to start, and a
+  // dashboard deliberately kept out of the sidebar becoming somebody's home
+  // page purely because it sorted first would be the opposite of what the flag
+  // was set for. It remains reachable by id, and by anything pointing at it.
+  const landable = dashboards.data?.filter((dashboard) => !dashboard.hidden);
+  const destination =
+    landable?.find((dashboard) => dashboard.pinned) ??
+    landable?.find((dashboard) => dashboard.role === "owner");
   const destinationId = destination?.id;
   const onNavigateRef = React.useRef(onNavigate);
   onNavigateRef.current = onNavigate;

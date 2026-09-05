@@ -1815,7 +1815,7 @@ fn trimmed(value: Option<&str>) -> Option<String> {
 /// anywhere. Note *currently*: `actions()` legitimately returns an empty list
 /// from a connector whose service is unreachable, which is why the caller must
 /// not read `None` as "no such action" on its own.
-async fn resolve_action(
+pub(crate) async fn resolve_action(
     connector: &dyn Connector,
     action_id: &str,
     target_id: Option<&str>,
@@ -1917,7 +1917,7 @@ fn normalize_tags(tags: Vec<String>) -> Result<Vec<String>, String> {
 }
 
 /// The 404 body, phrased identically wherever it comes from.
-fn not_found(id: &str) -> Response {
+pub(crate) fn not_found(id: &str) -> Response {
     ErrorBody::message(
         StatusCode::NOT_FOUND,
         format!("no such connector instance: {id}"),
@@ -2105,7 +2105,7 @@ fn unloaded_metadata(row: &InstanceRow) -> ConnectorMetadata {
 /// authenticate and holds nothing that would fix it, so a 401 would wrongly
 /// tell a client to re-prompt its user. It is a gateway failure, like
 /// `Unreachable`.
-fn status_for(error: &ConnectorError) -> StatusCode {
+pub(crate) fn status_for(error: &ConnectorError) -> StatusCode {
     match error {
         ConnectorError::InvalidAction { .. } => StatusCode::NOT_FOUND,
         ConnectorError::InvalidParams { .. } | ConnectorError::InvalidConfig { .. } => {

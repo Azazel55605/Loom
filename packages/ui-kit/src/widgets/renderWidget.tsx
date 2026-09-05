@@ -4,8 +4,10 @@ import { AlertTriangle } from "lucide-react";
 import type {
   ConnectorAction,
   DataPointDescriptor,
+  ResourceKindDescriptor,
   WidgetBinding,
 } from "@loom/ui-kit/lib/api";
+import { ResourceKindBrowser } from "@loom/ui-kit/components/ResourceKindBrowser";
 import { GaugeSkeleton, GaugeWidget } from "@loom/ui-kit/widgets/Gauge";
 import { LogPreviewSkeleton, LogPreviewWidget } from "@loom/ui-kit/widgets/LogPreview";
 import { LogStreamSkeleton, LogStreamWidget } from "@loom/ui-kit/widgets/LogStream";
@@ -23,6 +25,7 @@ import {
   TooltipContent,
   TooltipTrigger,
 } from "@loom/ui-kit/components/ui/tooltip";
+import { Skeleton } from "@loom/ui-kit/components/ui/skeleton";
 import { soleParameterName } from "@loom/ui-kit/widgets/compatibility";
 import type { WidgetExecute } from "@loom/ui-kit/widgets/types";
 
@@ -37,6 +40,20 @@ export type RenderWidgetOptions = {
   dataPoints: DataPointDescriptor[];
   /** The connector's declared actions, for labels and parameter schemas. */
   actions?: ConnectorAction[];
+  /**
+   * The connector's declared resource kinds for this placement's target, as
+   * already fetched by the caller.
+   *
+   * Passed in rather than fetched here for the same reason `dataPoints` and
+   * `actions` are: this function draws one binding and is called in a loop, and
+   * a query inside it would be one request per widget for a list that is one
+   * property of the connector.
+   */
+  resourceKinds?: ResourceKindDescriptor[];
+  /** The instance and target a `resourceKindDisplay` binding lists rows from.
+   *  Required only when such a binding is present. */
+  instanceId?: string;
+  targetId?: string | null;
   onExecute: WidgetExecute;
   /** Disables every control. Set for a viewer without `connectors.control`.
    *  Visibility only — the backend re-checks each request. */
@@ -74,9 +91,11 @@ export type RenderWidgetOptions = {
  * The single place the binding model meets the primitives, and the reason
  * neither `DashboardView` nor any widget has to know both. It narrows on the
  * binding's tag first — `display` resolves against `dataPoints` and reads
- * `statusDetails`, `action` resolves against `actions` and gets `onExecute` —
- * which is the split the corrected `WidgetBinding` enum exists to make
- * checkable (see `docs/adr/0014-widget-binding-model.md`).
+ * `statusDetails`, `action` resolves against `actions` and gets `onExecute`,
+ * `resourceKindDisplay` resolves against `resourceKinds` and becomes a
+ * `ResourceKindBrowser` — which is the split the corrected `WidgetBinding` enum
+ * exists to make checkable (see `docs/adr/0014-widget-binding-model.md` and
+ * `docs/adr/0035-placement-actions-and-hidden-dashboards.md`).
  *
  * A binding naming something the connector no longer declares renders a visible
  * note rather than nothing. A connector's data points can change with its
@@ -92,6 +111,9 @@ export function renderWidget({
   statusDetails,
   dataPoints,
   actions,
+  resourceKinds,
+  instanceId,
+  targetId = null,
   onExecute,
   disabled,
   unavailableReason,
@@ -100,6 +122,31 @@ export function renderWidget({
   loading = true,
   onExpand,
 }: RenderWidgetOptions) {
+  if ("resourceKindDisplay" in binding) {
+    const { resourceKind } = binding.resourceKindDisplay;
+    if (resourceKinds === undefined || instanceId === undefined) {
+      return <Skeleton className={className ?? "h-32 w-full"} />;
+    }
+    const descriptor = resourceKinds.find((kind) => kind.kind === resourceKind);
+    if (descriptor === undefined) {
+      return <MissingBinding what="resource kind" id={resourceKind} className={className} />;
+    }
+    // No card, no padding, no heading of its own. The placement is already a
+    // card, and a table inside a second frame inside the first is the "widget
+    // awkwardly embedded in a smaller widget" this binding exists to avoid —
+    // at any size, from a corner tile to one filling the whole dashboard.
+    return (
+      <ResourceKindBrowser
+        instanceId={instanceId}
+        targetId={targetId}
+        descriptor={descriptor}
+        disabled={disabled === true || unavailableReason != null}
+        disabledReason={unavailableReason}
+        className={className}
+      />
+    );
+  }
+
   if ("display" in binding) {
     const { dataPointId, widgetType, config } = binding.display;
     const descriptor = dataPoints.find((point) => point.id === dataPointId);

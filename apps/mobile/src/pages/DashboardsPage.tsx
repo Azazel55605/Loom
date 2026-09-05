@@ -26,6 +26,9 @@ export function DashboardDetailPage() {
         key={id}
         dashboardId={id}
         onDeleted={() => navigate("/dashboards", { replace: true })}
+        // A tile that navigates hands the router the id it was allowed to
+        // reach; the UI kit deliberately does not know this app has a router.
+        onNavigateDashboard={(target) => navigate(`/dashboards/${target}`)}
       />
     </MobileAppShell>
   );

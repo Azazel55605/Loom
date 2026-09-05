@@ -53,6 +53,7 @@ export function GroupTile({
   live,
   editing,
   onEditBindings,
+  onNavigateDashboard,
   onChanged,
 }: {
   dashboardId: string;
@@ -60,6 +61,9 @@ export function GroupTile({
   live: Record<string, LiveStatus>;
   editing: boolean;
   onEditBindings: (placement: DashboardPlacement) => void;
+  /** Passed through to members: a grouped tile is still clickable if it was
+   *  clickable standing alone. See `PlacementTile`. */
+  onNavigateDashboard?: (dashboardId: string) => void;
   onChanged: () => void | Promise<void>;
 }) {
   const api = useApiClient();
@@ -163,10 +167,12 @@ export function GroupTile({
                     // The same reading a standalone tile gives, so one
                     // placement does not read two ways depending on whether
                     // somebody grouped it.
+                    // A static tile has no connector to name it, so it names
+                    // itself; the fallback keeps a mixed group readable.
+                    const name =
+                      member.connector?.name ?? member.label ?? "Button";
                     const target = describeTarget(member.targetId);
-                    return target === null
-                      ? member.connector.name
-                      : `${member.connector.name} · ${target.text}`;
+                    return target === null ? name : `${name} · ${target.text}`;
                   })
                   .join(" · ")}
               </p>
@@ -202,10 +208,14 @@ export function GroupTile({
           {group.members.map((member, index) => (
             <div key={member.id} className="min-h-[12rem] min-w-[16rem] flex-1 basis-[16rem]">
               <PlacementTile
+                dashboardId={dashboardId}
                 placement={member}
-                live={live[member.connector.id]}
+                live={
+                  member.connector === null ? undefined : live[member.connector.id]
+                }
                 editing={editing}
                 onEditBindings={onEditBindings}
+                onNavigateDashboard={onNavigateDashboard}
                 groupMember={
                   editing
                     ? {

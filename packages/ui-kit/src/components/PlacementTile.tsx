@@ -7,6 +7,7 @@ import {
   FolderInput,
   GripVertical,
   Layers,
+  Loader2,
   Maximize2,
   Pencil,
   Trash2,
@@ -24,10 +25,12 @@ import {
   ApiError,
   SessionExpiredError,
   type ConnectorError,
+  type ConnectorInstanceSummary,
   type ConnectorStatus,
   type DashboardPlacement,
   type PendingOperation,
 } from "@loom/ui-kit/lib/api";
+import { PlacementClickSurface, usePlacementClick } from "@loom/ui-kit/components/PlacementClick";
 import { connectorAvailability } from "@loom/ui-kit/lib/connector-availability";
 import { useApiClient } from "@loom/ui-kit/lib/api-context";
 import { useAuth } from "@loom/ui-kit/lib/auth-context";
@@ -83,17 +86,21 @@ export const DRAG_HANDLE_CLASS = "loom-drag-handle";
  * and health are already known, and hiding them would look like a reload.
  */
 export function PlacementTile({
+  dashboardId,
   placement,
   live,
   editing,
   onEditBindings,
   onDelete,
+  onNavigateDashboard,
   grouping = false,
   selected = false,
   onSelectedChange,
   onAddToGroup,
   groupMember,
 }: {
+  /** The dashboard this tile lives on. The click endpoint is scoped to it. */
+  dashboardId: string;
   placement: DashboardPlacement;
   /** The latest pushed reading, or `undefined` before the first frame — in
    *  which case the placement's own snapshot is used. */
@@ -102,6 +109,15 @@ export function PlacementTile({
   editing: boolean;
   onEditBindings: (placement: DashboardPlacement) => void;
   onDelete?: (placement: DashboardPlacement) => void;
+  /**
+   * Opens another dashboard, for a tile whose click navigates.
+   *
+   * Supplied by the host rather than done here: the UI kit ships to three
+   * clients and knows nothing about any of their routers. Omitted where there
+   * is nowhere to go, and a navigate tile is then simply not clickable rather
+   * than clickable and inert.
+   */
+  onNavigateDashboard?: (dashboardId: string) => void;
   /** Selection mode for combining standalone tiles. */
   grouping?: boolean;
   selected?: boolean;
@@ -118,9 +134,84 @@ export function PlacementTile({
     onRemove: () => void;
   };
 }) {
+  const props = {
+    dashboardId,
+    placement,
+    live,
+    editing,
+    onEditBindings,
+    onDelete,
+    onNavigateDashboard,
+    grouping,
+    selected,
+    onSelectedChange,
+    onAddToGroup,
+    groupMember,
+  };
+
+  // A placement with no connector has no status, no instance detail to fetch
+  // and nothing to bind, so it is a different card rather than this one with
+  // every section suppressed. Two components rather than one full of `?.`:
+  // the connector card's whole body — status, availability, widgets, the
+  // detail modal — is meaningless without an instance, and a branch here is
+  // cheaper to read than a branch at every use of one.
+  //
+  // Dispatch happens before any hook, and neither branch is conditional inside
+  // itself, so the rules of hooks hold on both paths.
+  return placement.connector === null ? (
+    <StaticPlacementTile {...props} />
+  ) : (
+    <ConnectorPlacementTile {...props} connector={placement.connector} />
+  );
+}
+
+/** Props shared by both tile bodies; see `PlacementTile` for what each means. */
+type PlacementTileProps = {
+  dashboardId: string;
+  placement: DashboardPlacement;
+  live?: LiveStatus;
+  editing: boolean;
+  onEditBindings: (placement: DashboardPlacement) => void;
+  onDelete?: (placement: DashboardPlacement) => void;
+  onNavigateDashboard?: (dashboardId: string) => void;
+  grouping?: boolean;
+  selected?: boolean;
+  onSelectedChange?: (selected: boolean) => void;
+  onAddToGroup?: (placement: DashboardPlacement) => void;
+  groupMember?: {
+    index: number;
+    total: number;
+    pending: boolean;
+    onMoveLeft: () => void;
+    onMoveRight: () => void;
+    onRemove: () => void;
+  };
+};
+
+/**
+ * A tile that shows a connector: the card shell, and every widget bound to it.
+ *
+ * The original `PlacementTile` body, unchanged but for two additions — the
+ * resource-kind bindings it now hands to `renderWidget`, and the click surface
+ * wrapped around the whole card when the placement carries a `placementAction`.
+ */
+function ConnectorPlacementTile({
+  dashboardId,
+  placement,
+  connector: instance,
+  live,
+  editing,
+  onEditBindings,
+  onDelete,
+  onNavigateDashboard,
+  grouping = false,
+  selected = false,
+  onSelectedChange,
+  onAddToGroup,
+  groupMember,
+}: PlacementTileProps & { connector: ConnectorInstanceSummary }) {
   const api = useApiClient();
   const { user } = useAuth();
-  const instance = placement.connector;
   const [detailOpen, setDetailOpen] = React.useState(false);
   // Which part of the detail view was asked for. The header's expand button
   // means "show me this connector"; a log preview's means "show me *that*",
@@ -240,18 +331,37 @@ export function PlacementTile({
   // `updates` kind at all. A per-container tile browses nothing of its own, and
   // a connector without the kind must look exactly as it did before any of this
   // existed — no badge, no button, no request.
-  const updateKinds = useQuery({
-    queryKey: ["connector-resource-kinds", instance.id],
+  // A `resourceKindDisplay` binding resolves against this same list, so the
+  // query is no longer host-only — and its key now carries the target, which it
+  // could get away with omitting while it only ever ran for the host view.
+  const bindsResourceKind = placement.widgetBindings.some(
+    (binding) => "resourceKindDisplay" in binding,
+  );
+  const resourceKinds = useQuery({
+    queryKey: ["connector-resource-kinds", instance.id, placement.targetId],
     queryFn: ({ signal }) => api.getResourceKinds(instance.id, placement.targetId, signal),
-    enabled: placement.targetId === null,
+    enabled: placement.targetId === null || bindsResourceKind,
     // Which kinds exist is a property of the connector, not of its state: it
     // changes when someone edits a configuration, not between polls.
     staleTime: 5 * 60_000,
   });
   const updatesKind =
     placement.targetId === null
-      ? updateKinds.data?.find((kind) => kind.kind === UPDATES_KIND)
+      ? resourceKinds.data?.find((kind) => kind.kind === UPDATES_KIND)
       : undefined;
+
+  const click = usePlacementClick({ dashboardId, placement, onNavigateDashboard });
+  // Never while rearranging, for the same reason every action widget goes dead
+  // there: a press meant to grab a card must not change the page underneath a
+  // drag. Grouping-selection mode owns the click too.
+  const clickable = click.clickable && !editing && !grouping;
+
+  // A tile whose only binding is a resource kind *is* that table. Wrapping it
+  // in the auto-fit widget grid would put a scrollable table inside a
+  // fixed-width column inside a card, which is the awkward embedding this
+  // binding exists to avoid.
+  const isResourceKindTile =
+    placement.widgetBindings.length === 1 && bindsResourceKind;
 
   if (detail.isPending) {
     return <PlacementTileSkeleton placement={placement} />;
@@ -259,6 +369,12 @@ export function PlacementTile({
 
   return (
     <>
+      <PlacementClickSurface
+        active={clickable}
+        pending={click.pending}
+        label={clickLabel(placement, instance.name)}
+        onActivate={click.run}
+      >
       <Card className="flex h-full flex-col overflow-hidden">
         <CardHeader
           className={cn(
@@ -467,7 +583,13 @@ export function PlacementTile({
             No widgets are bound to this placement yet.
           </p>
         ) : (
-          <div className="grid gap-4 [grid-template-columns:repeat(auto-fit,minmax(9rem,1fr))]">
+          <div
+            className={cn(
+              isResourceKindTile
+                ? "flex h-full min-h-0 flex-col"
+                : "grid gap-4 [grid-template-columns:repeat(auto-fit,minmax(9rem,1fr))]",
+            )}
+          >
             {placement.widgetBindings.map((binding, index) => (
               <React.Fragment key={index}>
                 {renderWidget({
@@ -475,6 +597,9 @@ export function PlacementTile({
                   statusDetails: details,
                   dataPoints: targetDataPoints,
                   actions: targetActions,
+                  resourceKinds: resourceKinds.data,
+                  instanceId: instance.id,
+                  targetId: placement.targetId,
                   onExecute: runAction,
                   // Controls are dead while the layout is being rearranged: a
                   // click meant to grab a card should not restart a service.
@@ -491,11 +616,17 @@ export function PlacementTile({
                     // binding having to carry a size. A log spans the row too —
                     // one line of monospace wants the width — but takes no
                     // height beyond it, because in the grid it *is* one line.
-                    "display" in binding && typeof binding.display.widgetType !== "string"
-                      ? "col-span-full min-h-[8rem]"
-                      : "display" in binding && binding.display.widgetType === "logStream"
-                        ? "col-span-full"
-                        : undefined,
+                    // A resource kind takes the whole footprint: it is the
+                    // tile, not a widget sitting inside one.
+                    "resourceKindDisplay" in binding
+                      ? isResourceKindTile
+                        ? "min-h-0 flex-1"
+                        : "col-span-full min-h-[12rem]"
+                      : "display" in binding && typeof binding.display.widgetType !== "string"
+                        ? "col-span-full min-h-[8rem]"
+                        : "display" in binding && binding.display.widgetType === "logStream"
+                          ? "col-span-full"
+                          : undefined,
                 })}
               </React.Fragment>
             ))}
@@ -503,14 +634,202 @@ export function PlacementTile({
         )}
         </CardContent>
       </Card>
+      </PlacementClickSurface>
       <ConnectorDetailModal
-        placement={placement}
+        // Narrowed for the modal, which has no meaning without an instance.
+        placement={{ ...placement, connector: instance }}
         open={detailOpen}
         onOpenChange={setDetailOpen}
         focus={detailFocus}
       />
     </>
   );
+}
+
+/**
+ * A tile with no connector: an icon, a label, and a click.
+ *
+ * Deliberately austere. There is no status badge because there is no status,
+ * no widget area because there is nothing bound, and no expand button because
+ * there is no detail view to expand into — a shell that showed those things
+ * empty would be reporting an outage the tile cannot have.
+ *
+ * The edit-mode affordances are the same ones a connector tile has, and for the
+ * same reason: this is an ordinary placement, so it drags, resizes, groups and
+ * deletes exactly like every other.
+ */
+function StaticPlacementTile({
+  dashboardId,
+  placement,
+  editing,
+  onEditBindings,
+  onDelete,
+  onNavigateDashboard,
+  grouping = false,
+  selected = false,
+  onSelectedChange,
+  onAddToGroup,
+  groupMember,
+}: PlacementTileProps) {
+  const click = usePlacementClick({ dashboardId, placement, onNavigateDashboard });
+  const clickable = click.clickable && !editing && !grouping;
+  const label = placement.label ?? describePlacementAction(placement);
+
+  return (
+    <PlacementClickSurface
+      active={clickable}
+      pending={click.pending}
+      label={clickLabel(placement, label)}
+      onActivate={click.run}
+    >
+      <Card
+        className={cn(
+          "flex h-full flex-col overflow-hidden",
+          // The whole card is the drag surface: there is no header to aim at,
+          // and a one-by-one tile has no room for a grip.
+          editing &&
+            !grouping &&
+            groupMember === undefined &&
+            `${DRAG_HANDLE_CLASS} cursor-grab active:cursor-grabbing`,
+        )}
+      >
+        {editing || grouping ? (
+          <div className="flex shrink-0 items-center justify-end gap-1 px-2 pt-2">
+            {grouping ? (
+              <Checkbox
+                className="loom-grid-control size-8 rounded-md"
+                checked={selected}
+                aria-label={`${selected ? "Deselect" : "Select"} ${label} for grouping`}
+                onCheckedChange={(checked) => onSelectedChange?.(checked === true)}
+              />
+            ) : (
+              <>
+                {groupMember !== undefined ? (
+                  <>
+                    <Button
+                      type="button"
+                      variant="ghost"
+                      size="icon"
+                      className="loom-grid-control h-7 w-7"
+                      disabled={groupMember.pending || groupMember.index === 0}
+                      aria-label={`Move ${label} left`}
+                      onClick={groupMember.onMoveLeft}
+                    >
+                      <ArrowLeft aria-hidden="true" />
+                    </Button>
+                    <Button
+                      type="button"
+                      variant="ghost"
+                      size="icon"
+                      className="loom-grid-control h-7 w-7"
+                      disabled={
+                        groupMember.pending || groupMember.index === groupMember.total - 1
+                      }
+                      aria-label={`Move ${label} right`}
+                      onClick={groupMember.onMoveRight}
+                    >
+                      <ArrowRight aria-hidden="true" />
+                    </Button>
+                  </>
+                ) : null}
+                <Button
+                  type="button"
+                  variant="ghost"
+                  size="icon"
+                  className="loom-grid-control h-7 w-7"
+                  aria-label={`Edit ${label}`}
+                  onClick={() => onEditBindings(placement)}
+                >
+                  <Pencil aria-hidden="true" />
+                </Button>
+                {groupMember !== undefined ? (
+                  <Button
+                    type="button"
+                    variant="ghost"
+                    size="icon"
+                    className="loom-grid-control h-7 w-7 text-muted-foreground hover:text-destructive"
+                    disabled={groupMember.pending}
+                    aria-label={`Remove ${label} from group`}
+                    onClick={groupMember.onRemove}
+                  >
+                    <X aria-hidden="true" />
+                  </Button>
+                ) : (
+                  <>
+                    {onAddToGroup !== undefined ? (
+                      <Button
+                        type="button"
+                        variant="ghost"
+                        size="icon"
+                        className="loom-grid-control h-7 w-7"
+                        aria-label={`Add ${label} to a group`}
+                        onClick={() => onAddToGroup(placement)}
+                      >
+                        <FolderInput aria-hidden="true" />
+                      </Button>
+                    ) : null}
+                    {onDelete !== undefined ? (
+                      <Button
+                        type="button"
+                        variant="ghost"
+                        size="icon"
+                        className="loom-grid-control h-7 w-7 text-muted-foreground hover:text-destructive"
+                        aria-label={`Remove ${label} from this dashboard`}
+                        onClick={() => onDelete(placement)}
+                      >
+                        <Trash2 aria-hidden="true" />
+                      </Button>
+                    ) : null}
+                  </>
+                )}
+              </>
+            )}
+          </div>
+        ) : null}
+
+        <CardContent className="flex min-h-0 flex-1 flex-col items-center justify-center gap-2 p-3 text-center">
+          {click.pending ? (
+            <Loader2 className="h-6 w-6 animate-spin text-muted-foreground" aria-hidden="true" />
+          ) : (
+            <ConnectorIcon
+              typeIcon={null}
+              iconOverride={placement.icon}
+              size={28}
+              className={cn(
+                "text-muted-foreground transition-colors",
+                clickable && "group-hover:text-foreground",
+              )}
+            />
+          )}
+          <p className="whitespace-normal text-sm font-medium leading-tight [overflow-wrap:anywhere]">
+            {label}
+          </p>
+        </CardContent>
+      </Card>
+    </PlacementClickSurface>
+  );
+}
+
+/**
+ * What a tile does, in words, when it has no label of its own.
+ *
+ * A fallback rather than a default: `label` is optional at the API, so a tile
+ * created through a script may arrive without one, and an unlabelled square is
+ * worse than a generic sentence.
+ */
+function describePlacementAction(placement: DashboardPlacement): string {
+  const action = placement.placementAction;
+  if (action === null) return "Button";
+  return action.type === "navigate" ? "Open dashboard" : "Run action";
+}
+
+/** The accessible name of the whole-tile button. */
+function clickLabel(placement: DashboardPlacement, fallback: string): string {
+  const action = placement.placementAction;
+  const name = placement.label ?? fallback;
+  if (action?.type === "navigate") return `Open ${name}`;
+  if (action?.type === "connectorAction") return `Run ${name}`;
+  return name;
 }
 
 function PlacementTileSkeleton({ placement }: { placement: DashboardPlacement }) {

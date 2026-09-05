@@ -1,0 +1,11 @@
+-- What a placement does when it is clicked.
+--
+-- JSON rather than columns because the two variants share no fields: a
+-- `navigate` action carries one dashboard id, a `connectorAction` carries an
+-- instance, a target, an action id and a free-form params object. Five
+-- mostly-NULL columns plus a discriminator would encode the same union less
+-- honestly, and `params` would still have to be JSON.
+--
+-- NULL means "clicking this tile does nothing special", which is what every
+-- placement that exists today means.
+ALTER TABLE dashboard_placements ADD COLUMN placement_action TEXT NULL;

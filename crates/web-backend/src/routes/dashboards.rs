@@ -14,15 +14,16 @@ use axum::Json;
 use chrono::Utc;
 use loom_core::connector::WidgetBinding;
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use sqlx::SqlitePool;
 use uuid::Uuid;
 
-use crate::auth::extract::AuthenticatedUser;
+use crate::auth::extract::{AuthenticatedUser, ConnectorsControl, Permission};
 use crate::dashboard_access::{get_dashboard_role, DashboardRole};
 use crate::error::{internal_error, ErrorBody};
 use crate::state::AppState;
 
-use super::connectors::{self, ConnectorInstanceResponse};
+use super::connectors::{self, ActionFailure, ConnectorInstanceResponse, CONNECTOR_RESOURCE_TYPE};
 use super::present_option;
 
 /// Internal helpers return complete HTTP failures. Boxing keeps the uncommon
@@ -37,12 +38,16 @@ struct DashboardRow {
     owner_user_id: String,
     owner_username: String,
     created_at: String,
+    hidden: bool,
 }
 
 #[derive(Debug, sqlx::FromRow)]
 struct PlacementRow {
     id: String,
-    connector_instance_id: String,
+    /// `NULL` for a placement that shows nothing and only acts — see
+    /// [`PlacementAction`]. Such a placement has no connector to read, no
+    /// target, and an empty `widget_bindings`.
+    connector_instance_id: Option<String>,
     target_id: Option<String>,
     /// Retained while the placement is grouped, and not read by the renderer
     /// then — the group's bounding box governs instead. This is the geometry
@@ -53,6 +58,13 @@ struct PlacementRow {
     width: i64,
     height: i64,
     widget_bindings: String,
+    /// JSON-encoded [`PlacementAction`], or `NULL` when clicking this
+    /// placement does nothing beyond whatever its widgets already do.
+    placement_action: Option<String>,
+    /// Static-tile display metadata, `NULL` on any placement that has a
+    /// connector to take its name and icon from.
+    label: Option<String>,
+    icon: Option<String>,
     created_at: String,
     /// `NULL` for a standalone placement. Set together with the row's
     /// `group_order` or not at all — the table's CHECK constraint enforces
@@ -124,6 +136,54 @@ impl ShareRole {
     }
 }
 
+/// What a placement does when the user clicks it.
+///
+/// **Composed onto the existing placement, not a new kind of placement.** A
+/// tile that navigates somewhere is the same row, the same geometry and the
+/// same grouping rules as any other; only this column is added. Modelling
+/// "button" as its own placement type would have duplicated every one of those
+/// rules and would have forbidden the case that motivated the feature — a tile
+/// that both *shows* a connector's state and *goes somewhere* when clicked.
+///
+/// This is a dashboard concept and deliberately not a Core one: nothing in the
+/// [`Connector`](loom_core::connector::Connector) trait knows that dashboards
+/// exist, and a connector must not be able to name one.
+///
+/// Internally tagged on `type`, matching the discriminated unions the clients
+/// already consume.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(
+    tag = "type",
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase"
+)]
+pub(super) enum PlacementAction {
+    /// Go to another dashboard. The id is resolved and permission-checked
+    /// **twice, independently**: once when the placement is saved (a sanity
+    /// check against the editor's own access) and again, authoritatively, on
+    /// every click against the person clicking. See `click_placement`.
+    Navigate {
+        /// The dashboard to open. Verified to exist at save time; verified
+        /// again, per viewer, at click time.
+        target_dashboard_id: String,
+    },
+    /// Invoke one pre-configured connector action.
+    ///
+    /// Carries its own `connector_instance_id` rather than borrowing the
+    /// placement's: a tile may display one connector and act on another, and a
+    /// connector-less tile can still fire an action.
+    ConnectorAction {
+        connector_instance_id: String,
+        /// The sub-target to act on, or `null` for the instance as a whole.
+        target_id: Option<String>,
+        action_id: String,
+        /// The action's parameters, exactly as `POST
+        /// /connector-instances/{id}/actions/{actionId}` would receive them.
+        #[serde(default)]
+        params: Value,
+    },
+}
+
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct DashboardSummary {
@@ -131,6 +191,10 @@ struct DashboardSummary {
     name: String,
     role: DashboardRole,
     pinned: bool,
+    /// Presentation only. A hidden dashboard is listed here exactly like any
+    /// other and stays fully reachable by id; leaving it out of a sidebar is
+    /// the client's decision to make from this flag.
+    hidden: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -148,6 +212,8 @@ struct DashboardDetail {
     owner: DashboardOwner,
     role: DashboardRole,
     created_at: String,
+    /// See [`DashboardSummary::hidden`].
+    hidden: bool,
     /// **Standalone placements only.** A placement that is a member of a group
     /// appears under `placement_groups`, never here, so a client renders one
     /// list of tiles without having to reconstruct the grouping itself.
@@ -160,7 +226,9 @@ struct DashboardDetail {
 #[serde(rename_all = "camelCase")]
 struct PlacementResponse {
     id: String,
-    connector: ConnectorInstanceResponse,
+    /// `null` for a placement that shows nothing and only acts. A client
+    /// renders such a tile from its `placementAction` alone.
+    connector: Option<ConnectorInstanceResponse>,
     /// Addressed connector sub-target, or null for the aggregate view.
     target_id: Option<String>,
     /// The placement's *standalone* geometry. Ignored by the grid while this
@@ -170,6 +238,12 @@ struct PlacementResponse {
     width: i64,
     height: i64,
     widget_bindings: Vec<WidgetBinding>,
+    /// What clicking this tile does, or `null` for a tile that only displays.
+    placement_action: Option<PlacementAction>,
+    /// What a static tile says, and the icon it shows. Both `null` whenever
+    /// `connector` is set — that tile's name and icon are the connector's.
+    label: Option<String>,
+    icon: Option<String>,
     created_at: String,
     /// The group this placement belongs to, or `null` when it stands alone.
     /// Redundant for a member nested under its own group, and load-bearing for
@@ -215,7 +289,13 @@ pub(super) struct CreateDashboardRequest {
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub(super) struct UpdateDashboardRequest {
-    name: String,
+    /// Absent leaves the name unchanged. Optional so a client can flip
+    /// `hidden` without having to echo a name back.
+    name: Option<String>,
+    /// Absent leaves the flag unchanged. Owner-only, the same tier as
+    /// renaming — hiding a dashboard changes how it appears to everyone it is
+    /// shared with, which is an owner's decision.
+    hidden: Option<bool>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -229,13 +309,21 @@ pub(super) struct CreateShareRequest {
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub(super) struct CreatePlacementRequest {
-    connector_instance_id: String,
+    /// Omitted or null makes this a static tile: no connector, no data, no
+    /// widget bindings. Such a placement must carry a `placementAction`,
+    /// because a tile that neither shows nor does anything is not a tile.
+    connector_instance_id: Option<String>,
     target_id: Option<String>,
     position_x: i64,
     position_y: i64,
     width: i64,
     height: i64,
     widget_bindings: Option<Vec<WidgetBinding>>,
+    placement_action: Option<PlacementAction>,
+    /// Static-tile display metadata. Rejected on a placement that names a
+    /// connector, which already has a name and an icon of its own.
+    label: Option<String>,
+    icon: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -292,6 +380,17 @@ pub(super) struct UpdatePlacementRequest {
     width: Option<i64>,
     height: Option<i64>,
     widget_bindings: Option<Vec<WidgetBinding>>,
+    /// Absent leaves the click behaviour alone; `null` removes it; an object
+    /// replaces it. A connector-less placement may not have it removed — that
+    /// would leave a tile with nothing to show and nothing to do.
+    #[serde(default, deserialize_with = "present_option")]
+    placement_action: Option<Option<PlacementAction>>,
+    /// Absent leaves it alone; `null` clears it. Same connector-less-only rule
+    /// as create.
+    #[serde(default, deserialize_with = "present_option")]
+    label: Option<Option<String>>,
+    #[serde(default, deserialize_with = "present_option")]
+    icon: Option<Option<String>>,
 }
 
 /// `GET /dashboards` — every dashboard the authenticated caller can access.
@@ -299,8 +398,8 @@ pub(super) async fn list_dashboards(
     caller: AuthenticatedUser,
     State(state): State<AppState>,
 ) -> Response {
-    let rows = sqlx::query_as::<_, (String, String)>(
-        "SELECT DISTINCT d.id, d.name \
+    let rows = sqlx::query_as::<_, (String, String, bool)>(
+        "SELECT DISTINCT d.id, d.name, d.hidden \
          FROM dashboards d \
          LEFT JOIN dashboard_shares ds ON ds.dashboard_id = d.id \
          LEFT JOIN user_groups ug \
@@ -323,7 +422,7 @@ pub(super) async fn list_dashboards(
     };
 
     let mut dashboards = Vec::with_capacity(rows.len());
-    for (id, name) in rows {
+    for (id, name, hidden) in rows {
         let role = match get_dashboard_role(&state.pool, caller.id(), &id).await {
             Ok(Some(role)) => role,
             Ok(None) => continue,
@@ -333,11 +432,15 @@ pub(super) async fn list_dashboards(
             Ok(pinned) => pinned,
             Err(error) => return internal_error("reading a dashboard pin", error),
         };
+        // Hidden dashboards are listed, deliberately. Filtering them out here
+        // would also hide them from the pin list, from search, and from the
+        // only screen that can unhide one.
         dashboards.push(DashboardSummary {
             id,
             name,
             role,
             pinned,
+            hidden,
         });
     }
 
@@ -383,6 +486,7 @@ pub(super) async fn create_dashboard(
             name: name.to_owned(),
             role: DashboardRole::Owner,
             pinned: false,
+            hidden: false,
         }),
     )
         .into_response()
@@ -401,7 +505,11 @@ pub(super) async fn get_dashboard(
     dashboard_detail(&state, &id, role).await
 }
 
-/// `PATCH /dashboards/{id}` — only the owner may rename.
+/// `PATCH /dashboards/{id}` — only the owner may rename or hide.
+///
+/// Hiding sits at the owner tier alongside renaming rather than at the editor
+/// tier, because it changes what every person the dashboard is shared with
+/// sees in their own list, and that is not an editor's call.
 pub(super) async fn update_dashboard(
     caller: AuthenticatedUser,
     State(state): State<AppState>,
@@ -411,18 +519,32 @@ pub(super) async fn update_dashboard(
     if let Err(response) = require_role(&state.pool, caller.id(), &id, DashboardRole::Owner).await {
         return *response;
     }
-    let name = request.name.trim();
-    if name.is_empty() {
-        return bad_request("name must not be empty");
+
+    let name = match request.name.as_deref().map(str::trim) {
+        Some("") => return bad_request("name must not be empty"),
+        other => other,
+    };
+
+    if let Some(name) = name {
+        if let Err(error) = sqlx::query("UPDATE dashboards SET name = ? WHERE id = ?")
+            .bind(name)
+            .bind(&id)
+            .execute(&state.pool)
+            .await
+        {
+            return internal_error("renaming a dashboard", error);
+        }
     }
 
-    if let Err(error) = sqlx::query("UPDATE dashboards SET name = ? WHERE id = ?")
-        .bind(name)
-        .bind(&id)
-        .execute(&state.pool)
-        .await
-    {
-        return internal_error("renaming a dashboard", error);
+    if let Some(hidden) = request.hidden {
+        if let Err(error) = sqlx::query("UPDATE dashboards SET hidden = ? WHERE id = ?")
+            .bind(hidden)
+            .bind(&id)
+            .execute(&state.pool)
+            .await
+        {
+            return internal_error("changing a dashboard's hidden flag", error);
+        }
     }
 
     dashboard_detail(&state, &id, DashboardRole::Owner).await
@@ -648,6 +770,12 @@ pub(super) async fn delete_share(
 }
 
 /// `POST /dashboards/{id}/placements` — Editor or Owner.
+///
+/// Two shapes share this endpoint. With a `connectorInstanceId` it is the
+/// connector tile it has always been. Without one it is a **static tile**: no
+/// connector, no target, no widget bindings, and a `placementAction` that is
+/// then mandatory, because a tile with nothing to show and nothing to do is a
+/// blank rectangle a user cannot remove any meaning from.
 pub(super) async fn create_placement(
     caller: AuthenticatedUser,
     State(state): State<AppState>,
@@ -659,32 +787,76 @@ pub(super) async fn create_placement(
         return *response;
     }
 
-    let bindings = match validate_placement(
-        &state,
-        &request.connector_instance_id,
-        request.target_id.as_deref(),
-        request.width,
-        request.height,
-        request.widget_bindings,
-        None,
-    )
-    .await
-    {
-        Ok(bindings) => bindings,
-        Err(response) => return *response,
+    let bindings = match request.connector_instance_id.as_deref() {
+        Some(connector_id) => {
+            if request.label.is_some() || request.icon.is_some() {
+                return bad_request(
+                    "label and icon belong to a placement with no connectorInstanceId: \
+                     a connector tile takes both from its connector",
+                );
+            }
+            match validate_placement(
+                &state,
+                connector_id,
+                request.target_id.as_deref(),
+                request.width,
+                request.height,
+                request.widget_bindings,
+                None,
+            )
+            .await
+            {
+                Ok(bindings) => bindings,
+                Err(response) => return *response,
+            }
+        }
+        None => {
+            // There is no connector to check a minimum size against, so the
+            // only geometry rule left is the table's own.
+            if let Some(response) = reject_bad_placement_box(request.width, request.height) {
+                return response;
+            }
+            if request.target_id.is_some() {
+                return bad_request(
+                    "targetId requires a connectorInstanceId: there is no connector to address",
+                );
+            }
+            if request.placement_action.is_none() {
+                return bad_request(
+                    "a placement without a connectorInstanceId must have a placementAction",
+                );
+            }
+            // Nothing to bind, so binding validation is skipped entirely
+            // rather than run against an absent connector.
+            Vec::new()
+        }
     };
+
+    if let Some(action) = &request.placement_action {
+        if let Err(response) = validate_placement_action(&state, caller.id(), action).await {
+            return *response;
+        }
+    }
+
     let serialized = match serde_json::to_string(&bindings) {
         Ok(value) => value,
         Err(error) => return internal_error("serializing widget bindings", error),
     };
+    let serialized_action = match encode_placement_action(request.placement_action.as_ref()) {
+        Ok(value) => value,
+        Err(response) => return *response,
+    };
+
+    let label = trimmed_or_none(request.label.as_deref());
+    let icon = trimmed_or_none(request.icon.as_deref());
 
     let placement_id = Uuid::new_v4().to_string();
     let created_at = Utc::now().to_rfc3339();
     if let Err(error) = sqlx::query(
         "INSERT INTO dashboard_placements \
          (id, dashboard_id, connector_instance_id, position_x, position_y, width, height, \
-          target_id, widget_bindings, created_at) \
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+          target_id, widget_bindings, placement_action, label, icon, created_at) \
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
     )
     .bind(&placement_id)
     .bind(&id)
@@ -695,6 +867,9 @@ pub(super) async fn create_placement(
     .bind(request.height)
     .bind(&request.target_id)
     .bind(&serialized)
+    .bind(&serialized_action)
+    .bind(&label)
+    .bind(&icon)
     .bind(&created_at)
     .execute(&state.pool)
     .await
@@ -711,6 +886,9 @@ pub(super) async fn create_placement(
         width: request.width,
         height: request.height,
         widget_bindings: serialized,
+        placement_action: serialized_action,
+        label,
+        icon,
         created_at,
         // A new placement always stands alone. Grouping is a separate,
         // retroactive action — see `create_placement_group`.
@@ -734,16 +912,7 @@ pub(super) async fn update_placement(
         return *response;
     }
 
-    let existing = sqlx::query_as::<_, PlacementRow>(
-        "SELECT id, connector_instance_id, target_id, position_x, position_y, width, height, \
-                widget_bindings, created_at, group_id \
-         FROM dashboard_placements WHERE id = ? AND dashboard_id = ?",
-    )
-    .bind(&placement_id)
-    .bind(&id)
-    .fetch_optional(&state.pool)
-    .await;
-    let existing = match existing {
+    let existing = match load_placement_row(&state, &id, &placement_id).await {
         Ok(Some(row)) => row,
         Ok(None) => {
             return ErrorBody::message(
@@ -751,7 +920,7 @@ pub(super) async fn update_placement(
                 format!("no such dashboard placement: {placement_id}"),
             )
         }
-        Err(error) => return internal_error("loading a dashboard placement", error),
+        Err(response) => return *response,
     };
 
     let stored_bindings: Vec<WidgetBinding> = match serde_json::from_str(&existing.widget_bindings)
@@ -764,30 +933,95 @@ pub(super) async fn update_placement(
     let target_id = request
         .target_id
         .unwrap_or_else(|| existing.target_id.clone());
-    let bindings = match validate_placement(
-        &state,
-        &existing.connector_instance_id,
-        target_id.as_deref(),
-        width,
-        height,
-        request.widget_bindings,
-        Some(stored_bindings),
-    )
-    .await
-    {
-        Ok(bindings) => bindings,
-        Err(response) => return *response,
+
+    // Absent leaves what is stored; `null` clears it; a value replaces it.
+    let action = match &request.placement_action {
+        None => match decode_placement_action(existing.placement_action.as_deref()) {
+            Ok(action) => action,
+            Err(response) => return *response,
+        },
+        Some(replacement) => replacement.clone(),
     };
+
+    let bindings = match existing.connector_instance_id.as_deref() {
+        Some(connector_id) => {
+            if request.label.is_some() || request.icon.is_some() {
+                return bad_request(
+                    "label and icon belong to a placement with no connectorInstanceId: \
+                     a connector tile takes both from its connector",
+                );
+            }
+            match validate_placement(
+                &state,
+                connector_id,
+                target_id.as_deref(),
+                width,
+                height,
+                request.widget_bindings,
+                Some(stored_bindings),
+            )
+            .await
+            {
+                Ok(bindings) => bindings,
+                Err(response) => return *response,
+            }
+        }
+        None => {
+            if let Some(response) = reject_bad_placement_box(width, height) {
+                return response;
+            }
+            if target_id.is_some() {
+                return bad_request(
+                    "targetId requires a connectorInstanceId: there is no connector to address",
+                );
+            }
+            if action.is_none() {
+                return bad_request(
+                    "a placement without a connectorInstanceId must keep its placementAction",
+                );
+            }
+            if request
+                .widget_bindings
+                .as_ref()
+                .is_some_and(|bindings| !bindings.is_empty())
+            {
+                return bad_request(
+                    "a placement without a connectorInstanceId cannot have widget bindings",
+                );
+            }
+            Vec::new()
+        }
+    };
+
+    if let Some(action) = &action {
+        if let Err(response) = validate_placement_action(&state, caller.id(), action).await {
+            return *response;
+        }
+    }
+
     let serialized = match serde_json::to_string(&bindings) {
         Ok(value) => value,
         Err(error) => return internal_error("serializing widget bindings", error),
+    };
+    let serialized_action = match encode_placement_action(action.as_ref()) {
+        Ok(value) => value,
+        Err(response) => return *response,
+    };
+    let label = match &request.label {
+        None => existing.label.clone(),
+        Some(replacement) => trimmed_or_none(replacement.as_deref()),
+    };
+    let icon = match &request.icon {
+        None => existing.icon.clone(),
+        Some(replacement) => trimmed_or_none(replacement.as_deref()),
     };
 
     let position_x = request.position_x.unwrap_or(existing.position_x);
     let position_y = request.position_y.unwrap_or(existing.position_y);
     if let Err(error) = sqlx::query(
         "UPDATE dashboard_placements \
-         SET position_x = ?, position_y = ?, width = ?, height = ?, target_id = ?, widget_bindings = ? \
+         SET position_x = ?, position_y = ?, width = ?, height = ?, target_id = ?, \
+             widget_bindings = ?, placement_action = ?, label = ?, icon = ? \
          WHERE id = ? AND dashboard_id = ?",
     )
     .bind(position_x)
@@ -796,6 +1030,9 @@ pub(super) async fn update_placement(
     .bind(height)
     .bind(&target_id)
     .bind(&serialized)
+    .bind(&serialized_action)
+    .bind(&label)
+    .bind(&icon)
     .bind(&placement_id)
     .bind(&id)
     .execute(&state.pool)
@@ -811,6 +1048,9 @@ pub(super) async fn update_placement(
         height,
         target_id,
         widget_bindings: serialized,
+        placement_action: serialized_action,
+        label,
+        icon,
         ..existing
     };
     match placement_response(&state, row).await {
@@ -855,6 +1095,159 @@ pub(super) async fn delete_placement(
     }
 
     StatusCode::NO_CONTENT.into_response()
+}
+
+/// `POST /dashboards/{id}/placements/{placementId}/click` — Viewer or better.
+///
+/// Runs the placement's pre-configured [`PlacementAction`]. Viewer is the right
+/// tier because clicking is *using* the dashboard, not editing it; what the
+/// click is allowed to reach is then checked again against the clicker, which
+/// is the whole point of the endpoint existing at all.
+///
+/// **Two independent permission checks, by design.** Whoever created this
+/// placement had their own access to the target verified at save time, and that
+/// verdict is not reused here: shares are revoked, group memberships change,
+/// and the person clicking is very often not the person who placed the tile.
+/// The check that governs is always the fresh one below.
+pub(super) async fn click_placement(
+    caller: AuthenticatedUser,
+    State(state): State<AppState>,
+    Path((id, placement_id)): Path<(String, String)>,
+) -> Response {
+    if let Err(response) = require_role(&state.pool, caller.id(), &id, DashboardRole::Viewer).await
+    {
+        return *response;
+    }
+
+    let placement = match load_placement_row(&state, &id, &placement_id).await {
+        Ok(Some(row)) => row,
+        Ok(None) => {
+            return ErrorBody::message(
+                StatusCode::NOT_FOUND,
+                format!("no such dashboard placement: {placement_id}"),
+            )
+        }
+        Err(response) => return *response,
+    };
+
+    let action = match decode_placement_action(placement.placement_action.as_deref()) {
+        Ok(Some(action)) => action,
+        Ok(None) => return bad_request("this placement has no click action"),
+        Err(response) => return *response,
+    };
+
+    match action {
+        PlacementAction::Navigate {
+            target_dashboard_id,
+        } => {
+            // "Gone" and "not yours" are two different things and are answered
+            // as two different things. Collapsing them would tell a user whose
+            // access was revoked to go looking for a deleted dashboard, and
+            // would tell someone whose target really was deleted to go asking
+            // its owner for a share that would not help.
+            let exists = sqlx::query_scalar::<_, bool>(
+                "SELECT EXISTS(SELECT 1 FROM dashboards WHERE id = ?)",
+            )
+            .bind(&target_dashboard_id)
+            .fetch_one(&state.pool)
+            .await;
+            match exists {
+                Ok(true) => {}
+                Ok(false) => {
+                    return ErrorBody::message(
+                        StatusCode::NOT_FOUND,
+                        format!(
+                            "the dashboard this tile points at no longer exists: \
+                             {target_dashboard_id}"
+                        ),
+                    )
+                }
+                Err(error) => return internal_error("resolving a navigate target", error),
+            }
+
+            // Evaluated fresh, against the caller, right now — never against
+            // whoever configured the tile.
+            match get_dashboard_role(&state.pool, caller.id(), &target_dashboard_id).await {
+                Ok(Some(_)) => {}
+                Ok(None) => {
+                    return ErrorBody::message(
+                        StatusCode::FORBIDDEN,
+                        "you do not have access to the dashboard this tile points at",
+                    )
+                }
+                Err(error) => {
+                    return internal_error("resolving access to a navigate target", error)
+                }
+            }
+
+            // The navigation itself is the client's: this endpoint answers
+            // "may you, and where to", and the router does the rest without a
+            // page load.
+            Json(NavigateResponse {
+                target_dashboard_id,
+            })
+            .into_response()
+        }
+        PlacementAction::ConnectorAction {
+            connector_instance_id,
+            target_id,
+            action_id,
+            params,
+        } => {
+            // Identical to the direct action endpoint, deliberately: the same
+            // resource-scoped grant, the same invocation path, and therefore
+            // the same audit row and the same pending-operation overlay. A
+            // dashboard tile is a shortcut to that endpoint, never a way
+            // around it — being able to see a dashboard has never granted
+            // `connectors.control` and does not start to here.
+            if let Some(denied) = caller.deny_unless(
+                ConnectorsControl::KEY,
+                Some(CONNECTOR_RESOURCE_TYPE),
+                Some(&connector_instance_id),
+            ) {
+                return denied;
+            }
+
+            let connector = match Uuid::parse_str(&connector_instance_id) {
+                Ok(uuid) => state.connectors.get(&uuid).await,
+                Err(_) => None,
+            };
+            let Some(connector) = connector else {
+                return connectors::not_found(&connector_instance_id);
+            };
+
+            match connectors::invoke_action(
+                &state,
+                connector,
+                &connector_instance_id,
+                &action_id,
+                target_id.as_deref(),
+                params,
+                connectors::ActionActor::User(caller.id()),
+            )
+            .await
+            {
+                Ok(result) => Json(result).into_response(),
+                Err(ActionFailure::UnknownAction(action_id)) => ErrorBody::connector(
+                    StatusCode::NOT_FOUND,
+                    loom_core::connector::ConnectorError::invalid_action(action_id),
+                ),
+                Err(ActionFailure::Log(error)) => {
+                    internal_error("recording a connector action", error)
+                }
+                Err(ActionFailure::Connector(error)) => {
+                    ErrorBody::connector(connectors::status_for(&error), error)
+                }
+            }
+        }
+    }
+}
+
+/// The body of a successful `navigate` click.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct NavigateResponse {
+    target_dashboard_id: String,
 }
 
 /* ------------------------------------------------------------------ */
@@ -1465,7 +1858,8 @@ fn no_such_group(group_id: &str) -> Response {
 
 async fn dashboard_detail(state: &AppState, id: &str, role: DashboardRole) -> Response {
     let row = sqlx::query_as::<_, DashboardRow>(
-        "SELECT d.id, d.name, d.owner_user_id, u.username AS owner_username, d.created_at \
+        "SELECT d.id, d.name, d.owner_user_id, u.username AS owner_username, d.created_at, \
+                d.hidden \
          FROM dashboards d JOIN users u ON u.id = d.owner_user_id WHERE d.id = ?",
     )
     .bind(id)
@@ -1490,6 +1884,7 @@ async fn dashboard_detail(state: &AppState, id: &str, role: DashboardRole) -> Re
         },
         role,
         created_at: row.created_at,
+        hidden: row.hidden,
         placements,
         placement_groups,
     })
@@ -1512,7 +1907,7 @@ async fn load_placements(
     // serves both: the ordering clause is simply inert for the standalone half.
     let rows = sqlx::query_as::<_, PlacementRow>(
         "SELECT id, connector_instance_id, target_id, position_x, position_y, width, height, \
-                widget_bindings, created_at, group_id \
+                widget_bindings, placement_action, label, icon, created_at, group_id \
          FROM dashboard_placements WHERE dashboard_id = ? \
          ORDER BY group_order, position_y, position_x, created_at",
     )
@@ -1563,14 +1958,23 @@ async fn load_placements(
 async fn placement_response(state: &AppState, row: PlacementRow) -> RouteResult<PlacementResponse> {
     let bindings = serde_json::from_str(&row.widget_bindings)
         .map_err(|error| Box::new(internal_error("reading stored widget bindings", error)))?;
-    let connector = connectors::instance_summary(state, &row.connector_instance_id)
-        .await?
-        .ok_or_else(|| {
-            Box::new(ErrorBody::message(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "a dashboard placement references a missing connector",
-            ))
-        })?;
+    // Absent for a static tile, which never had one. A placement that *does*
+    // name a connector and cannot resolve it is still the referential-integrity
+    // failure it always was, and still says so.
+    let connector = match &row.connector_instance_id {
+        Some(connector_id) => Some(
+            connectors::instance_summary(state, connector_id)
+                .await?
+                .ok_or_else(|| {
+                    Box::new(ErrorBody::message(
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        "a dashboard placement references a missing connector",
+                    ))
+                })?,
+        ),
+        None => None,
+    };
+    let placement_action = decode_placement_action(row.placement_action.as_deref())?;
 
     Ok(PlacementResponse {
         id: row.id,
@@ -1581,9 +1985,143 @@ async fn placement_response(state: &AppState, row: PlacementRow) -> RouteResult<
         width: row.width,
         height: row.height,
         widget_bindings: bindings,
+        placement_action,
+        label: row.label,
+        icon: row.icon,
         created_at: row.created_at,
         group_id: row.group_id,
     })
+}
+
+/// A user-supplied display string, or `None` when it was blank.
+///
+/// Whitespace is not a label. Storing `"   "` would give a tile an invisible
+/// name the client would render as an empty box, which is indistinguishable on
+/// screen from a bug.
+fn trimmed_or_none(value: Option<&str>) -> Option<String> {
+    value
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_owned)
+}
+
+/// Reads one placement, scoped to the dashboard it must belong to.
+///
+/// Shared by update, delete-adjacent lookups and the click endpoint so
+/// "placement `x` of dashboard `y`" is resolved the same way everywhere — a
+/// placement id from another dashboard is `None`, never a row.
+async fn load_placement_row(
+    state: &AppState,
+    dashboard_id: &str,
+    placement_id: &str,
+) -> RouteResult<Option<PlacementRow>> {
+    sqlx::query_as::<_, PlacementRow>(
+        "SELECT id, connector_instance_id, target_id, position_x, position_y, width, height, \
+                widget_bindings, placement_action, label, icon, created_at, group_id \
+         FROM dashboard_placements WHERE id = ? AND dashboard_id = ?",
+    )
+    .bind(placement_id)
+    .bind(dashboard_id)
+    .fetch_optional(&state.pool)
+    .await
+    .map_err(|error| Box::new(internal_error("loading a dashboard placement", error)))
+}
+
+/// JSON for the `placement_action` column, or `NULL` for no click behaviour.
+fn encode_placement_action(action: Option<&PlacementAction>) -> RouteResult<Option<String>> {
+    action
+        .map(serde_json::to_string)
+        .transpose()
+        .map_err(|error| Box::new(internal_error("serializing a placement action", error)))
+}
+
+/// The stored `placement_action` column, back as a value.
+fn decode_placement_action(stored: Option<&str>) -> RouteResult<Option<PlacementAction>> {
+    stored
+        .map(serde_json::from_str)
+        .transpose()
+        .map_err(|error| Box::new(internal_error("reading a stored placement action", error)))
+}
+
+/// Width and height a placement row would accept.
+///
+/// Distinct from `reject_bad_box`, which words its message for a group. Both
+/// enforce the same `> 0` the table's CHECK constraints do, so a violation is a
+/// 400 with an explanation rather than a 500 from the database.
+fn reject_bad_placement_box(width: i64, height: i64) -> Option<Response> {
+    (width < 1 || height < 1)
+        .then(|| bad_request("a placement's width and height must both be at least 1"))
+}
+
+/// Checks a [`PlacementAction`] as the *editor* saving it, at save time.
+///
+/// This is a sanity check and nothing more. Its job is to stop a tile being
+/// saved that points at a dashboard that does not exist or an action the
+/// connector does not have — mistakes worth catching in the editor rather than
+/// on someone else's click. It is explicitly **not** the authorization that
+/// governs a click: see `click_placement`, which re-checks against whoever is
+/// clicking, whenever they click.
+async fn validate_placement_action(
+    state: &AppState,
+    caller_id: &str,
+    action: &PlacementAction,
+) -> RouteResult<()> {
+    match action {
+        PlacementAction::Navigate {
+            target_dashboard_id,
+        } => {
+            // "No such dashboard" and "not one you can see" are answered
+            // identically *here*, and only here: the id is arbitrary caller
+            // input at this point, so distinguishing them would turn this
+            // endpoint into a way to enumerate other people's dashboard ids.
+            // That is the same reasoning `GET /dashboards/{id}` already
+            // follows. At click time the id is one the caller was already
+            // shown, so the two states are separated there.
+            match get_dashboard_role(&state.pool, caller_id, target_dashboard_id).await {
+                Ok(Some(_)) => Ok(()),
+                Ok(None) => Err(Box::new(ErrorBody::message(
+                    StatusCode::FORBIDDEN,
+                    "the navigate target is not a dashboard you can access",
+                ))),
+                Err(error) => Err(Box::new(internal_error(
+                    "resolving a navigate target",
+                    error,
+                ))),
+            }
+        }
+        PlacementAction::ConnectorAction {
+            connector_instance_id,
+            target_id,
+            action_id,
+            ..
+        } => {
+            let connector = match Uuid::parse_str(connector_instance_id) {
+                Ok(uuid) => state.connectors.get(&uuid).await,
+                Err(_) => None,
+            }
+            .ok_or_else(|| {
+                Box::new(bad_request(format!(
+                    "the placement action's connector instance is not currently available: \
+                     {connector_instance_id}"
+                )))
+            })?;
+
+            // The same descriptor lookup the action endpoint itself uses, so a
+            // tile can only be configured with an action that endpoint would
+            // accept — including a resource-kind row or kind action, which is
+            // an ordinary action advertised somewhere else.
+            if connectors::resolve_action(connector.as_ref(), action_id, target_id.as_deref())
+                .await
+                .is_none()
+            {
+                return Err(Box::new(bad_request(format!(
+                    "the placement action names an action this connector does not advertise: \
+                     {action_id}"
+                ))));
+            }
+            Ok(())
+        }
+    }
 }
 
 async fn validate_placement(
@@ -1650,10 +2188,11 @@ async fn validate_placement(
         .or(existing_bindings)
         .unwrap_or_else(|| connector.default_layout_for(target_id).bindings);
     // Each binding kind resolves against its own namespace: a display binding
-    // names a data point, an action binding names an action. They are both
-    // strings and they are not interchangeable, so checking one list for both
-    // would either reject valid action bindings or wave through bindings that
-    // can never fire.
+    // names a data point, an action binding names an action, and a
+    // resource-kind binding names a browsable kind. They are all strings and
+    // they are not interchangeable, so checking one list for all three would
+    // either reject valid bindings or wave through bindings that can never
+    // render.
     let data_point_ids: HashSet<(String, Option<String>)> = connector
         .data_points()
         .into_iter()
@@ -1665,10 +2204,19 @@ async fn validate_placement(
         .into_iter()
         .map(|action| (action.id, action.target_id))
         .collect();
+    // The third namespace. Read for this placement's target specifically,
+    // because `resource_kinds` takes one exactly so a kind can be absent at one
+    // scope and present at another.
+    let resource_kinds: HashSet<String> = connector
+        .resource_kinds(target_id)
+        .into_iter()
+        .map(|kind| kind.kind)
+        .collect();
     let selected_target = target_id.map(str::to_owned);
 
     let mut unknown_data_points: Vec<&str> = Vec::new();
     let mut unknown_actions: Vec<&str> = Vec::new();
+    let mut unknown_resource_kinds: Vec<&str> = Vec::new();
     for binding in &bindings {
         match binding {
             WidgetBinding::Display { data_point_id, .. }
@@ -1681,15 +2229,27 @@ async fn validate_placement(
             {
                 unknown_actions.push(action_id);
             }
+            WidgetBinding::ResourceKindDisplay { resource_kind }
+                if !resource_kinds.contains(resource_kind) =>
+            {
+                unknown_resource_kinds.push(resource_kind);
+            }
             _ => {}
         }
     }
-    for list in [&mut unknown_data_points, &mut unknown_actions] {
+    for list in [
+        &mut unknown_data_points,
+        &mut unknown_actions,
+        &mut unknown_resource_kinds,
+    ] {
         list.sort_unstable();
         list.dedup();
     }
 
-    if !unknown_data_points.is_empty() || !unknown_actions.is_empty() {
+    if !unknown_data_points.is_empty()
+        || !unknown_actions.is_empty()
+        || !unknown_resource_kinds.is_empty()
+    {
         // Named separately, because "unknown data point restart" would send
         // someone looking in the wrong half of the connector.
         let mut problems: Vec<String> = Vec::new();
@@ -1701,6 +2261,12 @@ async fn validate_placement(
         }
         if !unknown_actions.is_empty() {
             problems.push(format!("unknown actions: {}", unknown_actions.join(", ")));
+        }
+        if !unknown_resource_kinds.is_empty() {
+            problems.push(format!(
+                "unknown resource kinds: {}",
+                unknown_resource_kinds.join(", ")
+            ));
         }
         return Err(Box::new(ErrorBody::message(
             StatusCode::BAD_REQUEST,

@@ -384,10 +384,12 @@ export type ActionWidgetType =
 /**
  * One widget and the thing it is wired to.
  *
- * Externally tagged — a single-key object, `{ display: … }` or `{ action: … }`
- * — because the two kinds bind to different identifier spaces: a display widget
- * reads a `DataPointDescriptor.id` out of `status.details`, a control widget
- * invokes a `ConnectorAction.id`. Narrow on the key, not on the widget type.
+ * Externally tagged — a single-key object, `{ display: … }`, `{ action: … }` or
+ * `{ resourceKindDisplay: … }` — because the three kinds bind to different
+ * identifier spaces: a display widget reads a `DataPointDescriptor.id` out of
+ * `status.details`, a control widget invokes a `ConnectorAction.id`, and a
+ * resource-kind widget lists a `ResourceKindDescriptor.kind`. Narrow on the
+ * key, not on the widget type.
  */
 export type WidgetBinding =
   | {
@@ -408,6 +410,21 @@ export type WidgetBinding =
         /** Widget-specific extras (`options`, `min`/`max`/`step`). Always an
          *  object. */
         config: unknown;
+      };
+    }
+  | {
+      /**
+       * One of the connector's browsable resource kinds, drawn as the same
+       * table `ResourceKindBrowser` renders everywhere else.
+       *
+       * **No `widgetType` and no `config`, deliberately** — there is one way to
+       * draw a resource kind, and it adapts to whatever area the placement
+       * occupies, from a corner tile to one filling a whole dashboard.
+       */
+      resourceKindDisplay: {
+        /** A `ResourceKindDescriptor.kind` declared for this placement's
+         *  target. */
+        resourceKind: string;
       };
     };
 
@@ -615,6 +632,15 @@ export type DashboardSummary = {
   role: DashboardRole;
   /** Whether this dashboard is pinned for the current user. */
   pinned: boolean;
+  /**
+   * Whether clients should leave this dashboard out of sidebar-style listings.
+   *
+   * **Presentation, not access control.** The backend keeps returning hidden
+   * dashboards here on purpose — a hidden dashboard is typically the
+   * destination of a `navigate` tile and must stay reachable by id, and the
+   * only screen that can unhide one has to be able to find it.
+   */
+  hidden: boolean;
 };
 
 /** The account that owns a dashboard. */
@@ -623,10 +649,59 @@ export type DashboardOwner = {
   username: string;
 };
 
-/** One connector placement returned as part of dashboard detail. */
+/**
+ * What a placement does when it is clicked.
+ *
+ * Composed onto an ordinary placement rather than being a kind of placement of
+ * its own, so a tile can both show a connector's state and go somewhere when
+ * clicked — see `docs/adr/0035-placement-actions-and-hidden-dashboards.md`.
+ * Internally tagged on `type`.
+ */
+export type PlacementAction =
+  | {
+      type: "navigate";
+      /**
+       * The dashboard to open. Checked **twice, independently**: against the
+       * editor when the placement is saved, and against whoever clicks, freshly,
+       * on every click. The two can legitimately disagree.
+       */
+      targetDashboardId: string;
+    }
+  | {
+      type: "connectorAction";
+      /** The instance to act on — its own field, not the placement's connector.
+       *  A tile may display one connector and act on another. */
+      connectorInstanceId: string;
+      /** The sub-target to address, or `null` for the instance as a whole. */
+      targetId: string | null;
+      actionId: string;
+      /** The action's parameters, chosen when the tile was configured rather
+       *  than prompted for at click time. */
+      params: unknown;
+    };
+
+/** The `navigate` arm's success body from `clickPlacement`. */
+export type PlacementNavigateResult = { targetDashboardId: string };
+
+/**
+ * What a click produced.
+ *
+ * `navigate` answers with where to go; `connectorAction` answers with the same
+ * `ActionResult` the direct action endpoint returns. Narrow on
+ * `"targetDashboardId" in result`.
+ */
+export type PlacementClickResult = PlacementNavigateResult | ActionResult;
+
+/** One placement returned as part of dashboard detail. */
 export type DashboardPlacement = {
   id: string;
-  connector: ConnectorInstanceSummary;
+  /**
+   * The connector this tile shows, or `null` for a **static tile** — one
+   * created without a `connectorInstanceId`, which shows nothing and exists
+   * only to be clicked. A static tile has no `targetId`, no `widgetBindings`,
+   * and always a `placementAction`.
+   */
+  connector: ConnectorInstanceSummary | null;
   /** Addressed connector sub-target, or `null` for its host/aggregate view. */
   targetId: string | null;
   /**
@@ -643,6 +718,14 @@ export type DashboardPlacement = {
   width: number;
   height: number;
   widgetBindings: WidgetBinding[];
+  /** What clicking this tile does, or `null` for a tile that only displays. */
+  placementAction: PlacementAction | null;
+  /** What a static tile says. Always `null` when `connector` is set — that
+   *  tile's name is the connector's. */
+  label: string | null;
+  /** A static tile's icon, in the `lucide:`/`brand:` reference convention.
+   *  Always `null` when `connector` is set. */
+  icon: string | null;
   /** RFC 3339. */
   createdAt: string;
   /** The group this placement belongs to, or `null` when it stands alone. */
@@ -683,6 +766,8 @@ export type DashboardDetail = {
   role: DashboardRole;
   /** RFC 3339. */
   createdAt: string;
+  /** See `DashboardSummary.hidden`. Presentation only. */
+  hidden: boolean;
   /**
    * **Standalone placements only.** A placement that is a member of a group is
    * in that group's `members` and is not repeated here, so rendering
@@ -754,7 +839,12 @@ export type CreateDashboardShareRequest = {
  * connector's `dataPoints`, an `action` against its `actions`.
  */
 export type CreateDashboardPlacementRequest = {
-  connectorInstanceId: string;
+  /**
+   * Omit or send `null` for a **static tile**: no connector, no data, no
+   * bindings. Such a placement must carry a `placementAction`, because a tile
+   * that neither shows nothing nor does anything is a blank rectangle.
+   */
+  connectorInstanceId?: string | null;
   /** Omit or send `null` for the connector's host/aggregate view. */
   targetId?: string | null;
   positionX: number;
@@ -762,6 +852,12 @@ export type CreateDashboardPlacementRequest = {
   width: number;
   height: number;
   widgetBindings?: WidgetBinding[];
+  /** Optional on a connector tile; required on a static one. */
+  placementAction?: PlacementAction | null;
+  /** Static tiles only — a connector tile takes both from its connector, and
+   *  sending either alongside a `connectorInstanceId` is a 400. */
+  label?: string | null;
+  icon?: string | null;
 };
 
 /**
@@ -780,6 +876,12 @@ export type UpdateDashboardPlacementRequest = {
   /** `null` selects the host view. Existing placement UI keeps this read-only. */
   targetId?: string | null;
   widgetBindings?: WidgetBinding[];
+  /** Absent leaves the click behaviour alone; `null` removes it. A static tile
+   *  may not have it removed — the backend answers 400. */
+  placementAction?: PlacementAction | null;
+  /** Static tiles only, same absent/null/value convention. */
+  label?: string | null;
+  icon?: string | null;
 };
 
 /** One cheap, addressable view inside a connector instance. */
@@ -1661,17 +1763,25 @@ function getDashboard(
   );
 }
 
+/** `PATCH /dashboards/{id}` body — owner only. Both fields are optional and
+ *  independent, so `hidden` can be flipped without echoing the name back. */
+export type UpdateDashboardRequest = {
+  name?: string;
+  /** Presentation only; see `DashboardSummary.hidden`. */
+  hidden?: boolean;
+};
+
 /** `PATCH /dashboards/{id}` — owner only. */
-function renameDashboard(
+function updateDashboard(
   runtime: ApiRuntime,
   id: string,
-  name: string,
+  data: UpdateDashboardRequest,
   signal?: AbortSignal,
 ): Promise<DashboardDetail> {
   return authorizedRequest<DashboardDetail>(
     runtime,
     `/dashboards/${encodeURIComponent(id)}`,
-    { method: "PATCH", body: { name }, signal },
+    { method: "PATCH", body: data, signal },
   );
 }
 
@@ -1780,6 +1890,33 @@ function updateDashboardPlacement(
 }
 
 /** `DELETE /dashboards/{id}/placements/{placementId}` — Editor or Owner. */
+/**
+ * `POST /dashboards/{id}/placements/{placementId}/click` — Viewer or better on
+ * the dashboard the placement lives on.
+ *
+ * Runs the placement's stored `placementAction` and nothing else: it takes no
+ * body, because a client that could supply the action id and its parameters
+ * would be the action endpoint with a dashboard-shaped check in front of it.
+ *
+ * Two shapes come back, matching the two variants — `{ targetDashboardId }` for
+ * `navigate`, an `ActionResult` for `connectorAction`. Both failure modes of a
+ * navigate click are **deliberately distinct** and must stay distinct on
+ * screen: 403 means the current user cannot open the target, 404 means the
+ * target is gone.
+ */
+function clickDashboardPlacement(
+  runtime: ApiRuntime,
+  id: string,
+  placementId: string,
+  signal?: AbortSignal,
+): Promise<PlacementClickResult> {
+  return authorizedRequest<PlacementClickResult>(
+    runtime,
+    `/dashboards/${encodeURIComponent(id)}/placements/${encodeURIComponent(placementId)}/click`,
+    { method: "POST", signal },
+  );
+}
+
 function deleteDashboardPlacement(
   runtime: ApiRuntime,
   id: string,
@@ -2342,7 +2479,9 @@ export function createApiClient(options: {
       createDashboard(runtime, name, signal),
     getDashboard: (id: string, signal?: AbortSignal) => getDashboard(runtime, id, signal),
     renameDashboard: (id: string, name: string, signal?: AbortSignal) =>
-      renameDashboard(runtime, id, name, signal),
+      updateDashboard(runtime, id, { name }, signal),
+    updateDashboard: (id: string, data: UpdateDashboardRequest, signal?: AbortSignal) =>
+      updateDashboard(runtime, id, data, signal),
     deleteDashboard: (id: string, signal?: AbortSignal) =>
       deleteDashboard(runtime, id, signal),
     pinDashboard: (id: string, signal?: AbortSignal) => pinDashboard(runtime, id, signal),
@@ -2395,6 +2534,8 @@ export function createApiClient(options: {
       deleteDashboardPlacementGroup(runtime, id, groupId, signal),
     deleteDashboardPlacement: (id: string, placementId: string, signal?: AbortSignal) =>
       deleteDashboardPlacement(runtime, id, placementId, signal),
+    clickDashboardPlacement: (id: string, placementId: string, signal?: AbortSignal) =>
+      clickDashboardPlacement(runtime, id, placementId, signal),
     getUsers: (signal?: AbortSignal) => getUsers(runtime, signal),
     createUser: (data: CreateUserRequest, signal?: AbortSignal) =>
       createUser(runtime, data, signal),

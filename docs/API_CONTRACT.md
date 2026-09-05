@@ -508,6 +508,7 @@ The asymmetry is deliberate and load-bearing:
 | `GET /connector-instances`, `GET /connector-instances/tags`, `GET /connector-instances/{id}` | `connectors.view` | global |
 | `POST /connector-instances`, `PATCH /connector-instances/{id}`, `DELETE /connector-instances/{id}` | `connectors.manage` | global |
 | `POST /connector-instances/{id}/actions/{actionId}` | `connectors.control` | `connector` / `{id}` |
+| `POST /dashboards/{id}/placements/{placementId}/click`, when the placement's action is a `connectorAction` | `connectors.control` | `connector` / the action's `connectorInstanceId` |
 | `GET /users`, `POST /users`, `PATCH /users/{id}`, `DELETE /users/{id}` | `users.manage` | global |
 | `GET /groups`, `POST /groups`, `PATCH /groups/{id}`, `DELETE /groups/{id}` | `groups.manage` | global |
 | `GET /permissions` | `groups.manage` | global |
@@ -2735,12 +2736,21 @@ group membership. Pinned dashboards sort first, then by name.
     "id": "be676fe1-a863-48d0-b8e9-86d83a671d6a",
     "name": "Operations",
     "role": "editor",
-    "pinned": true
+    "pinned": true,
+    "hidden": false
   }
 ]
 ```
 
 An empty accessible set is `200 []`.
+
+**`hidden` dashboards are listed here like any other.** The flag is
+presentation, not access control: it says "do not offer this in a sidebar",
+and leaving it out of a grouping is the client's decision to make from the
+flag. The list endpoint does not suppress them, because a hidden dashboard must
+stay fully reachable by id — it is typically the destination of a `navigate`
+placement — and because the only screen that can unhide one has to be able to
+find it.
 
 ### `POST /dashboards`
 
@@ -2750,8 +2760,8 @@ Creates a dashboard owned by the caller.
 { "name": "Operations" }
 ```
 
-**Response 201** is the dashboard summary with `role: "owner"` and
-`pinned: false`.
+**Response 201** is the dashboard summary with `role: "owner"`,
+`pinned: false`, and `hidden: false`.
 
 | Status | Meaning |
 | --- | --- |
@@ -2781,6 +2791,7 @@ group, never in `placements`.
   },
   "role": "viewer",
   "createdAt": "2026-08-21T18:00:00+00:00",
+  "hidden": false,
   "placements": [
     {
       "id": "cab30488-a7b8-4746-95b3-4a5fbfbb0e94",
@@ -2809,6 +2820,9 @@ group, never in `placements`.
       "width": 2,
       "height": 2,
       "widgetBindings": [],
+      "placementAction": null,
+      "label": null,
+      "icon": null,
       "createdAt": "2026-08-21T18:00:00+00:00",
       "groupId": null
     }
@@ -2836,6 +2850,16 @@ group, never in `placements`.
 | --- | --- | --- | --- |
 | `placements` | array | Standalone placements only. | Always present; may be empty. |
 | `placementGroups` | array | Combined tiles. See [Placement groups](#placement-groups). | Always present; may be empty. |
+| `hidden` | boolean | Whether clients should omit this dashboard from sidebar-style listings. Presentation only. | Always present. |
+
+Within a placement:
+
+| Field | JSON type | Meaning | Nullability |
+| --- | --- | --- | --- |
+| `connector` | object | The cached connector summary this tile shows. | **`null` for a static tile** — one created without a `connectorInstanceId`. Such a tile has no `targetId`, an empty `widgetBindings`, and a non-null `placementAction`. |
+| `placementAction` | object | What clicking this tile does. See [`PlacementAction`](#placementaction). | `null` for a tile that only displays. |
+| `label` | string | What a static tile says. | **Always `null` when `connector` is set** — that tile's name is the connector's. May also be `null` on a static tile, which the client then names from its action. |
+| `icon` | string | A static tile's icon, in the same `lucide:`/`brand:` reference convention as `ConnectorMetadata.icon`. An unresolvable reference falls back client-side. | As `label`. |
 
 A member is a placement object exactly as `placements` holds one, including its
 own `positionX`/`positionY`/`width`/`height` — see
@@ -2844,7 +2868,9 @@ they mean while grouped. `members` is ordered; render it in the order given.
 
 `connector` is exactly the cached summary builder used by
 `GET /connector-instances`; failed and unloaded connectors therefore keep the
-same `status: null` plus `statusError` behavior.
+same `status: null` plus `statusError` behavior. It is `null` — the whole
+object, not a summary of a missing connector — only for a static tile, which
+never referenced one.
 
 | Status | Meaning |
 | --- | --- |
@@ -2853,18 +2879,31 @@ same `status: null` plus `statusError` behavior.
 
 ### `PATCH /dashboards/{id}`
 
-Owner only. Editors deliberately cannot rename.
+Owner only. Editors deliberately cannot rename or hide.
 
 ```json
-{ "name": "Renamed operations" }
+{ "name": "Renamed operations", "hidden": true }
 ```
+
+Both fields are optional and independent; an omitted field is left alone, so a
+client can flip `hidden` without echoing the name back.
+
+| Field | JSON type | Meaning |
+| --- | --- | --- |
+| `name` | string | New name. Rejected when empty or whitespace. |
+| `hidden` | boolean | Whether clients should omit this dashboard from sidebar-style listings. |
+
+`hidden` sits at the owner tier alongside renaming rather than at the editor
+tier, because it changes what everyone the dashboard is shared with sees in
+their own list, and that is not an editor's call. It does **not** restrict
+access: see [`GET /dashboards`](#get-dashboards).
 
 **Response 200** is the full dashboard detail.
 
 | Status | Meaning |
 | --- | --- |
-| 200 | Renamed. |
-| 400 | `name` is empty or whitespace. |
+| 200 | Updated. |
+| 400 | `name` is present and empty or whitespace. |
 | 403 | Caller is not the owner. |
 
 ### `DELETE /dashboards/{id}`
@@ -2965,21 +3004,71 @@ Each binding is validated against the namespace its own tag names — see
 - a `display` binding's `dataPointId` and descriptor `targetId` must match the
   placement's `targetId`;
 - an `action` binding's `actionId` and descriptor `targetId` must match the
-  placement's `targetId`.
+  placement's `targetId`;
+- a `resourceKindDisplay` binding's `resourceKind` must appear in the
+  connector's currently declared resource kinds *for this placement's
+  `targetId`* — `resourceKinds` is read per target precisely because a kind can
+  be absent at one scope and present at another.
 
-A 400 lists every invalid id, and says which kind each one is, so the two are
+A 400 lists every invalid id, and says which kind each one is, so the three are
 never confused: `widget bindings reference unknown data points: nope; unknown
-actions: also-nope`.
+actions: also-nope; unknown resource kinds: nor-this`.
 
 The connector row must exist and its live connector must be available so the
 metadata contract can be validated. No connector ownership or
 `connectors.control` grant is inferred or created.
 
+#### Static tiles: a placement with no connector
+
+`connectorInstanceId` may be **omitted or null**. The placement is then a static
+tile: it shows nothing, so it has no connector, no `targetId`, and no
+`widgetBindings` (binding validation is skipped entirely — there is nothing to
+bind), and only the table's own `width`/`height` `> 0` rule applies rather than
+any connector's `minSize`.
+
+Such a placement **must** carry a `placementAction`. A tile that neither shows
+anything nor does anything is a blank rectangle no user can get meaning out of,
+so it is a 400 rather than a stored row: `a placement without a
+connectorInstanceId must have a placementAction`.
+
+It may also carry `label` and `icon`, which are **only** valid here: a
+connector-backed tile takes its name and icon from the connector it shows, and
+sending either alongside a `connectorInstanceId` is a 400 rather than a second
+name that could silently disagree with the first. A `label` of only whitespace
+is stored as `null` — an invisible name is indistinguishable on screen from a
+bug. Both are optional; a static tile with neither is drawn from its action.
+
+#### `placementAction`
+
+Optional on **any** placement, static or connector-backed — a tile may both show
+a connector's state and go somewhere when clicked. Validated independently of
+the widget bindings; see [`PlacementAction`](#placementaction) for the shape and
+[`POST /dashboards/{id}/placements/{placementId}/click`](#post-dashboardsidplacementsplacementidclick)
+for what happens when it fires.
+
+At save time:
+
+- `navigate` — `targetDashboardId` must be a real dashboard the **requester**
+  can see at Viewer or better. This is a sanity check on the editor's input, and
+  explicitly not the authorization that governs a click.
+- `connectorAction` — `connectorInstanceId` must be a currently-loaded instance
+  and `actionId`/`targetId` must resolve through the same action-descriptor
+  lookup `POST /connector-instances/{id}/actions/{actionId}` itself uses, so a
+  resource-kind row or kind action is equally valid here.
+
+A failed `navigate` check is a **403** worded as
+`the navigate target is not a dashboard you can access`, and it does not
+distinguish "no such dashboard" from "not one you can see". At this point the id
+is arbitrary caller input, so separating the two would make placement creation a
+way to enumerate other people's dashboard ids — the same reasoning
+`GET /dashboards/{id}` already follows. The click endpoint *does* separate them,
+because by then the id is one the caller was already shown.
+
 | Status | Meaning |
 | --- | --- |
 | 201 | Placement created; response is the placement shape from dashboard detail. |
-| 400 | Connector missing/unavailable, unknown/unsupported target, size below minimum, or invalid binding. |
-| 403 | Caller is not an Editor or Owner. |
+| 400 | Connector missing/unavailable, unknown/unsupported target, size below minimum, invalid binding, a static tile with no `placementAction`, or a `placementAction` naming an action the connector does not advertise. |
+| 403 | Caller is not an Editor or Owner, or the `navigate` target is not one they can access. |
 
 ### `PATCH /dashboards/{id}/placements/{placementId}`
 
@@ -2989,15 +3078,85 @@ Editor or Owner. Any omitted field remains unchanged:
 { "positionX": 2, "positionY": 1, "width": 4, "height": 3 }
 ```
 
-`positionX`, `positionY`, `width`, `height`, `targetId`, and `widgetBindings` are mutable;
-the connector instance is fixed. Size and binding validation is identical to
-create. Returns the updated placement on 200, 403 for insufficient role, 404
-when the placement does not belong to this dashboard, and 400 for validation
-failure.
+`positionX`, `positionY`, `width`, `height`, `targetId`, `widgetBindings`,
+`placementAction`, `label`, and `icon` are mutable; the connector instance is
+fixed. `label` and `icon` follow the same absent/null/value convention as
+`placementAction`, and the same connector-less-only rule as create. Size and binding
+validation is identical to create. Returns the updated placement on 200, 403 for
+insufficient role, 404 when the placement does not belong to this dashboard, and
+400 for validation failure.
+
+`placementAction` distinguishes absent from null, like `icon` on a placement
+group: omitting it leaves the click behaviour alone, `null` removes it, and an
+object replaces it. Removing it from a **static** tile is a 400 — that would
+leave a placement with nothing to show and nothing to do, which create already
+refuses.
 
 This endpoint works on a **grouped** placement too, and what it edits then is
 the standalone geometry the placement will return to when it is ungrouped — not
 where it sits inside its group. See [Placement groups](#placement-groups).
+
+### `POST /dashboards/{id}/placements/{placementId}/click`
+
+**Viewer or better on `{id}`** — the dashboard the placement lives on, not
+whatever the placement points at. Clicking is *using* a dashboard, not editing
+one.
+
+No request body. The endpoint runs the placement's stored
+[`placementAction`](#placementaction) and nothing else: it takes no action id,
+no target, and no params from the caller, because a client that could supply
+those would be the action endpoint with a dashboard-shaped permission check in
+front of it.
+
+A placement with no `placementAction` is a 400 (`this placement has no click
+action`).
+
+**`navigate`** re-checks the **current caller's** access to
+`targetDashboardId`, freshly, on every click. The check the editor passed when
+they saved the tile is never reused: shares get revoked, group memberships
+change, and the person clicking is usually not the person who placed it. The
+creator keeping access while a viewer loses it is the expected behavior of two
+independent checks, not a bug.
+
+Success is the target id, for the client to route to without a page load:
+
+```json
+{ "targetDashboardId": "be676fe1-a863-48d0-b8e9-86d83a671d6a" }
+```
+
+Failure is **two distinct answers, deliberately not conflated**:
+
+| Status | Meaning |
+| --- | --- |
+| 403 | `you do not have access to the dashboard this tile points at` — it exists, and this caller cannot open it. |
+| 404 | `the dashboard this tile points at no longer exists: {id}` — the target was deleted. |
+
+Collapsing these into one generic error would tell someone whose share was
+revoked to go looking for a deleted dashboard, and would tell someone whose
+target really was deleted to go asking its owner for a share that cannot help
+them. Neither leaks anything: the caller was already shown this target id as
+part of a dashboard they can read.
+
+**`connectorAction`** dispatches through the *same* invocation path as
+[`POST /connector-instances/{id}/actions/{actionId}`](#post-connector-instancesidactionsactionid)
+— the same resource-scoped `connectors.control` requirement against the
+placement action's `connectorInstanceId`, the same audit-log row, the same
+pending-operation overlay for a disruptive action, the same post-action refresh.
+The response body is the same `ActionResult`, and the error mapping is the same
+(404 for an action the connector no longer advertises, the connector's own
+status otherwise).
+
+This endpoint is a thin selector over pre-configured arguments, not a second
+implementation. Seeing a dashboard has never granted `connectors.control` and
+does not start to here: a viewer without the grant gets 403 and nothing is
+dispatched or recorded.
+
+| Status | Meaning |
+| --- | --- |
+| 200 | `{ "targetDashboardId": … }`, or the action's `ActionResult`. |
+| 400 | The placement has no `placementAction`. |
+| 403 | Caller has no role on `{id}`; or no access to the `navigate` target; or no `connectors.control` for the action's instance. |
+| 404 | The placement does not belong to this dashboard; the `navigate` target was deleted; or the connector no longer advertises the action. |
 
 ### `DELETE /dashboards/{id}/placements/{placementId}`
 
@@ -3008,6 +3167,46 @@ placement does not belong to this dashboard.
 placement group with fewer than two members, that group is removed and its
 remaining member returns to standalone. See
 [auto-dissolve](#a-group-below-two-members-dissolves).
+
+### `PlacementAction`
+
+What a placement does when it is clicked, stored on the placement itself.
+Internally tagged on `type`:
+
+```json
+{ "type": "navigate", "targetDashboardId": "be676fe1-a863-48d0-b8e9-86d83a671d6a" }
+```
+
+```json
+{
+  "type": "connectorAction",
+  "connectorInstanceId": "5aa2574d-9ba0-4af8-b7ae-74671fb48777",
+  "targetId": "web",
+  "actionId": "restart",
+  "params": {}
+}
+```
+
+`{ "type": "navigate" }`:
+
+| Field | JSON type | Meaning | Nullability |
+| --- | --- | --- | --- |
+| `targetDashboardId` | string | The dashboard to open. Checked twice, independently: once against the editor at save time, and again against the clicker on every click. | Always present. |
+
+`{ "type": "connectorAction" }`:
+
+| Field | JSON type | Meaning | Nullability |
+| --- | --- | --- | --- |
+| `connectorInstanceId` | string | The instance to act on. **Its own field, not the placement's connector** — a tile may display one connector and act on another, and a static tile can act with no connector of its own. | Always present. |
+| `targetId` | string | The sub-target to address, or the instance as a whole. | `null` for the aggregate. |
+| `actionId` | string | The action to invoke, as `POST /connector-instances/{id}/actions/{actionId}` would receive it. | Always present. |
+| `params` | object | The action's parameters, verbatim. Defaults to `null` when omitted. | Always present in a stored action. |
+
+This is a **dashboard** concept and deliberately not a connector one: nothing in
+the connector contract knows that dashboards exist, and a connector must not be
+able to name one. It is also composed *onto* the existing placement rather than
+being a new kind of placement — see
+[`adr/0035-placement-actions-and-hidden-dashboards.md`](adr/0035-placement-actions-and-hidden-dashboards.md).
 
 ## Placement groups
 
@@ -3954,6 +4153,9 @@ once and re-rendered on every poll without re-reading the schema.
         "widgetType": "slider",
         "config": { "min": 0, "max": 100, "step": 1 }
       }
+    },
+    {
+      "resourceKindDisplay": { "resourceKind": "widgets" }
     }
   ]
 }
@@ -3963,10 +4165,10 @@ once and re-rendered on every poll without re-reading the schema.
 | --- | --- | --- | --- |
 | `bindings` | array | The widgets, in the connector author's suggested reading order. | Always present; may be empty. |
 
-**Each binding is externally tagged** — a single-key object whose key is either
-`"display"` or `"action"`, the same shape as `ConnectorError`. Narrow on that
-key, not on the widget type: the two arms carry different id fields because they
-resolve against different things.
+**Each binding is externally tagged** — a single-key object whose key is
+`"display"`, `"action"`, or `"resourceKindDisplay"`, the same shape as
+`ConnectorError`. Narrow on that key, not on the widget type: the three arms
+carry different id fields because they resolve against different things.
 
 `{ "display": … }` — a read-only widget showing one data point:
 
@@ -3983,6 +4185,27 @@ resolve against different things.
 | `actionId` | string | Which `ConnectorAction.id` this widget invokes, as passed to [`POST /connectors/{id}/actions/{actionId}`](#post-connectorsidactionsactionid). | Always present. |
 | `widgetType` | string | One of `"button"`, `"toggle"`, `"slider"`, `"textField"`, `"selector"`. | Always present. |
 | `config` | object | Widget-specific extras: `min`/`max`/`step` for a slider, `options` for a selector. Free-form. | Always present; an empty object, never `null`. |
+
+`{ "resourceKindDisplay": … }` — one of the connector's browsable resource
+kinds, drawn as a bound widget:
+
+| Field | JSON type | Meaning | Nullability |
+| --- | --- | --- | --- |
+| `resourceKind` | string | Which `ResourceKindDescriptor.kind` to browse, as declared by [`GET /connector-instances/{id}/resource-kinds`](#get-connector-instancesidresource-kinds) for the placement's target. | Always present. |
+
+**This arm carries no `widgetType` and no `config`, deliberately.** There is
+exactly one way to render a resource kind — the same table/browser presentation
+a client already implements for
+[`GET /connector-instances/{id}/resources/{kind}`](#get-connector-instancesidresourceskind)
+— and it adapts to whatever area the placement occupies, from a corner tile to
+a placement filling an entire dashboard. Offering a widget type here would
+invite per-kind rendering variants that no connector asked for and that the
+resource browser would then have to keep in step with.
+
+It is display-adjacent rather than a `display` binding because the rows come
+from `list_resource_items` and not from `status.details`; `resourceKind` is a
+third identifier space, and mixing it into `dataPointId` would make the
+binding unvalidatable for the same reason the flat pre-0014 shape was.
 
 **A display `widgetType` is not always a string.** Unit variants serialize as a
 bare string; the one variant carrying data serializes as a single-key object:

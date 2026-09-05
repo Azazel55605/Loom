@@ -11,6 +11,8 @@ import {
   AlertCircle,
   Boxes,
   Check,
+  Eye,
+  EyeOff,
   LayoutGrid,
   Pencil,
   Plus,
@@ -101,13 +103,25 @@ type DashboardGridTile =
   | { kind: "placement"; placement: DashboardPlacement }
   | { kind: "group"; group: DashboardPlacementGroup };
 
+/**
+ * The smallest footprint one placement may occupy.
+ *
+ * A connector declares its own through `metadata.minSize`, which is the floor
+ * the backend enforces too. A **static tile** has no connector to ask, and one
+ * cell is genuinely enough for an icon and a word — so it gets the grid's own
+ * minimum rather than borrowing a number that would mean nothing.
+ */
+function placementMinimumSize(placement: DashboardPlacement): [number, number] {
+  return placement.connector?.metadata.minSize ?? [1, 1];
+}
+
 function groupMinimumWidth(group: DashboardPlacementGroup, columns = GRID_COLS): number {
   return Math.min(
     columns,
     Math.max(
       2,
       group.members.reduce(
-        (width, member) => width + Math.min(member.connector.metadata.minSize[0], columns),
+        (width, member) => width + Math.min(placementMinimumSize(member)[0], columns),
         0,
       ),
     ),
@@ -115,7 +129,7 @@ function groupMinimumWidth(group: DashboardPlacementGroup, columns = GRID_COLS):
 }
 
 function groupMinimumHeight(group: DashboardPlacementGroup): number {
-  return Math.max(2, ...group.members.map((member) => member.connector.metadata.minSize[1]));
+  return Math.max(2, ...group.members.map((member) => placementMinimumSize(member)[1]));
 }
 
 function dashboardTiles(
@@ -136,8 +150,8 @@ function tileGeometry(tile: DashboardGridTile) {
       y: tile.placement.positionY,
       width: tile.placement.width,
       height: tile.placement.height,
-      minWidth: tile.placement.connector.metadata.minSize[0],
-      minHeight: tile.placement.connector.metadata.minSize[1],
+      minWidth: placementMinimumSize(tile.placement)[0],
+      minHeight: placementMinimumSize(tile.placement)[1],
     };
   }
   return {
@@ -262,9 +276,18 @@ function breakpointForWidth(width: number): GridBreakpoint {
 export function DashboardView({
   dashboardId,
   onDeleted,
+  onNavigateDashboard,
 }: {
   dashboardId: string;
   onDeleted: () => void;
+  /**
+   * Opens another dashboard, for a tile whose click navigates there.
+   *
+   * The UI kit ships to three clients and knows nothing about any of their
+   * routers, so the host supplies this the same way it already supplies
+   * `onDeleted` and the sidebar's `onNavigate`.
+   */
+  onNavigateDashboard?: (dashboardId: string) => void;
 }) {
   const { density } = useAppearance();
   const gridGap = React.useMemo(dashboardGridGap, [density]);
@@ -316,7 +339,13 @@ export function DashboardView({
   );
 
   const instanceIds = React.useMemo(
-    () => [...new Set(allPlacements.map((placement) => placement.connector.id))],
+    () => [
+      ...new Set(
+        allPlacements.flatMap((placement) =>
+          placement.connector === null ? [] : [placement.connector.id],
+        ),
+      ),
+    ],
     [allPlacements],
   );
 
@@ -371,16 +400,32 @@ export function DashboardView({
     [dashboardId, queryClient],
   );
 
-  const rename = useMutation({
-    mutationFn: () => api.renameDashboard(dashboardId, name),
+  /**
+   * One mutation for both owner-level settings, because they are one request.
+   *
+   * `PATCH /dashboards/{id}` takes an optional name and an optional hidden
+   * flag, and the sidebar list has to be patched with whichever came back
+   * either way — two mutations would have meant two copies of that
+   * reconciliation.
+   */
+  const updateDashboard = useMutation({
+    mutationFn: (patch: { name?: string; hidden?: boolean }) =>
+      api.updateDashboard(dashboardId, patch),
     onSuccess: (updated) => {
       queryClient.setQueryData(dashboardQueryKey(dashboardId), updated);
       queryClient.setQueryData<DashboardSummary[]>(dashboardsQueryKey, (current) =>
         current?.map((item) =>
-          item.id === dashboardId ? { ...item, name: updated.name } : item,
+          item.id === dashboardId
+            ? { ...item, name: updated.name, hidden: updated.hidden }
+            : item,
         ),
       );
       setEditingName(false);
+    },
+    onError: (error) => {
+      toast.error("Could not update the dashboard", {
+        description: describeConnectorError(error),
+      });
     },
   });
   const remove = useMutation({
@@ -418,7 +463,7 @@ export function DashboardView({
       const minimumWidth = Math.min(
         GRID_COLS,
         selected.reduce(
-          (sum, placement) => sum + placement.connector.metadata.minSize[0],
+          (sum, placement) => sum + placementMinimumSize(placement)[0],
           0,
         ),
       );
@@ -426,7 +471,7 @@ export function DashboardView({
       const positionX = Math.min(left, GRID_COLS - width);
       const height = Math.max(
         bottom - top,
-        ...selected.map((placement) => placement.connector.metadata.minSize[1]),
+        ...selected.map((placement) => placementMinimumSize(placement)[1]),
       );
 
       return api.createDashboardPlacementGroup(dashboardId, {
@@ -554,7 +599,7 @@ export function DashboardView({
               className="flex max-w-xl items-center gap-2"
               onSubmit={(event) => {
                 event.preventDefault();
-                if (name.trim()) rename.mutate();
+                if (name.trim()) updateDashboard.mutate({ name });
               }}
             >
               <Input
@@ -563,8 +608,12 @@ export function DashboardView({
                 value={name}
                 onChange={(event) => setName(event.target.value)}
               />
-              <Button type="submit" size="sm" disabled={!name.trim() || rename.isPending}>
-                {rename.isPending ? "Saving…" : "Save"}
+              <Button
+                type="submit"
+                size="sm"
+                disabled={!name.trim() || updateDashboard.isPending}
+              >
+                {updateDashboard.isPending ? "Saving…" : "Save"}
               </Button>
               <Button
                 type="button"
@@ -573,7 +622,7 @@ export function DashboardView({
                 onClick={() => {
                   setEditingName(false);
                   setName(detail.name);
-                  rename.reset();
+                  updateDashboard.reset();
                 }}
               >
                 Cancel
@@ -600,14 +649,22 @@ export function DashboardView({
             <Badge variant="outline" className="capitalize">
               {detail.role}
             </Badge>
+            {detail.hidden ? (
+              <Badge variant="secondary">
+                <EyeOff data-icon="inline-start" aria-hidden="true" />
+                Hidden
+              </Badge>
+            ) : null}
             <span className="text-sm text-muted-foreground">
               Owned by {detail.owner.username}
             </span>
           </div>
-          {rename.isError ? (
+          {updateDashboard.isError ? (
             <Alert variant="destructive" className="mt-3 max-w-xl">
               <AlertCircle aria-hidden="true" />
-              <AlertDescription>{describeConnectorError(rename.error)}</AlertDescription>
+              <AlertDescription>
+                {describeConnectorError(updateDashboard.error)}
+              </AlertDescription>
             </Alert>
           ) : null}
         </div>
@@ -647,12 +704,30 @@ export function DashboardView({
               ) : null}
               <Button type="button" variant="outline" size="sm" onClick={() => setAddOpen(true)}>
                 <Plus aria-hidden="true" />
-                Add connector
+                Add tile
               </Button>
             </>
           ) : null}
           {isOwner ? (
             <>
+              {/* Presentation, not access control. Hiding removes the dashboard
+                  from everyone's sidebar; it stays reachable by id and by any
+                  button tile pointing at it, which is what it is usually for. */}
+              <Button
+                type="button"
+                variant="outline"
+                size="sm"
+                aria-pressed={detail.hidden}
+                disabled={updateDashboard.isPending}
+                onClick={() => updateDashboard.mutate({ hidden: !detail.hidden })}
+              >
+                {detail.hidden ? (
+                  <Eye aria-hidden="true" />
+                ) : (
+                  <EyeOff aria-hidden="true" />
+                )}
+                {detail.hidden ? "Show in sidebar" : "Hide from sidebar"}
+              </Button>
               <Button type="button" variant="outline" size="sm" onClick={() => setSharesOpen(true)}>
                 <Share2 aria-hidden="true" />
                 Share
@@ -711,7 +786,7 @@ export function DashboardView({
             {canEdit ? (
               <Button type="button" onClick={() => setAddOpen(true)}>
                 <Plus aria-hidden="true" />
-                Add connector
+                Add tile
               </Button>
             ) : null}
           </CardContent>
@@ -765,11 +840,17 @@ export function DashboardView({
               {placements.map((placement) => (
                 <div key={placementGridKey(placement.id)} className="min-w-0">
                   <PlacementTile
+                    dashboardId={dashboardId}
                     placement={placement}
-                    live={live[placement.connector.id]}
+                    live={
+                      placement.connector === null
+                        ? undefined
+                        : live[placement.connector.id]
+                    }
                     editing={editingLayout}
                     onEditBindings={setBindingsFor}
                     onDelete={setRemoving}
+                    onNavigateDashboard={onNavigateDashboard}
                     grouping={grouping}
                     selected={selectedPlacementIds.includes(placement.id)}
                     onSelectedChange={(selected) => {
@@ -795,6 +876,7 @@ export function DashboardView({
                     live={live}
                     editing={editingLayout}
                     onEditBindings={setBindingsFor}
+                    onNavigateDashboard={onNavigateDashboard}
                     onChanged={refreshDashboard}
                   />
                 </div>
@@ -847,7 +929,7 @@ export function DashboardView({
       >
         <DialogContent>
           <DialogHeader>
-            <DialogTitle>Add {addingToGroup?.connector.name} to a group</DialogTitle>
+            <DialogTitle>Add {placementName(addingToGroup)} to a group</DialogTitle>
             <DialogDescription>
               Choose the composite tile this placement should join. It is appended after the
               current last member.
@@ -855,7 +937,7 @@ export function DashboardView({
           </DialogHeader>
           <div className="flex flex-col gap-2">
             {placementGroups.map((group) => {
-              const firstName = group.members[0]?.connector.name ?? "Unnamed connector";
+              const firstName = placementName(group.members[0] ?? null);
               return (
                 <Button
                   key={group.id}
@@ -896,7 +978,9 @@ export function DashboardView({
       >
         <AlertDialogContent>
           <AlertDialogHeader>
-            <AlertDialogTitle>Remove {removing?.connector.name} from this dashboard?</AlertDialogTitle>
+            <AlertDialogTitle>
+              Remove {placementName(removing)} from this dashboard?
+            </AlertDialogTitle>
             <AlertDialogDescription>
               This removes the card and its widgets. The connector itself, and any other dashboard
               it appears on, are untouched.
@@ -963,6 +1047,16 @@ export function DashboardView({
       </AlertDialog>
     </div>
   );
+}
+
+/**
+ * What to call one placement in a sentence.
+ *
+ * A connector tile is named by its connector; a static tile names itself, and
+ * falls back to a generic word when it was created without a label.
+ */
+function placementName(placement: DashboardPlacement | null | undefined): string {
+  return placement?.connector?.name ?? placement?.label ?? "this tile";
 }
 
 function DashboardViewSkeleton() {

@@ -1371,6 +1371,10 @@ impl Connector for DebugConnector {
                 .with_config(json!({ "min": 0, "max": 100, "step": 1 })),
             WidgetBinding::action(ACTION_SET_LABEL, ActionWidgetType::TextField),
             WidgetBinding::action(ACTION_RESTART, ActionWidgetType::Button),
+            // The third binding kind, present for the same reason the action
+            // bindings are: a variant that no fixture exercises is a variant
+            // every renderer and validator is free to quietly not handle.
+            WidgetBinding::resource_kind_display(RESOURCE_KIND_WIDGETS),
         ])
     }
 
@@ -1690,8 +1694,14 @@ mod tests {
             .map(|action| action.id)
             .collect();
 
+        let kind_ids: HashSet<String> = connector
+            .resource_kinds(None)
+            .into_iter()
+            .map(|kind| kind.kind)
+            .collect();
+
         let layout = connector.default_layout();
-        assert_eq!(layout.bindings.len(), 11);
+        assert_eq!(layout.bindings.len(), 12);
 
         for binding in &layout.bindings {
             match binding {
@@ -1715,12 +1725,16 @@ mod tests {
                     );
                     assert!(config.is_object(), "config must always be an object");
                 }
+                WidgetBinding::ResourceKindDisplay { resource_kind } => assert!(
+                    kind_ids.contains(resource_kind),
+                    "layout binds unknown resource kind {resource_kind}"
+                ),
             }
         }
     }
 
     #[tokio::test]
-    async fn the_default_layout_exercises_both_binding_kinds() {
+    async fn the_default_layout_exercises_every_binding_kind() {
         let layout = DebugConnector::default().default_layout();
 
         // The three display shapes a renderer has to get right first.
@@ -1758,6 +1772,12 @@ mod tests {
             ACTION_SET_ENABLED,
             ActionWidgetType::Toggle
         )));
+
+        // ...and exactly one resource-kind binding, so the third arm of the
+        // enum is exercised by the fixture every client is built against.
+        assert!(layout
+            .bindings
+            .contains(&WidgetBinding::resource_kind_display(RESOURCE_KIND_WIDGETS)));
 
         // The bounded widgets must carry the bounds they need to draw.
         for binding in &layout.bindings {

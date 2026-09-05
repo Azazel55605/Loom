@@ -43,12 +43,23 @@ export function ActionParamsDialog({
   action,
   connectorName,
   isPending,
+  submitLabel = "Run",
   onOpenChange,
   onSubmit,
 }: {
   action: ConnectorAction | null;
   connectorName: string;
   isPending: boolean;
+  /**
+   * What the confirm button says. Defaults to running the action, which is what
+   * every caller but one wants.
+   *
+   * `PlacementActionEditor` is that one: it collects the same parameters
+   * against the same schema, but stores them on a tile instead of dispatching
+   * them, and a button labelled "Run" there would promise something the dialog
+   * does not do.
+   */
+  submitLabel?: string;
   onOpenChange: (open: boolean) => void;
   onSubmit: (params: Record<string, unknown>) => void;
 }) {
@@ -102,7 +113,7 @@ export function ActionParamsDialog({
             </Button>
             <Button type="submit" disabled={isPending}>
               {isPending && <Loader2 className="animate-spin" aria-hidden="true" />}
-              Run
+              {submitLabel}
             </Button>
           </DialogFooter>
         </form>

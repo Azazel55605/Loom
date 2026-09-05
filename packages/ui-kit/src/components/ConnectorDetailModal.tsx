@@ -26,6 +26,7 @@ import { ActionButtonWidget } from "@loom/ui-kit/widgets/ActionButton";
 import { renderWidget } from "@loom/ui-kit/widgets/renderWidget";
 import type {
   ConnectorError,
+  ConnectorInstanceSummary,
   ConnectorStatus,
   DashboardPlacement,
   PendingOperation,
@@ -62,7 +63,15 @@ export function ConnectorDetailModal({
   focus = null,
   initialTab = null,
 }: {
-  placement: DashboardPlacement;
+  /**
+   * The placement whose connector this modal expands.
+   *
+   * Narrowed to a **connector-backed** placement on purpose: there is no
+   * detail view for a static tile, which has no status, no data points and no
+   * actions, so the type says so rather than the body checking for a case its
+   * one caller never produces.
+   */
+  placement: ConnectorPlacement;
   open: boolean;
   onOpenChange: (open: boolean) => void;
   /**
@@ -408,11 +417,14 @@ export function ConnectorDetailModal({
  * guessing a connector-specific dashboard layout here would create a second,
  * worse copy of `default_layout_for` in shared UI.
  */
+/** A connector-backed placement, which is all this modal ever renders. */
+type ConnectorPlacement = DashboardPlacement & { connector: ConnectorInstanceSummary };
+
 function targetPlacement(
-  host: DashboardPlacement,
+  host: ConnectorPlacement,
   targetId: string,
   includeLog: boolean,
-): DashboardPlacement {
+): ConnectorPlacement {
   return {
     ...host,
     // A distinct id so React does not reconcile the nested modal's subtree with

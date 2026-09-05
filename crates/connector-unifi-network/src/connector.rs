@@ -3732,7 +3732,7 @@ mod tests {
             .iter()
             .filter_map(|binding| match binding {
                 WidgetBinding::Display { data_point_id, .. } => Some(data_point_id.as_str()),
-                WidgetBinding::Action { .. } => None,
+                WidgetBinding::Action { .. } | WidgetBinding::ResourceKindDisplay { .. } => None,
             })
             .collect::<HashSet<_>>();
         for expected in [

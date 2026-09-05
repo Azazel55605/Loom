@@ -1433,9 +1433,9 @@ pub enum ActionWidgetType {
 /// not be invoked or a live action id that no validator could check — see
 /// `docs/adr/0014-widget-binding-model.md`.
 ///
-/// Externally tagged, so each value is a single-key object (`{"display": …}`
-/// or `{"action": …}`) — the same shape as [`ConnectorError`] and
-/// [`DisplayWidgetType::MetricChart`].
+/// Externally tagged, so each value is a single-key object (`{"display": …}`,
+/// `{"action": …}`, or `{"resourceKindDisplay": …}`) — the same shape as
+/// [`ConnectorError`] and [`DisplayWidgetType::MetricChart`].
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", rename_all_fields = "camelCase")]
 pub enum WidgetBinding {
@@ -1470,6 +1470,29 @@ pub enum WidgetBinding {
         /// arm's `config`.
         config: Value,
     },
+    /// A widget showing one of the connector's browsable resource kinds.
+    ///
+    /// Display-adjacent, and deliberately its own arm rather than a
+    /// [`DisplayWidgetType`]: the rows come from
+    /// [`Connector::list_resource_items`] rather than from a
+    /// [`DataPointDescriptor`], so it resolves against a third identifier
+    /// space — [`ResourceKindDescriptor::kind`] — for the same reason
+    /// `Display` and `Action` are already separate arms.
+    ///
+    /// **It carries no `widget_type` and no `config`, on purpose.** There is
+    /// exactly one way to render a resource kind — the table/browser
+    /// presentation a client already implements for
+    /// `GET /connector-instances/{id}/resources/{kind}` — and it adapts to
+    /// whatever area the placement occupies, from a corner tile to a
+    /// placement filling an entire dashboard. Offering a widget type here
+    /// would invite per-kind rendering variants that no connector asked for
+    /// and that the resource browser would then have to keep in step.
+    ResourceKindDisplay {
+        /// Which [`ResourceKindDescriptor::kind`] to browse. Must be one the
+        /// connector currently declares from
+        /// [`Connector::resource_kinds`] for the placement's target.
+        resource_kind: String,
+    },
 }
 
 impl WidgetBinding {
@@ -1491,14 +1514,25 @@ impl WidgetBinding {
         }
     }
 
+    /// A binding that browses one resource kind.
+    pub fn resource_kind_display(resource_kind: impl Into<String>) -> Self {
+        Self::ResourceKindDisplay {
+            resource_kind: resource_kind.into(),
+        }
+    }
+
     /// Attaches widget-specific configuration, for chaining onto
     /// [`WidgetBinding::display`] or [`WidgetBinding::action`].
+    ///
+    /// A no-op on [`WidgetBinding::ResourceKindDisplay`], which has no config
+    /// to attach — see that variant's documentation.
     #[must_use]
     pub fn with_config(mut self, config: Value) -> Self {
         match &mut self {
             Self::Display { config: slot, .. } | Self::Action { config: slot, .. } => {
                 *slot = config;
             }
+            Self::ResourceKindDisplay { .. } => {}
         }
         self
     }
@@ -1846,6 +1880,8 @@ mod tests {
             let point_ids: Vec<&str> = data_points.iter().map(|dp| dp.id.as_str()).collect();
             let actions = connector.actions().await;
             let action_ids: Vec<&str> = actions.iter().map(|a| a.id.as_str()).collect();
+            let kinds = connector.resource_kinds(None);
+            let kind_ids: Vec<&str> = kinds.iter().map(|kind| kind.kind.as_str()).collect();
             for binding in connector.default_layout().bindings {
                 match &binding {
                     WidgetBinding::Display { data_point_id, .. } => assert!(
@@ -1855,6 +1891,10 @@ mod tests {
                     WidgetBinding::Action { action_id, .. } => assert!(
                         action_ids.contains(&action_id.as_str()),
                         "layout binds unknown action {action_id}"
+                    ),
+                    WidgetBinding::ResourceKindDisplay { resource_kind } => assert!(
+                        kind_ids.contains(&resource_kind.as_str()),
+                        "layout binds unknown resource kind {resource_kind}"
                     ),
                 }
             }

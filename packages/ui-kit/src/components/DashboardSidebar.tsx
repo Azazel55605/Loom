@@ -63,9 +63,24 @@ export function DashboardSidebar({
     },
   });
 
-  const pinned = dashboards.data?.filter((dashboard) => dashboard.pinned) ?? [];
-  const owned = dashboards.data?.filter((dashboard) => dashboard.role === "owner") ?? [];
-  const shared = dashboards.data?.filter((dashboard) => dashboard.role !== "owner") ?? [];
+  /**
+   * Hidden dashboards are left out of **every** section, including Pinned.
+   *
+   * The flag means "do not offer this in a list", and pinning or owning one
+   * does not make it less hidden — a dashboard that reappeared under Pinned
+   * would make the setting look broken to the person who set it. It stays
+   * reachable by id and through any button tile that navigates to it, which is
+   * what hiding is normally for; its owner unhides it from the dashboard's own
+   * header, which they reach the same way.
+   *
+   * The filter lives here rather than in `GET /dashboards`, which keeps
+   * returning them: a client that suppressed them server-side would have no way
+   * to show one, and no way to turn the flag back off.
+   */
+  const visible = dashboards.data?.filter((dashboard) => !dashboard.hidden) ?? [];
+  const pinned = visible.filter((dashboard) => dashboard.pinned);
+  const owned = visible.filter((dashboard) => dashboard.role === "owner");
+  const shared = visible.filter((dashboard) => dashboard.role !== "owner");
 
   return (
     <nav aria-label="Dashboard navigation" className="flex h-full flex-col gap-4 p-4">

@@ -7001,4 +7001,547 @@ mod tests {
         .await;
         assert_eq!(updated["description"], "Restored.");
     }
+
+    /// Creates a dashboard owned by `token` and returns its id.
+    async fn create_dashboard(app: &Router, token: &str, name: &str) -> String {
+        let (status, created) = send(
+            app,
+            post_json_auth("/dashboards", token, serde_json::json!({ "name": name })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED, "{created:#}");
+        created["id"].as_str().expect("dashboard id").to_owned()
+    }
+
+    /// Shares `dashboard_id` with one user and returns the share's id, so the
+    /// test can revoke it later.
+    async fn share_dashboard_with(
+        app: &Router,
+        owner: &str,
+        dashboard_id: &str,
+        user_id: &str,
+        role: &str,
+    ) -> String {
+        let (status, share) = send(
+            app,
+            post_json_auth(
+                &format!("/dashboards/{dashboard_id}/shares"),
+                owner,
+                serde_json::json!({
+                    "targetType": "user",
+                    "targetId": user_id,
+                    "role": role,
+                }),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED, "{share:#}");
+        share["id"].as_str().expect("share id").to_owned()
+    }
+
+    /// A tile that shows nothing must at least *do* something. The two halves
+    /// of that rule are checked together because either one alone would let a
+    /// blank, inert rectangle onto a dashboard.
+    #[tokio::test]
+    async fn a_placement_without_a_connector_must_carry_an_action() {
+        let app = test_app().await;
+        let (owner, _) = setup_and_login(&app.router).await;
+        let dashboard_id = create_dashboard(&app.router, &owner, "Operations").await;
+        let target_id = create_dashboard(&app.router, &owner, "Network").await;
+
+        let (status, rejected) = send(
+            &app.router,
+            post_json_auth(
+                &format!("/dashboards/{dashboard_id}/placements"),
+                &owner,
+                serde_json::json!({
+                    "positionX": 0,
+                    "positionY": 0,
+                    "width": 2,
+                    "height": 1,
+                }),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{rejected:#}");
+        assert!(
+            rejected["error"]
+                .as_str()
+                .is_some_and(|message| message.contains("placementAction")),
+            "the 400 must say what is missing: {rejected:#}"
+        );
+
+        let (status, created) = send(
+            &app.router,
+            post_json_auth(
+                &format!("/dashboards/{dashboard_id}/placements"),
+                &owner,
+                serde_json::json!({
+                    "positionX": 0,
+                    "positionY": 0,
+                    "width": 2,
+                    "height": 1,
+                    "label": "  Network  ",
+                    "icon": "lucide:network",
+                    "placementAction": {
+                        "type": "navigate",
+                        "targetDashboardId": target_id,
+                    },
+                }),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED, "{created:#}");
+        // No connector, no bindings — and the action survives the round trip.
+        assert_eq!(created["connector"], serde_json::Value::Null);
+        assert_eq!(created["targetId"], serde_json::Value::Null);
+        assert_eq!(created["widgetBindings"], serde_json::json!([]));
+        assert_eq!(created["placementAction"]["type"], "navigate");
+        assert_eq!(created["placementAction"]["targetDashboardId"], target_id);
+        // A static tile carries its own name and icon, because it has no
+        // connector to take either from. The label is stored trimmed.
+        assert_eq!(created["label"], "Network");
+        assert_eq!(created["icon"], "lucide:network");
+
+        // It reads back the same way from the dashboard detail every client
+        // renders from.
+        let (status, detail) = send(
+            &app.router,
+            get_with_auth(&format!("/dashboards/{dashboard_id}"), &bearer(&owner)),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{detail:#}");
+        assert_eq!(
+            detail["placements"][0]["placementAction"]["targetDashboardId"],
+            target_id
+        );
+
+        // A connector-less placement cannot have its only reason to exist
+        // taken away by a later edit either.
+        let placement_id = created["id"].as_str().expect("placement id").to_owned();
+        let (status, stripped) = send(
+            &app.router,
+            patch_json_auth(
+                &format!("/dashboards/{dashboard_id}/placements/{placement_id}"),
+                &owner,
+                serde_json::json!({ "placementAction": null }),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{stripped:#}");
+
+        // A connector-backed tile has a name and an icon already. Storing a
+        // second set that could disagree with the connector's own is refused
+        // rather than quietly ignored.
+        let connector_id = create_debug_instance(&app.router, &owner, "Fixture").await;
+        let (status, refused) = send(
+            &app.router,
+            post_json_auth(
+                &format!("/dashboards/{dashboard_id}/placements"),
+                &owner,
+                serde_json::json!({
+                    "connectorInstanceId": connector_id,
+                    "positionX": 0,
+                    "positionY": 2,
+                    "width": 2,
+                    "height": 2,
+                    "label": "Second name",
+                }),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{refused:#}");
+    }
+
+    /// The creation-time check and the click-time check are two different
+    /// questions asked of two different people, and this test is the reason
+    /// they are not one cached answer.
+    #[tokio::test]
+    async fn a_navigate_action_is_checked_at_save_time_and_again_at_every_click() {
+        let app = test_app().await;
+        let (owner, _) = setup_and_login(&app.router).await;
+        let dashboard_id = create_dashboard(&app.router, &owner, "Operations").await;
+        let target_id = create_dashboard(&app.router, &owner, "Network").await;
+
+        let editor = user_with_grants(&app.router, &owner, "editor", serde_json::json!([])).await;
+        let editor_id = current_user_id(&app.router, &editor).await;
+        share_dashboard_with(&app.router, &owner, &dashboard_id, &editor_id, "edit").await;
+
+        let navigate_body = serde_json::json!({
+            "positionX": 0,
+            "positionY": 0,
+            "width": 2,
+            "height": 1,
+            "placementAction": { "type": "navigate", "targetDashboardId": target_id },
+        });
+
+        // The editor may edit this dashboard but cannot see the target, so the
+        // tile is refused before it is ever saved.
+        let (status, refused) = send(
+            &app.router,
+            post_json_auth(
+                &format!("/dashboards/{dashboard_id}/placements"),
+                &editor,
+                navigate_body.clone(),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::FORBIDDEN, "{refused:#}");
+
+        // Given access to the target, the same request succeeds.
+        let editor_share =
+            share_dashboard_with(&app.router, &owner, &target_id, &editor_id, "view").await;
+        let (status, created) = send(
+            &app.router,
+            post_json_auth(
+                &format!("/dashboards/{dashboard_id}/placements"),
+                &editor,
+                navigate_body,
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED, "{created:#}");
+        let placement_id = created["id"].as_str().expect("placement id").to_owned();
+        let click_uri = format!("/dashboards/{dashboard_id}/placements/{placement_id}/click");
+
+        // A viewer of the host dashboard who can also see the target is told
+        // where to go; navigating is the client's job from there.
+        let viewer = user_with_grants(&app.router, &owner, "viewer", serde_json::json!([])).await;
+        let viewer_id = current_user_id(&app.router, &viewer).await;
+        share_dashboard_with(&app.router, &owner, &dashboard_id, &viewer_id, "view").await;
+        let viewer_share =
+            share_dashboard_with(&app.router, &owner, &target_id, &viewer_id, "view").await;
+
+        let (status, navigated) = send(
+            &app.router,
+            post_json_auth(&click_uri, &viewer, serde_json::json!({})),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{navigated:#}");
+        assert_eq!(navigated["targetDashboardId"], target_id);
+
+        // Someone with no role on the host dashboard cannot click a tile on
+        // it, whatever the tile points at.
+        let outsider =
+            user_with_grants(&app.router, &owner, "outsider", serde_json::json!([])).await;
+        let (status, denied) = send(
+            &app.router,
+            post_json_auth(&click_uri, &outsider, serde_json::json!({})),
+        )
+        .await;
+        assert_eq!(status, StatusCode::FORBIDDEN, "{denied:#}");
+
+        // Revoking the viewer's access to the *target* changes what the same
+        // click does, even though the placement is untouched and the person
+        // who created it still has access. This is the whole point of the
+        // second check.
+        let (status, _) = send(
+            &app.router,
+            delete_auth(
+                &format!("/dashboards/{target_id}/shares/{viewer_share}"),
+                &owner,
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::NO_CONTENT);
+
+        let (status, revoked) = send(
+            &app.router,
+            post_json_auth(&click_uri, &viewer, serde_json::json!({})),
+        )
+        .await;
+        assert_eq!(status, StatusCode::FORBIDDEN, "{revoked:#}");
+        assert!(
+            revoked["error"]
+                .as_str()
+                .is_some_and(|message| message.contains("access")),
+            "a revoked share must read as a permission problem: {revoked:#}"
+        );
+
+        // The editor who created it still can, which is exactly the divergence
+        // the design expects rather than a bug.
+        let (status, still_allowed) = send(
+            &app.router,
+            post_json_auth(&click_uri, &editor, serde_json::json!({})),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{still_allowed:#}");
+        assert_eq!(still_allowed["targetDashboardId"], target_id);
+
+        // A deleted target is a different, honestly distinct answer: 404, not
+        // the 403 a revoked share gets. Telling someone to go ask for a share
+        // that cannot help them is worse than telling them nothing.
+        let _ = editor_share;
+        let (status, _) = send(
+            &app.router,
+            delete_auth(&format!("/dashboards/{target_id}"), &owner),
+        )
+        .await;
+        assert_eq!(status, StatusCode::NO_CONTENT);
+
+        let (status, gone) = send(
+            &app.router,
+            post_json_auth(&click_uri, &editor, serde_json::json!({})),
+        )
+        .await;
+        assert_eq!(status, StatusCode::NOT_FOUND, "{gone:#}");
+        assert!(
+            gone["error"]
+                .as_str()
+                .is_some_and(|message| message.contains("no longer exists")),
+            "a deleted target must not read as a permission problem: {gone:#}"
+        );
+    }
+
+    /// A tile is a shortcut to the action endpoint, never a way around it: the
+    /// same grant, the same dispatch, and therefore the same audit row.
+    #[tokio::test]
+    async fn a_connector_action_click_is_the_action_endpoint_by_another_name() {
+        let app = test_app().await;
+        let (admin, _) = setup_and_login(&app.router).await;
+        let connector_id = create_debug_instance(&app.router, &admin, "Audited").await;
+
+        let operator = user_with_grants(
+            &app.router,
+            &admin,
+            "operator",
+            serde_json::json!([{
+                "key": "connectors.control",
+                "resourceType": null,
+                "resourceId": null,
+            }]),
+        )
+        .await;
+        let operator_id = current_user_id(&app.router, &operator).await;
+        let dashboard_id = create_dashboard(&app.router, &operator, "Controls").await;
+
+        let (status, created) = send(
+            &app.router,
+            post_json_auth(
+                &format!("/dashboards/{dashboard_id}/placements"),
+                &operator,
+                serde_json::json!({
+                    "positionX": 0,
+                    "positionY": 0,
+                    "width": 1,
+                    "height": 1,
+                    "placementAction": {
+                        "type": "connectorAction",
+                        "connectorInstanceId": connector_id,
+                        "targetId": null,
+                        "actionId": "ping",
+                        "params": {},
+                    },
+                }),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED, "{created:#}");
+        let placement_id = created["id"].as_str().expect("placement id").to_owned();
+
+        let (status, clicked) = send(
+            &app.router,
+            post_json_auth(
+                &format!("/dashboards/{dashboard_id}/placements/{placement_id}/click"),
+                &operator,
+                serde_json::json!({}),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{clicked:#}");
+
+        let (status, directly) = send(
+            &app.router,
+            post_json_auth(
+                &format!("/connector-instances/{connector_id}/actions/ping"),
+                &operator,
+                serde_json::json!({}),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{directly:#}");
+        assert_eq!(
+            clicked, directly,
+            "the two routes must return the same body"
+        );
+
+        let entries = action_log(&app, &admin, &connector_id, "").await;
+        assert_eq!(entries.len(), 2, "both invocations were recorded");
+        // Newest first, so `[0]` is the direct call and `[1]` the click. Every
+        // field that describes *what happened* must match; only the timestamps
+        // and the row id may differ.
+        for field in [
+            "actionId",
+            "targetId",
+            "params",
+            "success",
+            "resultMessage",
+            "snapshot",
+        ] {
+            assert_eq!(
+                entries[0][field], entries[1][field],
+                "a click must record `{field}` exactly as the direct endpoint does"
+            );
+        }
+        assert_eq!(entries[1]["invokedBy"]["id"], operator_id);
+        assert_eq!(entries[1]["invokedBy"]["username"], "operator");
+
+        // Dashboard access is not connector control. Someone who can see and
+        // click this tile still needs the grant the direct endpoint asks for.
+        let bystander =
+            user_with_grants(&app.router, &admin, "bystander", serde_json::json!([])).await;
+        let bystander_id = current_user_id(&app.router, &bystander).await;
+        share_dashboard_with(&app.router, &operator, &dashboard_id, &bystander_id, "view").await;
+
+        let (status, denied) = send(
+            &app.router,
+            post_json_auth(
+                &format!("/dashboards/{dashboard_id}/placements/{placement_id}/click"),
+                &bystander,
+                serde_json::json!({}),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::FORBIDDEN, "{denied:#}");
+        assert_eq!(
+            action_log(&app, &admin, &connector_id, "").await.len(),
+            2,
+            "a refused click dispatches nothing and records nothing"
+        );
+
+        // A tile cannot be configured with an action the connector does not
+        // advertise, using the same descriptor lookup the endpoint itself uses.
+        let (status, unknown) = send(
+            &app.router,
+            post_json_auth(
+                &format!("/dashboards/{dashboard_id}/placements"),
+                &operator,
+                serde_json::json!({
+                    "positionX": 1,
+                    "positionY": 0,
+                    "width": 1,
+                    "height": 1,
+                    "placementAction": {
+                        "type": "connectorAction",
+                        "connectorInstanceId": connector_id,
+                        "targetId": null,
+                        "actionId": "not-an-action",
+                        "params": {},
+                    },
+                }),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{unknown:#}");
+    }
+
+    /// The third binding kind resolves against a third namespace, and is
+    /// checked with the same rigor as the other two.
+    #[tokio::test]
+    async fn a_resource_kind_binding_must_name_a_kind_the_connector_declares() {
+        let app = test_app().await;
+        let (owner, _) = setup_and_login(&app.router).await;
+        let connector_id = create_debug_instance(&app.router, &owner, "Browsable").await;
+        let dashboard_id = create_dashboard(&app.router, &owner, "Operations").await;
+
+        let placement = |resource_kind: &str, position_x: i64| {
+            serde_json::json!({
+                "connectorInstanceId": connector_id,
+                "positionX": position_x,
+                "positionY": 0,
+                "width": 4,
+                "height": 4,
+                "widgetBindings": [
+                    { "resourceKindDisplay": { "resourceKind": resource_kind } }
+                ],
+            })
+        };
+
+        let (status, created) = send(
+            &app.router,
+            post_json_auth(
+                &format!("/dashboards/{dashboard_id}/placements"),
+                &owner,
+                placement(loom_core::connector::debug::RESOURCE_KIND_WIDGETS, 0),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED, "{created:#}");
+        assert_eq!(
+            created["widgetBindings"][0]["resourceKindDisplay"]["resourceKind"],
+            loom_core::connector::debug::RESOURCE_KIND_WIDGETS
+        );
+
+        let (status, rejected) = send(
+            &app.router,
+            post_json_auth(
+                &format!("/dashboards/{dashboard_id}/placements"),
+                &owner,
+                placement("not-a-kind", 4),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{rejected:#}");
+        assert!(
+            rejected["error"]
+                .as_str()
+                .is_some_and(|message| message.contains("unknown resource kinds: not-a-kind")),
+            "the 400 must name the namespace it failed in: {rejected:#}"
+        );
+    }
+
+    /// Hiding is presentation, not access control — the list keeps returning
+    /// the dashboard, and the id keeps working.
+    #[tokio::test]
+    async fn a_hidden_dashboard_stays_listed_and_reachable() {
+        let app = test_app().await;
+        let (owner, _) = setup_and_login(&app.router).await;
+        let dashboard_id = create_dashboard(&app.router, &owner, "Network").await;
+
+        let (status, detail) = send(
+            &app.router,
+            patch_json_auth(
+                &format!("/dashboards/{dashboard_id}"),
+                &owner,
+                serde_json::json!({ "hidden": true }),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{detail:#}");
+        assert_eq!(detail["hidden"], true);
+        // Hiding alone must not have renamed anything.
+        assert_eq!(detail["name"], "Network");
+
+        let (status, list) = send(&app.router, get_with_auth("/dashboards", &bearer(&owner))).await;
+        assert_eq!(status, StatusCode::OK, "{list:#}");
+        let entry = list
+            .as_array()
+            .expect("dashboards")
+            .iter()
+            .find(|entry| entry["id"] == dashboard_id.as_str())
+            .expect("a hidden dashboard is still listed");
+        assert_eq!(entry["hidden"], true);
+
+        let (status, fetched) = send(
+            &app.router,
+            get_with_auth(&format!("/dashboards/{dashboard_id}"), &bearer(&owner)),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{fetched:#}");
+
+        // Editors may lay a dashboard out; they may not hide it from everyone.
+        let editor = user_with_grants(&app.router, &owner, "editor", serde_json::json!([])).await;
+        let editor_id = current_user_id(&app.router, &editor).await;
+        share_dashboard_with(&app.router, &owner, &dashboard_id, &editor_id, "edit").await;
+        let (status, denied) = send(
+            &app.router,
+            patch_json_auth(
+                &format!("/dashboards/{dashboard_id}"),
+                &editor,
+                serde_json::json!({ "hidden": false }),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::FORBIDDEN, "{denied:#}");
+    }
 }

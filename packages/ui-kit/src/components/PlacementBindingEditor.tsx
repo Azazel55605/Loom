@@ -279,7 +279,7 @@ function BindingRow({
           idPrefix={idPrefix}
           onChange={(display) => onChange({ display })}
         />
-      ) : (
+      ) : "action" in binding ? (
         <ActionBindingFields
           binding={binding.action}
           actions={actions}
@@ -287,6 +287,18 @@ function BindingRow({
           idPrefix={idPrefix}
           onChange={(action) => onChange({ action })}
         />
+      ) : (
+        // A resource-kind binding has nothing to edit: no widget type and no
+        // config, by design. It is shown as what it is and can be removed, so a
+        // layout that has one is still fully editable here — it simply has one
+        // row with no choices in it rather than being unrepresentable.
+        <p className="text-xs text-muted-foreground">
+          Shows the connector&rsquo;s{" "}
+          <span className="font-medium text-foreground">
+            {binding.resourceKindDisplay.resourceKind}
+          </span>{" "}
+          table, filling whatever space this tile occupies.
+        </p>
       )}
     </div>
   );

@@ -153,6 +153,10 @@ pub fn routes() -> Router<AppState> {
             patch(dashboards::update_placement).delete(dashboards::delete_placement),
         )
         .route(
+            "/dashboards/{id}/placements/{placement_id}/click",
+            post(dashboards::click_placement),
+        )
+        .route(
             "/dashboards/{id}/placement-groups",
             post(dashboards::create_placement_group),
         )
