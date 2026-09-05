@@ -737,7 +737,7 @@ mod tests {
         assert!(body["userId"].as_str().is_some_and(|id| !id.is_empty()));
 
         // The seeded Administrators group grants every registered permission
-        // globally, so the first admin's claims must contain all six with no
+        // globally, so the first admin's claims must contain every key with no
         // resource scoping.
         let permissions = body["permissions"].as_array().expect("permissions array");
         let mut keys: Vec<&str> = permissions
@@ -752,6 +752,7 @@ mod tests {
                 "connectors.control",
                 "connectors.manage",
                 "connectors.view",
+                "dashboards.manage",
                 "groups.manage",
                 "system.settings",
                 "users.manage",
@@ -940,7 +941,7 @@ mod tests {
         )
         .await;
         assert_eq!(status, StatusCode::OK);
-        assert_eq!(session["permissions"].as_array().expect("array").len(), 6);
+        assert_eq!(session["permissions"].as_array().expect("array").len(), 7);
         let user_id = session["userId"].as_str().expect("user id");
         let (status, sessions) = send(
             &app.router,
@@ -4764,6 +4765,104 @@ mod tests {
         }
     }
 
+    #[tokio::test]
+    async fn dashboard_administration_ignores_local_acl_and_can_reassign_and_delete() {
+        let app = test_app().await;
+        let (admin, _) = setup_and_login(&app.router).await;
+        let admin_id = current_user_id(&app.router, &admin).await;
+        let owner = user_with_grants(
+            &app.router,
+            &admin,
+            "dashboard-owner",
+            serde_json::json!([]),
+        )
+        .await;
+        let owner_id = current_user_id(&app.router, &owner).await;
+        let dashboard_id = create_dashboard(&app.router, &owner, "Private operations").await;
+
+        // The owner does not gain instance-wide dashboard administration merely
+        // by owning one dashboard.
+        let (status, denied) = send(
+            &app.router,
+            get_with_auth("/admin/dashboards", &bearer(&owner)),
+        )
+        .await;
+        assert_eq!(status, StatusCode::FORBIDDEN, "{denied:#}");
+
+        // Give the dashboard one share so the aggregate is tested rather than
+        // only proving that zero deserializes.
+        let (status, share) = send(
+            &app.router,
+            post_json_auth(
+                &format!("/dashboards/{dashboard_id}/shares"),
+                &owner,
+                serde_json::json!({
+                    "targetType": "user",
+                    "targetId": admin_id,
+                    "role": "view",
+                }),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED, "{share:#}");
+
+        let (status, list) = send(
+            &app.router,
+            get_with_auth("/admin/dashboards", &bearer(&admin)),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{list:#}");
+        let row = list
+            .as_array()
+            .expect("dashboard array")
+            .iter()
+            .find(|row| row["id"] == dashboard_id)
+            .expect("private dashboard is visible to the administrator");
+        assert_eq!(row["ownerUserId"], owner_id);
+        assert_eq!(row["ownerUsername"], "dashboard-owner");
+        assert_eq!(row["shareCount"], 1);
+        assert_eq!(row["placementCount"], 0);
+
+        let (status, updated) = send(
+            &app.router,
+            patch_json_auth(
+                &format!("/admin/dashboards/{dashboard_id}"),
+                &admin,
+                serde_json::json!({
+                    "name": "Reassigned operations",
+                    "hidden": true,
+                    "ownerUserId": admin_id,
+                }),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{updated:#}");
+        assert_eq!(updated["name"], "Reassigned operations");
+        assert_eq!(updated["hidden"], true);
+        assert_eq!(updated["ownerUserId"], admin_id);
+
+        let (status, _) = send(
+            &app.router,
+            delete_auth(&format!("/admin/dashboards/{dashboard_id}"), &admin),
+        )
+        .await;
+        assert_eq!(status, StatusCode::NO_CONTENT);
+        for table in [
+            "dashboard_shares",
+            "dashboard_pins",
+            "dashboard_placements",
+            "dashboard_placement_groups",
+        ] {
+            let query = format!("SELECT COUNT(*) FROM {table} WHERE dashboard_id = ?");
+            let count: i64 = sqlx::query_scalar(&query)
+                .bind(&dashboard_id)
+                .fetch_one(&app.pool)
+                .await
+                .expect("cascade count");
+            assert_eq!(count, 0, "{table} rows did not cascade");
+        }
+    }
+
     /* ---------------------------------------------------------------- */
     /* Dashboard tile grouping                                           */
     /* ---------------------------------------------------------------- */
@@ -5754,6 +5853,7 @@ mod tests {
                 "connectors.control",
                 "connectors.manage",
                 "connectors.view",
+                "dashboards.manage",
                 "groups.manage",
                 "system.settings",
                 "users.manage",

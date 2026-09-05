@@ -643,6 +643,26 @@ export type DashboardSummary = {
   hidden: boolean;
 };
 
+/** One instance-wide dashboard-administration row. */
+export type AdminDashboard = {
+  id: string;
+  name: string;
+  ownerUserId: string;
+  ownerUsername: string;
+  hidden: boolean;
+  shareCount: number;
+  placementCount: number;
+  /** RFC 3339. */
+  createdAt: string;
+};
+
+/** `PATCH /admin/dashboards/{id}` body. */
+export type UpdateAdminDashboardRequest = {
+  name?: string;
+  hidden?: boolean;
+  ownerUserId?: string;
+};
+
 /** The account that owns a dashboard. */
 export type DashboardOwner = {
   id: string;
@@ -1797,6 +1817,40 @@ function deleteDashboard(
   });
 }
 
+/** `GET /admin/dashboards` — requires a global `dashboards.manage` grant. */
+function getAdminDashboards(
+  runtime: ApiRuntime,
+  signal?: AbortSignal,
+): Promise<AdminDashboard[]> {
+  return authorizedRequest<AdminDashboard[]>(runtime, "/admin/dashboards", { signal });
+}
+
+/** `PATCH /admin/dashboards/{id}` — administrative metadata/ownership update. */
+function updateAdminDashboard(
+  runtime: ApiRuntime,
+  id: string,
+  data: UpdateAdminDashboardRequest,
+  signal?: AbortSignal,
+): Promise<AdminDashboard> {
+  return authorizedRequest<AdminDashboard>(
+    runtime,
+    `/admin/dashboards/${encodeURIComponent(id)}`,
+    { method: "PATCH", body: data, signal },
+  );
+}
+
+/** `DELETE /admin/dashboards/{id}` — administrative deletion. */
+function deleteAdminDashboard(
+  runtime: ApiRuntime,
+  id: string,
+  signal?: AbortSignal,
+): Promise<void> {
+  return authorizedRequest<void>(runtime, `/admin/dashboards/${encodeURIComponent(id)}`, {
+    method: "DELETE",
+    signal,
+  });
+}
+
 /** `POST /dashboards/{id}/pin` — pins only for the current user. */
 function pinDashboard(runtime: ApiRuntime, id: string, signal?: AbortSignal): Promise<void> {
   return authorizedRequest<void>(
@@ -2484,6 +2538,14 @@ export function createApiClient(options: {
       updateDashboard(runtime, id, data, signal),
     deleteDashboard: (id: string, signal?: AbortSignal) =>
       deleteDashboard(runtime, id, signal),
+    getAdminDashboards: (signal?: AbortSignal) => getAdminDashboards(runtime, signal),
+    updateAdminDashboard: (
+      id: string,
+      data: UpdateAdminDashboardRequest,
+      signal?: AbortSignal,
+    ) => updateAdminDashboard(runtime, id, data, signal),
+    deleteAdminDashboard: (id: string, signal?: AbortSignal) =>
+      deleteAdminDashboard(runtime, id, signal),
     pinDashboard: (id: string, signal?: AbortSignal) => pinDashboard(runtime, id, signal),
     unpinDashboard: (id: string, signal?: AbortSignal) =>
       unpinDashboard(runtime, id, signal),

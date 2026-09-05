@@ -19,6 +19,7 @@ import type {
   ChartType,
   ConnectorAction,
   DataPointDescriptor,
+  ResourceKindDescriptor,
   WidgetBinding,
 } from "@loom/ui-kit/lib/api";
 import {
@@ -76,6 +77,7 @@ function numberField(config: Record<string, unknown>, key: string): string {
 export function PlacementBindingEditor({
   dataPoints,
   actions,
+  resourceKinds,
   targetId,
   value,
   onChange,
@@ -84,6 +86,7 @@ export function PlacementBindingEditor({
 }: {
   dataPoints: DataPointDescriptor[];
   actions: ConnectorAction[];
+  resourceKinds: ResourceKindDescriptor[];
   /** The placement view whose descriptors may be bound. */
   targetId: string | null;
   value: WidgetBinding[];
@@ -143,10 +146,21 @@ export function PlacementBindingEditor({
           },
         },
       ]);
+      return;
+    }
+    const resourceKind = resourceKinds[0];
+    if (resourceKind !== undefined) {
+      onChange([
+        ...value,
+        { resourceKindDisplay: { resourceKind: resourceKind.kind } },
+      ]);
     }
   }
 
-  const canAdd = availableDataPoints.length > 0 || availableActions.length > 0;
+  const canAdd =
+    availableDataPoints.length > 0 ||
+    availableActions.length > 0 ||
+    resourceKinds.length > 0;
 
   return (
     <div className={cn("flex flex-col gap-3", className)}>
@@ -163,6 +177,7 @@ export function PlacementBindingEditor({
                 binding={binding}
                 dataPoints={availableDataPoints}
                 actions={availableActions}
+                resourceKinds={resourceKinds}
                 disabled={disabled}
                 idPrefix={`binding-${index}`}
                 onChange={(next) => replace(index, next)}
@@ -186,7 +201,8 @@ export function PlacementBindingEditor({
         </Button>
         {!canAdd ? (
           <p className="mt-2 text-xs text-muted-foreground">
-            This connector declares no data points and no actions, so there is nothing to bind.
+            This connector declares no data points, actions, or resource kinds, so there is
+            nothing to bind.
           </p>
         ) : null}
       </div>
@@ -198,6 +214,7 @@ function BindingRow({
   binding,
   dataPoints,
   actions,
+  resourceKinds,
   disabled,
   idPrefix,
   onChange,
@@ -206,14 +223,20 @@ function BindingRow({
   binding: WidgetBinding;
   dataPoints: DataPointDescriptor[];
   actions: ConnectorAction[];
+  resourceKinds: ResourceKindDescriptor[];
   disabled?: boolean;
   idPrefix: string;
   onChange: (next: WidgetBinding) => void;
   onRemove: () => void;
 }) {
-  const kind = "display" in binding ? "display" : "action";
+  const kind =
+    "display" in binding
+      ? "display"
+      : "action" in binding
+        ? "action"
+        : "resource";
 
-  function switchKind(next: "display" | "action") {
+  function switchKind(next: "display" | "action" | "resource") {
     if (next === kind) return;
     if (next === "display") {
       const point = dataPoints[0];
@@ -227,15 +250,22 @@ function BindingRow({
       });
       return;
     }
-    const action = actions[0];
-    if (action === undefined) return;
-    onChange({
-      action: {
-        actionId: action.id,
-        widgetType: getCompatibleActionWidgetTypes(action)[0],
-        config: {},
-      },
-    });
+    if (next === "action") {
+      const action = actions[0];
+      if (action === undefined) return;
+      onChange({
+        action: {
+          actionId: action.id,
+          widgetType: getCompatibleActionWidgetTypes(action)[0],
+          config: {},
+        },
+      });
+      return;
+    }
+    const resourceKind = resourceKinds[0];
+    if (resourceKind !== undefined) {
+      onChange({ resourceKindDisplay: { resourceKind: resourceKind.kind } });
+    }
   }
 
   return (
@@ -248,12 +278,14 @@ function BindingRow({
           options={[
             { value: "display" as const, label: "Display" },
             { value: "action" as const, label: "Action" },
+            { value: "resource" as const, label: "Resource table" },
           ]}
           // Switching kinds needs somewhere to switch to. A connector with no
           // actions cannot host an action binding, so the control is disabled
           // rather than offering a choice that would silently do nothing.
           className={
-            disabled || (dataPoints.length === 0 && actions.length === 0)
+            disabled ||
+            (dataPoints.length === 0 && actions.length === 0 && resourceKinds.length === 0)
               ? "pointer-events-none opacity-50"
               : undefined
           }
@@ -288,17 +320,28 @@ function BindingRow({
           onChange={(action) => onChange({ action })}
         />
       ) : (
-        // A resource-kind binding has nothing to edit: no widget type and no
-        // config, by design. It is shown as what it is and can be removed, so a
-        // layout that has one is still fully editable here — it simply has one
-        // row with no choices in it rather than being unrepresentable.
-        <p className="text-xs text-muted-foreground">
-          Shows the connector&rsquo;s{" "}
-          <span className="font-medium text-foreground">
-            {binding.resourceKindDisplay.resourceKind}
-          </span>{" "}
-          table, filling whatever space this tile occupies.
-        </p>
+        <Field id={`${idPrefix}-resource-kind`} label="Resource kind">
+          <Select
+            value={binding.resourceKindDisplay.resourceKind}
+            disabled={disabled || resourceKinds.length === 0}
+            onValueChange={(resourceKind) => {
+              if (resourceKind !== "") {
+                onChange({ resourceKindDisplay: { resourceKind } });
+              }
+            }}
+          >
+            <SelectTrigger id={`${idPrefix}-resource-kind`}>
+              <SelectValue placeholder="Choose a resource kind" />
+            </SelectTrigger>
+            <SelectContent>
+              {resourceKinds.map((descriptor) => (
+                <SelectItem key={descriptor.kind} value={descriptor.kind}>
+                  {descriptor.label}
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+        </Field>
       )}
     </div>
   );

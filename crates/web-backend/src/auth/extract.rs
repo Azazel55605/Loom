@@ -214,6 +214,12 @@ impl Permission for ConnectorsManage {
     const KEY: &'static str = "connectors.manage";
 }
 
+/// May administer every dashboard irrespective of its local share ACL.
+pub struct DashboardsManage;
+impl Permission for DashboardsManage {
+    const KEY: &'static str = "dashboards.manage";
+}
+
 /// May create, modify, and deactivate accounts.
 pub struct UsersManage;
 impl Permission for UsersManage {

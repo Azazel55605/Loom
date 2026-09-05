@@ -126,6 +126,7 @@ export function AddPlacementDialog({
   const [bindings, setBindings] = React.useState<WidgetBinding[]>([]);
   const [mode, setMode] = React.useState<PlacementMode>("server");
   const [targetId, setTargetId] = React.useState<string | null>(null);
+  const [resourceKind, setResourceKind] = React.useState<string | null>(null);
   const [buttonLabel, setButtonLabel] = React.useState("");
   const [buttonIcon, setButtonIcon] = React.useState<string | null>(null);
   const [action, setAction] = React.useState<PlacementAction | null>(null);
@@ -154,6 +155,23 @@ export function AddPlacementDialog({
       detail.data?.supportsSubTargets === true &&
       mode === "target",
   });
+  const resourceKinds = useQuery({
+    queryKey: [
+      "connector-resource-kinds",
+      instanceId,
+      mode === "target" ? targetId : null,
+    ],
+    queryFn: ({ signal }) =>
+      api.getResourceKinds(
+        instanceId as string,
+        mode === "target" ? targetId : null,
+        signal,
+      ),
+    enabled:
+      open &&
+      instanceId !== null &&
+      (mode === "server" || targetId !== null),
+  });
 
   React.useEffect(() => {
     if (kind !== "connector" || detail.data === undefined) return;
@@ -161,6 +179,7 @@ export function AddPlacementDialog({
     seededFor.current = detail.data.id;
     setMode("server");
     setTargetId(null);
+    setResourceKind(null);
     setBindings(detail.data.defaultLayout.bindings);
   }, [detail.data, kind]);
 
@@ -206,7 +225,15 @@ export function AddPlacementDialog({
         // the backend already applies `default_layout_for(targetId)` whenever
         // bindings are omitted, so it remains the one source of the initial
         // container layout rather than a second preview contract being added.
-        ...(mode === "server" ? { widgetBindings: bindings } : {}),
+        ...(resourceKind !== null
+          ? {
+              widgetBindings: [
+                { resourceKindDisplay: { resourceKind } } satisfies WidgetBinding,
+              ],
+            }
+          : mode === "server"
+            ? { widgetBindings: bindings }
+            : {}),
         // Optional here: a connector tile may also be clickable, which is what
         // composing the action onto an ordinary placement buys.
         ...(action === null ? {} : { placementAction: action }),
@@ -226,6 +253,7 @@ export function AddPlacementDialog({
       : instanceId !== null &&
         detail.data !== undefined &&
         (mode === "server" || targetId !== null) &&
+        (!resourceKinds.isPending) &&
         (action === null || isPlacementActionComplete(action));
 
   function reset() {
@@ -234,6 +262,7 @@ export function AddPlacementDialog({
     setBindings([]);
     setMode("server");
     setTargetId(null);
+    setResourceKind(null);
     setButtonLabel("");
     setButtonIcon(null);
     setAction(null);
@@ -287,6 +316,7 @@ export function AddPlacementDialog({
                 setBindings([]);
                 setMode("server");
                 setTargetId(null);
+                setResourceKind(null);
                 setAction(null);
                 seededFor.current = null;
                 create.reset();
@@ -359,6 +389,7 @@ export function AddPlacementDialog({
                   setInstanceId(next);
                   setMode("server");
                   setTargetId(null);
+                  setResourceKind(null);
                   setBindings([]);
                   seededFor.current = null;
                   create.reset();
@@ -400,6 +431,7 @@ export function AddPlacementDialog({
                     onChange={(next) => {
                       setMode(next);
                       setTargetId(null);
+                      setResourceKind(null);
                       create.reset();
                     }}
                   />
@@ -442,6 +474,7 @@ export function AddPlacementDialog({
                       disabled={create.isPending}
                       onSelect={(next) => {
                         setTargetId(next);
+                        setResourceKind(null);
                         create.reset();
                       }}
                     />
@@ -460,6 +493,7 @@ export function AddPlacementDialog({
                   <PlacementBindingEditor
                     dataPoints={detail.data.dataPoints}
                     actions={detail.data.actions}
+                    resourceKinds={resourceKinds.data ?? []}
                     targetId={null}
                     value={bindings}
                     onChange={setBindings}
@@ -467,6 +501,38 @@ export function AddPlacementDialog({
                   />
                 </>
               )}
+
+              {(mode === "server" || targetId !== null) &&
+              resourceKinds.data !== undefined &&
+              resourceKinds.data.length > 0 ? (
+                <div className="flex flex-col gap-3 border-t pt-4">
+                  <div>
+                    <h3 className="text-sm font-medium">Resource-kind tile</h3>
+                    <p className="text-xs text-muted-foreground">
+                      Replace the suggested widgets with one browsable resource table.
+                    </p>
+                  </div>
+                  <Select
+                    value={resourceKind ?? "default"}
+                    disabled={create.isPending}
+                    onValueChange={(next) =>
+                      setResourceKind(next === "default" ? null : next)
+                    }
+                  >
+                    <SelectTrigger aria-label="Tile contents">
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="default">Use suggested widgets</SelectItem>
+                      {resourceKinds.data.map((descriptor) => (
+                        <SelectItem key={descriptor.kind} value={descriptor.kind}>
+                          Add as {descriptor.label}
+                        </SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                </div>
+              ) : null}
             </div>
           )}
 

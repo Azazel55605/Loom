@@ -449,7 +449,7 @@ Scope reads as:
 | set | set | Exactly that one resource |
 
 Registered keys today: `connectors.view`, `connectors.control`,
-`connectors.manage`, `users.manage`,
+`connectors.manage`, `dashboards.manage`, `users.manage`,
 `groups.manage`, `system.settings`. The set is defined by the `permissions`
 table and extended only by migration.
 
@@ -509,6 +509,7 @@ The asymmetry is deliberate and load-bearing:
 | `POST /connector-instances`, `PATCH /connector-instances/{id}`, `DELETE /connector-instances/{id}` | `connectors.manage` | global |
 | `POST /connector-instances/{id}/actions/{actionId}` | `connectors.control` | `connector` / `{id}` |
 | `POST /dashboards/{id}/placements/{placementId}/click`, when the placement's action is a `connectorAction` | `connectors.control` | `connector` / the action's `connectorInstanceId` |
+| `GET /admin/dashboards`, `PATCH /admin/dashboards/{id}`, `DELETE /admin/dashboards/{id}` | `dashboards.manage` | global |
 | `GET /users`, `POST /users`, `PATCH /users/{id}`, `DELETE /users/{id}` | `users.manage` | global |
 | `GET /groups`, `POST /groups`, `PATCH /groups/{id}`, `DELETE /groups/{id}` | `groups.manage` | global |
 | `GET /permissions` | `groups.manage` | global |
@@ -2707,8 +2708,10 @@ The two systems are orthogonal:
   dashboard. Any action invoked from it still calls the existing connector
   action endpoint, which checks the viewer's own `connectors.control` grant.
 
-Every dashboard endpoint requires a valid access token, but none requires an
-RBAC permission key. A dashboard-role failure and an RBAC permission failure
+Every ordinary `/dashboards` endpoint requires a valid access token, but none
+requires an RBAC permission key. The separate `/admin/dashboards` routes require
+the global `dashboards.manage` grant and deliberately bypass local roles. A
+dashboard-role failure and an RBAC permission failure
 both use HTTP 403 because both mean "authenticated, but not authorized"; their
 authorization sources and error messages are different. A missing dashboard is
 also returned as 403 when role resolution finds no access, so callers cannot
@@ -2915,6 +2918,51 @@ placements.
 | --- | --- |
 | 204 | Dashboard and dependent rows deleted. |
 | 403 | Caller is not the owner. |
+
+### Dashboard administration
+
+These routes require a global `dashboards.manage` grant. They exist for
+instance administrators and do not consult the dashboard's owner/editor/viewer
+ACL.
+
+#### `GET /admin/dashboards`
+
+Returns every dashboard, ordered by name, including dashboards the caller does
+not own or receive through a share.
+
+```json
+[
+  {
+    "id": "be676fe1-a863-48d0-b8e9-86d83a671d6a",
+    "name": "Operations",
+    "ownerUserId": "951de814-2595-4e9e-81ab-54008767dd89",
+    "ownerUsername": "operator",
+    "hidden": false,
+    "shareCount": 2,
+    "placementCount": 6,
+    "createdAt": "2026-09-05T10:00:00Z"
+  }
+]
+```
+
+#### `PATCH /admin/dashboards/{id}`
+
+Accepts any combination of `name`, `hidden`, and `ownerUserId`. Omitted fields
+remain unchanged. The name must not be blank and `ownerUserId` must identify an
+existing user. Response 200 is the updated administration row.
+
+#### `DELETE /admin/dashboards/{id}`
+
+Returns 204 and removes the dashboard. Existing foreign-key cascades remove its
+shares, pins, placements, and placement groups.
+
+| Status | Meaning |
+| --- | --- |
+| 200 | List or update succeeded. |
+| 204 | Delete succeeded. |
+| 400 | A submitted name or owner is invalid. |
+| 403 | The caller lacks a global `dashboards.manage` grant. |
+| 404 | Dashboard not found. |
 
 ### `POST /dashboards/{id}/pin`
 

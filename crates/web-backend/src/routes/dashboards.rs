@@ -3,7 +3,8 @@
 //! Authorization in this module is the dashboard-local ACL from
 //! [`crate::dashboard_access`], never the administrative permission grants in
 //! access-token claims. The caller still needs a valid JWT to identify them,
-//! but no `dashboards.*` permission exists or should be invented.
+//! and never the separate `dashboards.manage` administrative override. Those
+//! instance-wide routes live under `/admin/dashboards`.
 
 use std::collections::{HashMap, HashSet};
 

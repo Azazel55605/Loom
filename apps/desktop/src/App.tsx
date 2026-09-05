@@ -54,6 +54,9 @@ const GroupsPanel = React.lazy(async () => ({
 const AuditLogPage = React.lazy(async () => ({
   default: (await import("@loom/ui-kit/pages/settings/AuditLogPage")).AuditLogPage,
 }));
+const DashboardsPanel = React.lazy(async () => ({
+  default: (await import("@loom/ui-kit/pages/settings/DashboardsPanel")).DashboardsPanel,
+}));
 
 type ServerState =
   | { kind: "loading" }
@@ -220,6 +223,7 @@ function DesktopRoutes({
           <Route path="account" element={<AccountPanel />} />
           <Route path="appearance" element={<AppearancePanel />} />
           <Route path="audit-log" element={<AuditLogPage />} />
+          <Route path="dashboards" element={<DashboardsPanel />} />
           <Route path="permissions" element={<DesktopPermissionsRoute />}>
             <Route index element={<DesktopPermissionsIndexRedirect />} />
             <Route path="users" element={<UsersPanel />} />

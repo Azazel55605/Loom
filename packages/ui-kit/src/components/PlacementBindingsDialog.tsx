@@ -78,6 +78,12 @@ export function PlacementBindingsDialog({
     queryFn: ({ signal }) => api.getConnectorInstance(instanceId as string, signal),
     enabled: instanceId !== null,
   });
+  const resourceKinds = useQuery({
+    queryKey: ["connector-resource-kinds", instanceId, placement?.targetId ?? null],
+    queryFn: ({ signal }) =>
+      api.getResourceKinds(instanceId as string, placement?.targetId ?? null, signal),
+    enabled: instanceId !== null,
+  });
 
   React.useEffect(() => {
     if (placement === null) return;
@@ -156,7 +162,7 @@ export function PlacementBindingsDialog({
                 </div>
               </div>
 
-              {detail.isPending ? (
+              {detail.isPending || resourceKinds.isPending ? (
                 <Skeleton className="h-32 w-full" />
               ) : detail.isError ? (
                 <Alert variant="destructive">
@@ -169,6 +175,7 @@ export function PlacementBindingsDialog({
                 <PlacementBindingEditor
                   dataPoints={detail.data.dataPoints}
                   actions={detail.data.actions}
+                  resourceKinds={resourceKinds.data ?? []}
                   targetId={placement.targetId}
                   value={bindings}
                   onChange={setBindings}

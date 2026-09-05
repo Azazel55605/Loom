@@ -39,6 +39,7 @@ where
 }
 
 pub mod account;
+pub mod admin_dashboards;
 pub mod auth;
 pub mod connector_socket;
 pub mod connectors;
@@ -121,6 +122,11 @@ pub fn routes() -> Router<AppState> {
             get(connectors::list_action_log),
         )
         .route("/audit-log", get(connectors::list_global_audit_log))
+        .route("/admin/dashboards", get(admin_dashboards::list_dashboards))
+        .route(
+            "/admin/dashboards/{id}",
+            patch(admin_dashboards::update_dashboard).delete(admin_dashboards::delete_dashboard),
+        )
         .route("/ws", get(connector_socket::connector_status_socket))
         .route(
             "/dashboards",

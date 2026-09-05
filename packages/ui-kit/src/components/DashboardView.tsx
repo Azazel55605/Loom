@@ -713,21 +713,23 @@ export function DashboardView({
               {/* Presentation, not access control. Hiding removes the dashboard
                   from everyone's sidebar; it stays reachable by id and by any
                   button tile pointing at it, which is what it is usually for. */}
-              <Button
-                type="button"
-                variant="outline"
-                size="sm"
-                aria-pressed={detail.hidden}
-                disabled={updateDashboard.isPending}
-                onClick={() => updateDashboard.mutate({ hidden: !detail.hidden })}
-              >
-                {detail.hidden ? (
-                  <Eye aria-hidden="true" />
-                ) : (
-                  <EyeOff aria-hidden="true" />
-                )}
-                {detail.hidden ? "Show in sidebar" : "Hide from sidebar"}
-              </Button>
+              {editingLayout ? (
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="sm"
+                  aria-pressed={detail.hidden}
+                  disabled={updateDashboard.isPending}
+                  onClick={() => updateDashboard.mutate({ hidden: !detail.hidden })}
+                >
+                  {detail.hidden ? (
+                    <Eye aria-hidden="true" />
+                  ) : (
+                    <EyeOff aria-hidden="true" />
+                  )}
+                  {detail.hidden ? "Show in sidebar" : "Hide from sidebar"}
+                </Button>
+              ) : null}
               <Button type="button" variant="outline" size="sm" onClick={() => setSharesOpen(true)}>
                 <Share2 aria-hidden="true" />
                 Share
