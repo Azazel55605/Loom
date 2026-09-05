@@ -6,6 +6,7 @@
     "build:core": "cargo build --release --package loom-core",
     "build:connector-docker": "cargo build --release --package loom-connector-docker",
     "build:connector-pihole": "cargo build --release --package loom-connector-pihole",
+    "build:connector-tasmota": "cargo build --release --package loom-connector-tasmota",
     "build:connector-truenas": "cargo build --release --package loom-connector-truenas",
     "build:connector-unifi-network": "cargo build --release --package loom-connector-unifi-network",
     "build:desktop": "pnpm --filter desktop tauri build",

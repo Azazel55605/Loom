@@ -1372,8 +1372,8 @@ mod tests {
         let types = body.as_array().expect("array");
         assert_eq!(
             types.len(),
-            5,
-            "the catalog should contain Debug, Docker, TrueNAS, Pi-hole, and UniFi Network"
+            6,
+            "the catalog should contain Debug, Docker, TrueNAS, Pi-hole, Tasmota, and UniFi Network"
         );
         assert!(types.iter().all(|entry| {
             entry["typeId"] != "docker-host" && entry["typeId"] != "docker-container"
@@ -1479,6 +1479,20 @@ mod tests {
             "application-password"
         );
         assert_eq!(pihole["discoverableType"], serde_json::Value::Null);
+
+        let tasmota = by_id("tasmota");
+        assert_eq!(tasmota["displayName"], "Tasmota");
+        assert_eq!(tasmota["icon"], "lucide:plug");
+        assert_eq!(
+            tasmota["configSchema"]["properties"]["password"]["x-loom-sensitive"],
+            true
+        );
+        assert_eq!(
+            tasmota["configSchema"]["required"],
+            serde_json::json!(["host"])
+        );
+        assert_eq!(tasmota["setupGuide"], serde_json::Value::Null);
+        assert_eq!(tasmota["discoverableType"], serde_json::Value::Null);
 
         let unifi = by_id("unifi-network");
         assert_eq!(unifi["displayName"], "UniFi Network");

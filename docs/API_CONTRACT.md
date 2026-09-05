@@ -978,6 +978,33 @@ the instances they may see are on `/connector-instances`, which asks only for
     },
     "discoverableType": null,
     "discoveryTargetField": null
+  },
+  {
+    "typeId": "tasmota",
+    "displayName": "Tasmota",
+    "icon": "lucide:plug",
+    "configSchema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "title": "Tasmota connection",
+      "type": "object",
+      "properties": {
+        "host": {
+          "type": "string",
+          "minLength": 1,
+          "description": "The Tasmota device hostname or IP address, optionally with an HTTP port."
+        },
+        "password": {
+          "type": "string",
+          "x-loom-sensitive": true,
+          "description": "Optional Tasmota web admin password."
+        }
+      },
+      "required": ["host"],
+      "additionalProperties": false
+    },
+    "setupGuide": null,
+    "discoverableType": null,
+    "discoveryTargetField": null
   }
 ]
 ```
@@ -998,8 +1025,9 @@ to the connector's factory, which is the only thing that knows what the keys
 mean. A configuration that satisfies the schema's shape can still be refused
 (see [`POST /connector-instances`](#post-connector-instances)).
 
-Today the array holds five: the debug fixture, the unified Docker connector,
-the TrueNAS connector, the Pi-hole connector, and the UniFi Network connector. It was an array from day one so that registering a real connector
+Today the array holds six: the debug fixture, the unified Docker connector,
+the TrueNAS connector, the Pi-hole connector, the Tasmota connector, and the
+UniFi Network connector. It was an array from day one so that registering a real connector
 type is an insertion rather than a reshape of this response, which is exactly
 what adding Docker turned out to be.
 
@@ -1016,8 +1044,30 @@ is created, not here.
 | `debug` | A fixture that contacts nothing. Permanent — see `crates/core/src/connector/debug.rs`. | How it should pretend to behave. | Parsing alone; there is nothing to reach. |
 | `docker` | One Docker daemon connection and its host-level aggregate view. Containers are addressable sub-targets of that instance. | Required `dockerHost` (`unix://` or `tcp://`) only. | A real daemon connection and ping. |
 | `pihole` | One Pi-hole v6 instance with host-level statistics and DNS blocking control. | Required `baseUrl` including `http://` or `https://`, sensitive `password`, and optional `allowInsecureCert` (default `false`); an application password is recommended. | `POST /api/auth`, retaining `session.sid` for `X-FTL-SID` authentication. |
+| `tasmota` | One Tasmota smart plug using its local HTTP command API. | Required bare `host` (optional HTTP port) and optional sensitive `password`. | One combined `Status 0` command; when a password is supplied Loom sends Tasmota's documented default web username `admin`. |
 | `truenas` | One TrueNAS host with an aggregate host view plus addressable pool and dataset sub-targets. | Required bare `host`, required API-key owner `username`, sensitive `apiKey`, and optional `allowInsecureCert` (default `false`). | A mandatory-TLS WebSocket connection and `auth.login_ex` API-key authentication. |
 | `unifi-network` | One local UniFi Network console site with host-level counts and addressable device sub-targets. | Required HTTPS `host` origin, sensitive `apiKey`, optional site UUID/internal reference/name (default `default`), and optional `allowInsecureCert` (default `false`). | `GET /proxy/network/integration/v1/sites` with `X-API-KEY`, followed by resolution of the configured site. |
+
+The Tasmota connector uses the device-local HTTP command endpoint:
+`GET http://<host>/cm?cmnd=<command>`. Its poll sends one `Status 0` command,
+which returns status groups 1 through 11 in one JSON object. Loom maps the
+first relay's power state from `Status.Power` (falling back to
+`StatusSTS.POWER`/`POWER1`), Wi-Fi signal percentage from
+`StatusSTS.Wifi.RSSI`, uptime from `StatusSTS.Uptime`, and firmware from
+`StatusFWR.Version`. Hardware with an `StatusSNS.ENERGY` object additionally
+publishes `powerWatts`, `voltageVolts`, `currentAmps`, and `energyTodayKwh`;
+non-metering hardware does not declare those optional data points, and a
+missing reading is never replaced by a misleading zero. `setPower` sends
+`Power On` or `Power Off` and controls the first output.
+
+When Tasmota's WebPassword is unset, no credentials are sent. When the optional
+sensitive `password` is configured, Loom supplies the documented default web
+username `admin` alongside it as `user`/`password` query parameters. This is
+Tasmota's own authentication convention and it is plaintext HTTP, not bearer
+or Basic authentication; use it only on a trusted network. The connector has
+no sub-targets, resource kinds, setup guide, or specialized connection test in
+this first pass. It uses `lucide:plug` because no Tasmota mark is currently
+vendored in Loom's reviewed brand-icon set.
 
 The UniFi Network connector uses the official local Integration API. Its base is
 `https://<console>/proxy/network/integration/v1`; API keys are generated in

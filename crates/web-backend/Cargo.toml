@@ -14,6 +14,7 @@ path = "src/main.rs"
 [dependencies]
 loom-connector-docker.workspace = true
 loom-connector-pihole.workspace = true
+loom-connector-tasmota.workspace = true
 loom-connector-truenas.workspace = true
 loom-connector-unifi-network.workspace = true
 loom-core.workspace = true

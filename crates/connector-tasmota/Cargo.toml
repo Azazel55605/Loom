@@ -1,0 +1,20 @@
+[package]
+name = "loom-connector-tasmota"
+description = "Loom connector for a Tasmota smart plug over its HTTP command API."
+edition.workspace = true
+license.workspace = true
+version = "0.1.0"
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+async-trait.workspace = true
+loom-core.workspace = true
+reqwest = { workspace = true, features = ["json"] }
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+
+[dev-dependencies]
+loom-connector-test-kit.workspace = true

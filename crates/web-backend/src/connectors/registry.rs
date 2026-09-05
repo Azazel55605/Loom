@@ -16,6 +16,7 @@ use std::sync::Arc;
 
 use loom_connector_docker::DockerConnector;
 use loom_connector_pihole::PiHoleConnector;
+use loom_connector_tasmota::TasmotaConnector;
 use loom_connector_truenas::TrueNasConnector;
 use loom_connector_unifi_network::UniFiNetworkConnector;
 use loom_core::connector::debug::DebugConnector;
@@ -81,7 +82,7 @@ pub type ConnectorTypeRegistry = Arc<HashMap<&'static str, ConnectorTypeRegistra
 
 /// The types compiled into this build.
 ///
-/// Five today: the debug fixture, Docker, TrueNAS, Pi-hole, and UniFi Network. Further integrations
+/// Six today: the debug fixture, Docker, TrueNAS, Pi-hole, Tasmota, and UniFi Network. Further integrations
 /// (a reverse proxy, a hypervisor) register here alongside them,
 /// and nothing else in the backend has to change when they do — that is the
 /// point of the indirection.
@@ -202,6 +203,30 @@ pub fn builtin_registry() -> ConnectorTypeRegistry {
             }),
             schema: loom_connector_pihole::config_schema(),
             setup_guide: Some(loom_connector_pihole::setup_guide()),
+            discoverable_type: None,
+            discovery_target_field: None,
+        },
+    );
+
+    // A Tasmota instance verifies the device using the combined Status 0
+    // command during construction. Its optional web password is interpreted
+    // with Tasmota's documented default `admin` web username.
+    types.insert(
+        loom_connector_tasmota::TYPE_ID,
+        ConnectorTypeRegistration {
+            type_id: loom_connector_tasmota::TYPE_ID,
+            display_name: loom_connector_tasmota::DISPLAY_NAME,
+            icon: Some(loom_connector_tasmota::ICON.to_owned()),
+            factory: |config| {
+                Box::pin(async move {
+                    TasmotaConnector::from_config_value(config)
+                        .await
+                        .map(|connector| Box::new(connector) as Box<dyn Connector>)
+                })
+            },
+            connection_test_factory: None,
+            schema: loom_connector_tasmota::config_schema(),
+            setup_guide: None,
             discoverable_type: None,
             discovery_target_field: None,
         },
@@ -387,6 +412,26 @@ mod tests {
         assert_eq!(guide.variants.len(), 1);
         assert_eq!(guide.variants[0].id, "api-key");
         assert!(registration.connection_test_factory.is_some());
+        assert!(registration.discoverable_type.is_none());
+    }
+
+    #[test]
+    fn the_tasmota_type_is_registered_with_an_optional_encrypted_password() {
+        let registry = builtin_registry();
+        let registration = registry
+            .get(loom_connector_tasmota::TYPE_ID)
+            .expect("the Tasmota type must be registered");
+
+        assert_eq!(registration.type_id, "tasmota");
+        assert_eq!(registration.display_name, "Tasmota");
+        assert_eq!(registration.icon.as_deref(), Some("lucide:plug"));
+        assert_eq!(
+            registration.schema["properties"]["password"]["x-loom-sensitive"],
+            true
+        );
+        assert_eq!(registration.schema["required"], json!(["host"]));
+        assert!(registration.setup_guide.is_none());
+        assert!(registration.connection_test_factory.is_none());
         assert!(registration.discoverable_type.is_none());
     }
 

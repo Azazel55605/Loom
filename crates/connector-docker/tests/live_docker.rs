@@ -403,12 +403,28 @@ async fn a_running_container_reports_healthy_with_every_data_point() {
     // the proxy connection open for Docker's two-cycle stats response.
     let status = connector.status().await.expect("second status poll");
 
-    // Every declared data point resolves, and with the shape its declared value
-    // type promises — this is the contract a saved dashboard layout relies on.
+    // Every available data point resolves with the shape its descriptor
+    // promises. Docker's system/df-derived disk usage is deliberately optional:
+    // a daemon or proxy may refuse it, in which case status is Degraded and the
+    // connector omits the value instead of publishing a misleading zero.
     for descriptor in connector.data_points() {
-        let value = status
-            .data_point_value_for(descriptor.target_id.as_deref(), &descriptor.id)
-            .unwrap_or_else(|| panic!("details is missing data point {}", descriptor.id));
+        let Some(value) =
+            status.data_point_value_for(descriptor.target_id.as_deref(), &descriptor.id)
+        else {
+            assert!(
+                matches!(
+                    descriptor.id.as_str(),
+                    DATA_POINT_DISK_USAGE_BYTES
+                        | DATA_POINT_IMAGE_DISK_USAGE_BYTES
+                        | "imageStorageBreakdown"
+                        | "containerStateBreakdown"
+                ),
+                "details is missing required data point {}",
+                descriptor.id
+            );
+            assert_eq!(status.health, HealthState::Degraded);
+            continue;
+        };
         match descriptor.value_type {
             loom_core::connector::DataPointValueType::Number => assert!(
                 value.is_number(),
@@ -572,19 +588,27 @@ async fn one_host_instance_reports_the_daemon_and_lists_real_sub_targets() {
     // Image storage is a share of the same `/system/df` reading, so it can
     // never exceed the total it is part of. Both come from one call; a
     // regression that read them separately would show up here as drift.
-    let bytes = |id: &str| {
-        status
-            .data_point_value_for(None, id)
-            .and_then(serde_json::Value::as_i64)
-            .unwrap_or_default()
-    };
-    let images = bytes(DATA_POINT_IMAGE_DISK_USAGE_BYTES);
-    let total = bytes(DATA_POINT_DISK_USAGE_BYTES);
-    assert!(images >= 0, "image storage cannot be negative: {images}");
-    assert!(
-        images <= total,
-        "image storage {images} cannot exceed total Docker disk usage {total}"
-    );
+    let images = status
+        .data_point_value_for(None, DATA_POINT_IMAGE_DISK_USAGE_BYTES)
+        .and_then(serde_json::Value::as_i64);
+    let total = status
+        .data_point_value_for(None, DATA_POINT_DISK_USAGE_BYTES)
+        .and_then(serde_json::Value::as_i64);
+    match (images, total) {
+        (Some(images), Some(total)) => {
+            assert!(images >= 0, "image storage cannot be negative: {images}");
+            assert!(
+                images <= total,
+                "image storage {images} cannot exceed total Docker disk usage {total}"
+            );
+        }
+        (None, None) => assert_eq!(
+            status.health,
+            HealthState::Degraded,
+            "an unavailable /system/df reading must be diagnosed"
+        ),
+        mismatch => panic!("the two /system/df byte readings drifted apart: {mismatch:?}"),
+    }
     assert!(status
         .data_point_value(DATA_POINT_TOTAL_CONTAINERS)
         .expect("container count")
@@ -601,11 +625,6 @@ async fn one_host_instance_reports_the_daemon_and_lists_real_sub_targets() {
     assert!(status
         .data_point_value(DATA_POINT_TOTAL_IMAGES)
         .is_some_and(serde_json::Value::is_number));
-    assert!(status
-        .data_point_value(DATA_POINT_DISK_USAGE_BYTES)
-        .expect("disk usage")
-        .as_i64()
-        .is_some_and(|bytes| bytes >= 0));
     assert!(status
         .data_point_value(DATA_POINT_DOCKER_VERSION)
         .expect("Docker version")
