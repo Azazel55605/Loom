@@ -7,6 +7,7 @@ import {
   Laptop,
   Loader2,
   Pencil,
+  TabletSmartphone,
   Trash2,
   UserPlus,
 } from "lucide-react";
@@ -46,6 +47,7 @@ import {
 } from "@loom/ui-kit/components/ui/form";
 import { GroupMultiSelect } from "@loom/ui-kit/components/GroupMultiSelect";
 import { Input } from "@loom/ui-kit/components/ui/input";
+import { KioskSetupWizard } from "@loom/ui-kit/components/KioskSetupWizard";
 import { SessionManager } from "@loom/ui-kit/components/SessionManager";
 import { Skeleton } from "@loom/ui-kit/components/ui/skeleton";
 import { Switch } from "@loom/ui-kit/components/ui/switch";
@@ -95,6 +97,7 @@ export function UsersPanel() {
   const knownGroups: Group[] = groups.data ?? [];
 
   const [createOpen, setCreateOpen] = React.useState(false);
+  const [kioskSetupOpen, setKioskSetupOpen] = React.useState(false);
   const [editing, setEditing] = React.useState<User | null>(null);
   const [deleting, setDeleting] = React.useState<User | null>(null);
   const [sessionsFor, setSessionsFor] = React.useState<User | null>(null);
@@ -132,10 +135,16 @@ export function UsersPanel() {
         <p className="text-sm text-muted-foreground">
           Accounts that can sign in to this instance.
         </p>
-        <Button size="sm" onClick={() => setCreateOpen(true)}>
-          <UserPlus aria-hidden="true" />
-          Add user
-        </Button>
+        <div className="flex flex-wrap justify-end gap-2">
+          <Button size="sm" variant="outline" onClick={() => setKioskSetupOpen(true)}>
+            <TabletSmartphone aria-hidden="true" />
+            Add kiosk user
+          </Button>
+          <Button size="sm" onClick={() => setCreateOpen(true)}>
+            <UserPlus aria-hidden="true" />
+            Add user
+          </Button>
+        </div>
       </div>
 
       {groupsUnavailable && (
@@ -188,15 +197,18 @@ export function UsersPanel() {
                 return (
                   <TableRow key={entry.id}>
                     <TableCell className="pl-3 font-medium">
-                      {entry.username}
-                      {isSelf && (
-                        <span className="ml-2 text-xs text-muted-foreground">(you)</span>
-                      )}
+                      <div className="flex flex-wrap items-center gap-2">
+                        <span>{entry.username}</span>
+                        {isSelf && <span className="text-xs text-muted-foreground">(you)</span>}
+                      </div>
                     </TableCell>
                     <TableCell>
-                      <Badge variant={entry.isActive ? "healthy" : "secondary"}>
-                        {entry.isActive ? "Active" : "Inactive"}
-                      </Badge>
+                      <div className="flex flex-wrap gap-1">
+                        <Badge variant={entry.isActive ? "healthy" : "secondary"}>
+                          {entry.isActive ? "Active" : "Inactive"}
+                        </Badge>
+                        {entry.isKiosk && <Badge variant="outline">Kiosk</Badge>}
+                      </div>
                     </TableCell>
                     <TableCell>
                       <GroupBadges groupIds={entry.groupIds} groups={knownGroups} />
@@ -251,6 +263,14 @@ export function UsersPanel() {
         groups={knownGroups}
         groupsUnavailable={groupsUnavailable}
         onCreated={invalidate}
+      />
+
+      <KioskSetupWizard
+        open={kioskSetupOpen}
+        onOpenChange={setKioskSetupOpen}
+        groups={knownGroups}
+        groupsUnavailable={groupsUnavailable}
+        onCompleted={invalidate}
       />
 
       <EditUserDialog
@@ -529,6 +549,7 @@ function CreateUserDialog({
 
 const editSchema = z.object({
   isActive: z.boolean(),
+  isKiosk: z.boolean(),
   groupIds: z.array(z.string()),
 });
 
@@ -554,7 +575,7 @@ function EditUserDialog({
 
   const form = useForm<EditValues>({
     resolver: zodResolver(editSchema),
-    defaultValues: { isActive: true, groupIds: [] },
+    defaultValues: { isActive: true, isKiosk: false, groupIds: [] },
   });
 
   // Refill whenever a different user is opened. The dialog is one instance
@@ -562,7 +583,7 @@ function EditUserDialog({
   // state for a frame — and worse, submit it if the user was quick.
   React.useEffect(() => {
     if (user !== null) {
-      form.reset({ isActive: user.isActive, groupIds: user.groupIds });
+      form.reset({ isActive: user.isActive, isKiosk: user.isKiosk, groupIds: user.groupIds });
       setFailure(null);
     }
   }, [user, form]);
@@ -573,6 +594,7 @@ function EditUserDialog({
     try {
       await api.updateUser(user.id, {
         isActive: values.isActive,
+        isKiosk: values.isKiosk,
         groupIds: values.groupIds,
       });
     } catch (error: unknown) {
@@ -648,6 +670,28 @@ function EditUserDialog({
                     />
                   </FormControl>
                   <FormMessage />
+                </FormItem>
+              )}
+            />
+
+            <FormField
+              control={form.control}
+              name="isKiosk"
+              render={({ field }) => (
+                <FormItem className="flex items-center justify-between gap-4 rounded-md border p-3">
+                  <div className="space-y-0.5">
+                    <FormLabel>Kiosk account</FormLabel>
+                    <FormDescription>
+                      Marks this account as eligible for mobile kiosk presentation mode.
+                    </FormDescription>
+                  </div>
+                  <FormControl>
+                    <Switch
+                      checked={field.value}
+                      onCheckedChange={field.onChange}
+                      aria-label="Kiosk account"
+                    />
+                  </FormControl>
                 </FormItem>
               )}
             />

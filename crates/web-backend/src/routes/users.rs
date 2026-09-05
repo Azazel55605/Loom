@@ -52,6 +52,7 @@ pub struct UserResponse {
     id: String,
     username: String,
     is_active: bool,
+    is_kiosk: bool,
     created_at: String,
     /// Ids of every group the user belongs to.
     group_ids: Vec<String>,
@@ -66,6 +67,9 @@ pub struct CreateUserRequest {
     /// a valid account that can sign in and do nothing.
     #[serde(default)]
     group_ids: Vec<String>,
+    /// Presentation-only marker for accounts intended for a kiosk device.
+    #[serde(default)]
+    is_kiosk: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -73,6 +77,8 @@ pub struct CreateUserRequest {
 pub struct UpdateUserRequest {
     /// Absent leaves the flag alone; present sets it.
     is_active: Option<bool>,
+    /// Absent leaves the marker alone; present sets it.
+    is_kiosk: Option<bool>,
     /// Absent leaves membership alone; present **replaces** it wholesale.
     ///
     /// Replace rather than add/remove deltas: a caller sends the membership it
@@ -86,6 +92,7 @@ struct UserRow {
     id: String,
     username: String,
     is_active: bool,
+    is_kiosk: bool,
     created_at: String,
 }
 
@@ -256,7 +263,7 @@ pub async fn list_users(
     State(state): State<AppState>,
 ) -> Response {
     let users = sqlx::query_as::<_, UserRow>(
-        "SELECT id, username, is_active, created_at FROM users ORDER BY username",
+        "SELECT id, username, is_active, is_kiosk, created_at FROM users ORDER BY username",
     )
     .fetch_all(&state.pool)
     .await;
@@ -289,6 +296,7 @@ pub async fn list_users(
             id: user.id,
             username: user.username,
             is_active: user.is_active,
+            is_kiosk: user.is_kiosk,
             created_at: user.created_at,
         })
         .collect();
@@ -352,12 +360,13 @@ pub async fn create_user(
     let now = Utc::now().to_rfc3339();
 
     if let Err(error) = sqlx::query(
-        "INSERT INTO users (id, username, password_hash, is_active, created_at) \
-         VALUES (?, ?, ?, TRUE, ?)",
+        "INSERT INTO users (id, username, password_hash, is_active, is_kiosk, created_at) \
+         VALUES (?, ?, ?, TRUE, ?, ?)",
     )
     .bind(&user_id)
     .bind(username)
     .bind(&password_hash)
+    .bind(request.is_kiosk)
     .bind(&now)
     .execute(&mut *tx)
     .await
@@ -381,6 +390,7 @@ pub async fn create_user(
             id: user_id,
             username: username.to_owned(),
             is_active: true,
+            is_kiosk: request.is_kiosk,
             created_at: now,
             group_ids: request.group_ids,
         }),
@@ -410,7 +420,7 @@ pub async fn update_user(
     };
 
     let existing = sqlx::query_as::<_, UserRow>(
-        "SELECT id, username, is_active, created_at FROM users WHERE id = ?",
+        "SELECT id, username, is_active, is_kiosk, created_at FROM users WHERE id = ?",
     )
     .bind(&id)
     .fetch_optional(&mut *tx)
@@ -432,6 +442,17 @@ pub async fn update_user(
             .await
         {
             return internal_error("updating the user", error);
+        }
+    }
+
+    if let Some(is_kiosk) = request.is_kiosk {
+        if let Err(error) = sqlx::query("UPDATE users SET is_kiosk = ? WHERE id = ?")
+            .bind(is_kiosk)
+            .bind(&id)
+            .execute(&mut *tx)
+            .await
+        {
+            return internal_error("updating the kiosk marker", error);
         }
     }
 
@@ -467,6 +488,7 @@ pub async fn update_user(
         id,
         username: existing.username,
         is_active: request.is_active.unwrap_or(existing.is_active),
+        is_kiosk: request.is_kiosk.unwrap_or(existing.is_kiosk),
         created_at: existing.created_at,
         group_ids,
     })

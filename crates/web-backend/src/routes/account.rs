@@ -69,6 +69,8 @@ const MAX_DECODED_BYTES: u64 = 64 * 1024 * 1024;
 pub struct AccountResponse {
     id: String,
     username: String,
+    /// Informational marker used by clients to offer kiosk presentation mode.
+    is_kiosk: bool,
     display_name: Option<String>,
     /// Relative URL, e.g. `/avatars/{uuid}.png`, or null when none is set.
     ///
@@ -120,6 +122,7 @@ pub struct AvatarResponse {
 struct AccountRow {
     id: String,
     username: String,
+    is_kiosk: bool,
     display_name: Option<String>,
     avatar_path: Option<String>,
     created_at: String,
@@ -618,7 +621,7 @@ async fn load_account(
     user_id: &str,
 ) -> Result<Option<AccountResponse>, sqlx::Error> {
     let row = sqlx::query_as::<_, AccountRow>(
-        "SELECT id, username, display_name, avatar_path, created_at FROM users WHERE id = ?",
+        "SELECT id, username, is_kiosk, display_name, avatar_path, created_at FROM users WHERE id = ?",
     )
     .bind(user_id)
     .fetch_optional(&mut *conn)
@@ -638,6 +641,7 @@ async fn load_account(
     Ok(Some(AccountResponse {
         id: row.id,
         username: row.username,
+        is_kiosk: row.is_kiosk,
         display_name: row.display_name,
         avatar_url: row.avatar_path.map(|path| format!("/{path}")),
         created_at: row.created_at,

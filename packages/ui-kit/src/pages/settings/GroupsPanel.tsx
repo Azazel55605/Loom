@@ -316,7 +316,7 @@ type GroupValues = z.infer<typeof groupSchema>;
  * exactly as `POST` does. Two dialogs would be one form duplicated, and the
  * copy that gets edited less is the one that drifts.
  */
-function GroupDialog({
+export function GroupDialog({
   open,
   group,
   catalog,
@@ -328,7 +328,7 @@ function GroupDialog({
   group: Group | null;
   catalog: React.ComponentProps<typeof PermissionGrantBuilder>["catalog"];
   onOpenChange: (open: boolean) => void;
-  onSaved: () => Promise<void>;
+  onSaved: (group: Group) => Promise<void>;
 }) {
   const api = useApiClient();
   const [failure, setFailure] = React.useState<string | null>(null);
@@ -351,16 +351,17 @@ function GroupDialog({
   async function onSubmit(values: GroupValues) {
     setFailure(null);
     const description = values.description.trim();
+    let saved: Group;
 
     try {
       if (group === null) {
-        await api.createGroup({
+        saved = await api.createGroup({
           name: values.name.trim(),
           description: description === "" ? null : description,
           permissions: values.permissions,
         });
       } else {
-        await api.updateGroup(group.id, {
+        saved = await api.updateGroup(group.id, {
           name: values.name.trim(),
           description: description === "" ? null : description,
           permissions: values.permissions,
@@ -372,7 +373,7 @@ function GroupDialog({
     }
 
     toast.success(group === null ? `Created ${values.name.trim()}.` : `Updated ${values.name.trim()}.`);
-    await onSaved();
+    await onSaved(saved);
     onOpenChange(false);
   }
 

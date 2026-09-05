@@ -5800,6 +5800,7 @@ mod tests {
         assert_eq!(users.len(), 1);
         assert_eq!(users[0]["username"], "admin");
         assert_eq!(users[0]["isActive"], true);
+        assert_eq!(users[0]["isKiosk"], false);
         assert_eq!(users[0]["groupIds"].as_array().expect("groups").len(), 1);
 
         // The serialized text must not contain a hash anywhere, under any key.
@@ -5825,6 +5826,74 @@ mod tests {
 
         assert_eq!(status, StatusCode::BAD_REQUEST);
         assert!(body["error"].as_str().expect("error").contains("8"));
+    }
+
+    #[tokio::test]
+    async fn kiosk_marker_round_trips_through_user_admin_and_account() {
+        let app = test_app().await;
+        let (admin, _) = setup_and_login(&app.router).await;
+
+        let (status, created) = send(
+            &app.router,
+            post_json_auth(
+                "/users",
+                &admin,
+                serde_json::json!({
+                    "username": "wall-display",
+                    "password": "a-good-password",
+                    "isKiosk": true,
+                }),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED, "{created:#}");
+        assert_eq!(created["isKiosk"], true);
+        let user_id = created["id"].as_str().expect("id");
+
+        let (status, updated) = send(
+            &app.router,
+            patch_json_auth(
+                &format!("/users/{user_id}"),
+                &admin,
+                serde_json::json!({ "isKiosk": false }),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{updated:#}");
+        assert_eq!(updated["isKiosk"], false);
+
+        let (status, updated) = send(
+            &app.router,
+            patch_json_auth(
+                &format!("/users/{user_id}"),
+                &admin,
+                serde_json::json!({ "isKiosk": true }),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{updated:#}");
+        assert_eq!(updated["isKiosk"], true);
+
+        let (status, tokens) = send(
+            &app.router,
+            post_json(
+                "/auth/login",
+                serde_json::json!({
+                    "username": "wall-display",
+                    "password": "a-good-password",
+                }),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{tokens:#}");
+        let access_token = tokens["accessToken"].as_str().expect("access token");
+        let (status, account) = send(
+            &app.router,
+            get_with_auth("/account", &bearer(access_token)),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{account:#}");
+        assert_eq!(account["isKiosk"], true);
     }
 
     #[tokio::test]

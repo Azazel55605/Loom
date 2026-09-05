@@ -3523,6 +3523,7 @@ the tables below.
 {
   "id": "9d1f8c2e-4b7a-4c3d-9e21-0a5b6c7d8e9f",
   "username": "admin",
+  "isKiosk": false,
   "displayName": "The Admin",
   "avatarUrl": "/avatars/2f1c8b90-5d3e-4a71-9c02-6b8d4e1f7a35.png",
   "createdAt": "2026-08-19T17:04:11.882401553+00:00",
@@ -3532,6 +3533,8 @@ the tables below.
 }
 ```
 
+`isKiosk` is the informational marker administrators use to designate an
+account for mobile kiosk presentation. It grants no permissions by itself.
 `displayName` and `avatarUrl` are `null` when unset. As everywhere else in this
 API, **there is no password field**.
 
@@ -3707,6 +3710,7 @@ Requires `users.manage`.
     "id": "9d1f8c2e-4b7a-4c3d-9e21-0a5b6c7d8e9f",
     "username": "admin",
     "isActive": true,
+    "isKiosk": false,
     "createdAt": "2026-08-19T17:04:11.882401553+00:00",
     "groupIds": ["00000000-0000-4000-8000-000000000001"]
   }
@@ -3725,14 +3729,17 @@ Requires `users.manage`.
 {
   "username": "housemate",
   "password": "a-good-password",
+  "isKiosk": false,
   "groupIds": ["<group id>"]
 }
 ```
 
 `groupIds` may be omitted or empty — an account with no groups can sign in and
-do nothing, which is a valid state. The password floor is **8 characters**, the
-same constant `POST /setup` uses, so the rule cannot drift between the two ways
-an account is created.
+do nothing, which is a valid state. `isKiosk` is optional and defaults to
+`false`; it distinguishes the account in clients but does not alter permission
+enforcement. The password floor is **8 characters**, the same constant
+`POST /setup` uses, so the rule cannot drift between the two ways an account is
+created.
 
 **Response 201** — the created user, in the `GET /users` shape.
 
@@ -3744,16 +3751,17 @@ an account is created.
 
 ### `PATCH /users/{id}`
 
-Requires `users.manage`. Both fields are optional; an absent field is left
+Requires `users.manage`. All fields are optional; an absent field is left
 alone.
 
 ```json
-{ "isActive": false, "groupIds": ["<group id>"] }
+{ "isActive": false, "isKiosk": true, "groupIds": ["<group id>"] }
 ```
 
 `groupIds` **replaces** membership wholesale rather than applying a delta: the
 caller states the membership it wants and gets exactly that, with no dependence
-on what it believed the previous state to be.
+on what it believed the previous state to be. `isKiosk` remains informational;
+turning it on never grants access that the resulting group memberships do not.
 
 **Response 200** — the updated user.
 

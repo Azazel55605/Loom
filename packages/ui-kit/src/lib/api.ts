@@ -2084,6 +2084,8 @@ export type User = {
   id: string;
   username: string;
   isActive: boolean;
+  /** Informational marker for accounts intended for kiosk presentation mode. */
+  isKiosk: boolean;
   /** RFC 3339. */
   createdAt: string;
   /** The groups this user belongs to. Membership is stated wholesale, never as
@@ -2110,6 +2112,7 @@ export type CreateUserRequest = {
   username: string;
   password: string;
   groupIds?: string[];
+  isKiosk?: boolean;
 };
 
 /**
@@ -2121,6 +2124,7 @@ export type CreateUserRequest = {
  */
 export type UpdateUserRequest = {
   isActive?: boolean;
+  isKiosk?: boolean;
   groupIds?: string[];
 };
 
@@ -2319,6 +2323,8 @@ export type AccountGroup = {
 export type Account = {
   id: string;
   username: string;
+  /** Whether clients may offer kiosk presentation mode for this account. */
+  isKiosk: boolean;
   displayName: string | null;
   /**
    * A **relative** path like `/avatars/{uuid}.png`, or null when unset.
