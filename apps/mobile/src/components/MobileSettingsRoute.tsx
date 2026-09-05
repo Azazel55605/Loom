@@ -5,6 +5,7 @@ import {
   mobileInvalidCertificateWebSocketNote,
 } from "@/adapters/mobileHttpTransport";
 import { MobileAppShell } from "@/components/MobileAppShell";
+import { MobileKioskSettingsCard } from "@/components/MobileKioskSettingsCard";
 import {
   ConnectToServer,
   type ServerConnection,
@@ -39,6 +40,7 @@ export function MobileSettingsRoute({
       {section === "general" ? (
         <div className="flex flex-col gap-4">
           <GeneralPanel />
+          <MobileKioskSettingsCard />
           <Card>
             <CardHeader>
               <CardTitle className="text-lg">Server</CardTitle>

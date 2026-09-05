@@ -24,6 +24,7 @@ import {
 import { Input } from "@loom/ui-kit/components/ui/input";
 import { useAuth } from "@loom/ui-kit/lib/auth-context";
 import { describeConnectorError } from "@loom/ui-kit/lib/connector-error";
+import { cn } from "@loom/ui-kit/lib/utils";
 
 /**
  * The sign-in screen.
@@ -40,7 +41,24 @@ const loginSchema = z.object({
 
 type LoginValues = z.infer<typeof loginSchema>;
 
-export function LoginForm({ onSuccess }: { onSuccess: () => void }) {
+export function LoginForm({
+  onSuccess,
+  onSubmitCredentials,
+  embedded = false,
+  title = "Sign in to Loom",
+  description = "Sign in with the administrator account created during setup.",
+  submitLabel = "Sign in",
+  className,
+}: {
+  onSuccess: () => void;
+  /** Authenticate without assuming the result should replace the active session. */
+  onSubmitCredentials?: (username: string, password: string) => Promise<void>;
+  embedded?: boolean;
+  title?: string;
+  description?: string;
+  submitLabel?: string;
+  className?: string;
+}) {
   const { signIn } = useAuth();
   const [submitError, setSubmitError] = React.useState<string | null>(null);
 
@@ -52,7 +70,7 @@ export function LoginForm({ onSuccess }: { onSuccess: () => void }) {
   async function onSubmit(values: LoginValues) {
     setSubmitError(null);
     try {
-      await signIn(values.username, values.password);
+      await (onSubmitCredentials ?? signIn)(values.username, values.password);
       onSuccess();
     } catch (error: unknown) {
       setSubmitError(describeConnectorError(error));
@@ -60,13 +78,16 @@ export function LoginForm({ onSuccess }: { onSuccess: () => void }) {
   }
 
   return (
-    <div className="flex min-h-screen items-center justify-center bg-background px-4">
+    <div
+      className={cn(
+        !embedded && "flex min-h-screen items-center justify-center bg-background px-4",
+        className,
+      )}
+    >
       <Card className="surface-elevated w-full max-w-sm">
         <CardHeader>
-          <CardTitle>Sign in to Loom</CardTitle>
-          <CardDescription>
-            Sign in with the administrator account created during setup.
-          </CardDescription>
+          <CardTitle>{title}</CardTitle>
+          <CardDescription>{description}</CardDescription>
         </CardHeader>
 
         <CardContent>
@@ -120,7 +141,7 @@ export function LoginForm({ onSuccess }: { onSuccess: () => void }) {
                 {form.formState.isSubmitting && (
                   <Loader2 className="animate-spin" aria-hidden="true" />
                 )}
-                Sign in
+                {submitLabel}
               </Button>
             </form>
           </Form>

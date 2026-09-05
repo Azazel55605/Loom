@@ -6,6 +6,7 @@ import {
   SessionExpiredError,
   type BaseUrlProvider,
   type HttpTransport,
+  type Account,
   type PermissionGrant,
 } from "@loom/ui-kit/lib/api";
 import { ApiClientProvider } from "@loom/ui-kit/lib/api-context";
@@ -23,11 +24,24 @@ export type CurrentUser = {
   permissions: PermissionGrant[];
 };
 
+/** A verified login that has not replaced the active persisted session yet. */
+export type AuthenticationCandidate = {
+  account: Account;
+  user: CurrentUser;
+  tokens: StoredTokens;
+};
+
 type AuthContextValue = {
   isAuthenticated: boolean;
   user: CurrentUser | null;
   isRestoring: boolean;
   signIn: (username: string, password: string) => Promise<void>;
+  authenticateWithoutPersisting: (
+    username: string,
+    password: string,
+  ) => Promise<AuthenticationCandidate>;
+  activateAuthentication: (candidate: AuthenticationCandidate) => Promise<void>;
+  discardAuthentication: (candidate: AuthenticationCandidate) => Promise<void>;
   signOut: () => Promise<void>;
   refresh: () => Promise<void>;
 };
@@ -160,6 +174,61 @@ export function AuthProvider({
     [client],
   );
 
+  const authenticateWithoutPersisting = React.useCallback(
+    async (username: string, password: string): Promise<AuthenticationCandidate> => {
+      const response = await client.login(username, password);
+      const tokens: StoredTokens = {
+        accessToken: response.accessToken,
+        refreshToken: response.refreshToken,
+        expiresAt: response.expiresAt,
+      };
+      let transientTokens: StoredTokens | null = tokens;
+      const candidateClient = createApiClient({
+        baseUrlProvider,
+        httpTransport,
+        tokenStorage: {
+          getTokens: async () => transientTokens,
+          setTokens: async (next) => {
+            transientTokens = next;
+          },
+          clearTokens: async () => {
+            transientTokens = null;
+          },
+        },
+      });
+      await candidateClient.initialize();
+      const [account, current] = await Promise.all([
+        candidateClient.getAccount(),
+        candidateClient.getSession(),
+      ]);
+      return {
+        account,
+        tokens,
+        user: {
+          id: current.userId,
+          username: current.username,
+          permissions: current.permissions,
+        },
+      };
+    },
+    [baseUrlProvider, client, httpTransport],
+  );
+
+  const activateAuthentication = React.useCallback(
+    async (candidate: AuthenticationCandidate) => {
+      await client.tokenStore.setTokens(candidate.tokens);
+      setUser(candidate.user);
+    },
+    [client],
+  );
+
+  const discardAuthentication = React.useCallback(
+    async (candidate: AuthenticationCandidate) => {
+      await client.logout(candidate.tokens.refreshToken).catch(() => undefined);
+    },
+    [client],
+  );
+
   const signOut = React.useCallback(async () => {
     const current = client.tokenStore.getSnapshot();
     await client.tokenStore.clear();
@@ -179,10 +248,23 @@ export function AuthProvider({
       user,
       isRestoring,
       signIn,
+      authenticateWithoutPersisting,
+      activateAuthentication,
+      discardAuthentication,
       signOut,
       refresh,
     }),
-    [session, user, isRestoring, signIn, signOut, refresh],
+    [
+      session,
+      user,
+      isRestoring,
+      signIn,
+      authenticateWithoutPersisting,
+      activateAuthentication,
+      discardAuthentication,
+      signOut,
+      refresh,
+    ],
   );
 
   if (bootstrap.phase === "idle" || bootstrap.phase === "checking") {

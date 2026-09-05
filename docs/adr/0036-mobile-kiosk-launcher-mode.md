@@ -29,17 +29,37 @@ dashboards with the user as a viewer. Viewer access controls dashboard layout;
 the separate connector permissions in the chosen group continue to control
 whether an action tile may act.
 
-The following mobile behavior is planned in later phases and is not introduced
-by this decision's backend/admin implementation:
+Mobile stores `kioskModeEnabled` and the expected kiosk user id in its existing
+device-local Tauri Store. The toggle is offered only when `GET /account`
+reports `isKiosk: true`; it is never synchronized and does not exist in Web or
+Desktop. While enabled, Mobile bypasses `AppShell`, fetches the user's ordinary
+dashboard list, and renders one full-screen `DashboardView` at a time. A simple
+horizontal touch-start/touch-end threshold moves through that server-provided
+order, with dot controls showing and selecting the current position. Dashboard
+widgets remain ordinary interactive widgets.
 
-- a client-side “Enable Kiosk Mode” presentation toggle, offered only when
-  `GET /account` reports `isKiosk: true`;
-- swipe navigation between dashboards assigned to the kiosk user;
-- an idle screensaver suitable for a continuously mounted display.
+An idle screensaver suitable for a continuously mounted display remains planned
+for a later phase.
 
 Exiting kiosk presentation is an authentication boundary, not a UI affordance.
 It requires signing in as a different, non-kiosk account. A physically unlocked
 kiosk must not be able to dismiss one screen and inherit broader controls.
+
+The exit entry point is a three-second hold in the designated screen corner.
+The resulting dialog authenticates credentials into an isolated in-memory token
+store and resolves both `/auth/session` and `/account` before changing the
+active session. Credentials for the current kiosk identity—or another kiosk
+identity—are rejected. Their newly issued refresh token is revoked, their
+tokens are never persisted, and the original kiosk session remains untouched.
+Only a verified different, non-kiosk identity clears the local presentation
+flag and replaces the stored Stronghold session.
+
+Session recovery is deliberately a different screen and rule. If Stronghold's
+stored kiosk session cannot be refreshed after restart, Mobile presents a
+minimal kiosk re-entry screen rather than the normal login page or exit dialog.
+It accepts only the exact kiosk user id saved when mode was enabled and confirms
+that `/account` still marks it as kiosk. A different identity is discarded and
+cannot turn recovery into an exit path.
 
 Credentials use the same mobile Stronghold storage as every other session.
 There is no kiosk-specific token or storage path. Kiosk sessions are ordinary
@@ -74,5 +94,6 @@ Kiosk users can use every existing permission, dashboard, audit, and session
 mechanism without special cases. Administrators must deliberately choose an
 appropriately narrow group. The flag alone is not protective, and client-side
 presentation gating is not authorization; the backend remains the enforcement
-point. Mobile kiosk presentation, navigation, screensaver, and authenticated
-exit remain follow-up work.
+point. Presentation, swipe navigation, authenticated exit, and same-identity
+recovery are implemented in Mobile; only the idle screensaver remains follow-up
+work.

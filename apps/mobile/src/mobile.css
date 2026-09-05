@@ -74,6 +74,64 @@
   overflow-y: auto;
 }
 
+/* Kiosk presentation is its own safe-area owner because it deliberately skips
+   AppShell and therefore has no sticky header to reserve the system bars. */
+.mobile-platform .mobile-kiosk-shell {
+  position: fixed;
+  top: var(--mobile-safe-area-top);
+  right: var(--mobile-safe-area-right);
+  bottom: var(--mobile-safe-area-bottom);
+  left: var(--mobile-safe-area-left);
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  background: hsl(var(--background));
+}
+
+.mobile-platform .mobile-kiosk-dots {
+  position: fixed;
+  bottom: calc(var(--mobile-safe-area-bottom) + 0.5rem);
+  left: 50%;
+  display: flex;
+  max-width: calc(100vw - 7rem);
+  translate: -50% 0;
+  align-items: center;
+  overflow-x: auto;
+  border: 1px solid hsl(var(--border));
+  border-radius: 9999px;
+  padding: 0.125rem 0.25rem;
+}
+
+.mobile-platform .mobile-kiosk-dot-hit {
+  min-width: 2.75rem;
+  min-height: 2.75rem;
+  padding: 0;
+}
+
+.mobile-platform .mobile-kiosk-dot {
+  width: 0.5rem;
+  height: 0.5rem;
+  border-radius: 9999px;
+  background: hsl(var(--muted-foreground) / 0.45);
+}
+
+.mobile-platform .mobile-kiosk-exit-hold {
+  position: fixed;
+  right: calc(var(--mobile-safe-area-right) + 0.5rem);
+  bottom: calc(var(--mobile-safe-area-bottom) + 0.5rem);
+  min-width: 2.75rem;
+  min-height: 2.75rem;
+  opacity: 0.35;
+  touch-action: none;
+  user-select: none;
+  -webkit-touch-callout: none;
+}
+
+.mobile-platform .mobile-kiosk-recovery {
+  background:
+    radial-gradient(circle at 15% 20%, hsl(var(--accent) / 0.14), transparent 38%),
+    hsl(var(--muted) / 0.35);
+}
+
 /* A phone turned sideways is wide enough to cross Tailwind's desktop `md`
    breakpoint but does not have the vertical room for desktop chrome. Tablets
    remain unchanged because their landscape viewport is taller than 600px. */

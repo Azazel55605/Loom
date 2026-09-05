@@ -7,6 +7,7 @@ import {
   Route,
   Routes,
   useLocation,
+  useNavigate,
 } from "react-router-dom";
 
 import { mobileBaseUrlProvider } from "@/adapters/mobileBaseUrlProvider";
@@ -21,6 +22,10 @@ import {
   MobilePermissionsRoute,
 } from "@/components/MobilePermissionsRoute";
 import { MobileSettingsRoute } from "@/components/MobileSettingsRoute";
+import { MobileKioskModeProvider } from "@/components/MobileKioskModeProvider";
+import { useMobileKioskMode } from "@/components/mobileKioskMode";
+import { MobileKioskShell } from "@/components/MobileKioskShell";
+import { KioskRecoveryScreen } from "@/components/KioskRecoveryScreen";
 import { ConnectorsPage } from "@/pages/ConnectorsPage";
 import {
   DashboardDetailPage,
@@ -162,10 +167,12 @@ export default function App({ queryClient }: { queryClient: QueryClient }) {
         webSocketTransport={mobileWebSocketTransport}
       >
         <React.Suspense fallback={null}>
-          <MobileRoutes
-            connection={server.connection}
-            onServerChanged={changeServer}
-          />
+          <MobileKioskModeProvider>
+            <MobileRoutes
+              connection={server.connection}
+              onServerChanged={changeServer}
+            />
+          </MobileKioskModeProvider>
         </React.Suspense>
         <Toaster />
       </AuthProvider>
@@ -182,7 +189,8 @@ function MobileRoutes({
 }) {
   return (
     <RequireSetup>
-      <Routes>
+      <MobileExperience>
+        <Routes>
         <Route path="/setup" element={<SetupPage />} />
         <Route path="/login" element={<LoginPage />} />
         <Route path="/" element={<Navigate to="/dashboards" replace />} />
@@ -236,9 +244,23 @@ function MobileRoutes({
           <Route path="*" element={<Navigate to="general" replace />} />
         </Route>
         <Route path="*" element={<Navigate to="/dashboards" replace />} />
-      </Routes>
+        </Routes>
+      </MobileExperience>
     </RequireSetup>
   );
+}
+
+function MobileExperience({ children }: { children: React.ReactNode }) {
+  const kiosk = useMobileKioskMode();
+  const { isAuthenticated, isRestoring, user } = useAuth();
+  const navigate = useNavigate();
+
+  if (kiosk.isLoading || kiosk.isTransitioning || isRestoring) return null;
+  if (!kiosk.enabled) return <>{children}</>;
+  if (!isAuthenticated || user === null || user.id !== kiosk.accountId) {
+    return <KioskRecoveryScreen expectedAccountId={kiosk.accountId} />;
+  }
+  return <MobileKioskShell onExited={() => navigate("/dashboards", { replace: true })} />;
 }
 
 function RequireSetup({ children }: { children: React.ReactNode }) {
