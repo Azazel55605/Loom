@@ -101,6 +101,20 @@ export function usePlacementClick({
 const INTERACTIVE_SELECTOR =
   'a, button, input, select, textarea, [role="button"], [role="checkbox"], [role="switch"], [role="slider"], [role="radiogroup"], [contenteditable="true"]';
 
+function fromInsideAControl(
+  target: EventTarget | null,
+  surface: HTMLDivElement,
+): boolean {
+  if (!(target instanceof Element)) return false;
+  const control = target.closest(INTERACTIVE_SELECTOR);
+  // The surface itself deliberately has role="button". `closest()` therefore
+  // always reaches it from ordinary card content; counting that as a nested
+  // control makes every tile click (and keyboard activation on the surface)
+  // a no-op. Only a distinct interactive element inside the surface owns the
+  // event and should suppress the placement action.
+  return control !== null && control !== surface && surface.contains(control);
+}
+
 /**
  * The interactive shell around a clickable tile.
  *
@@ -146,9 +160,6 @@ export function PlacementClickSurface({
 }) {
   if (!active) return <>{children}</>;
 
-  const fromInsideAControl = (target: EventTarget | null): boolean =>
-    target instanceof Element && target.closest(INTERACTIVE_SELECTOR) !== null;
-
   return (
     <div
       role="button"
@@ -156,12 +167,12 @@ export function PlacementClickSurface({
       aria-label={label}
       aria-busy={pending || undefined}
       onClick={(event) => {
-        if (fromInsideAControl(event.target)) return;
+        if (fromInsideAControl(event.target, event.currentTarget)) return;
         onActivate();
       }}
       onKeyDown={(event) => {
         if (event.key !== "Enter" && event.key !== " ") return;
-        if (fromInsideAControl(event.target)) return;
+        if (fromInsideAControl(event.target, event.currentTarget)) return;
         // Space scrolls the page by default, which on a control that is a
         // button in all but tag name would be the wrong answer entirely.
         event.preventDefault();
