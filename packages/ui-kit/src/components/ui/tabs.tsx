@@ -14,7 +14,7 @@ const TabsList = React.forwardRef<
     className={cn(
       // `surface-panel` rather than `bg-muted`: identical while blur is off or
       // standard, and frosted at the "extra" level without a second class.
-      "surface-panel inline-flex h-9 items-center justify-center rounded-lg p-1 text-muted-foreground",
+      "surface-panel inline-flex h-auto min-h-[var(--touch-target-size)] items-center justify-center rounded-lg p-1 text-muted-foreground",
       className,
     )}
     {...props}
