@@ -9,6 +9,7 @@ import {
 } from "react-grid-layout";
 import {
   AlertCircle,
+  ArrowLeft,
   Boxes,
   Check,
   Eye,
@@ -277,6 +278,7 @@ export function DashboardView({
   dashboardId,
   onDeleted,
   onNavigateDashboard,
+  backNavigation,
 }: {
   dashboardId: string;
   onDeleted: () => void;
@@ -288,6 +290,15 @@ export function DashboardView({
    * `onDeleted` and the sidebar's `onNavigate`.
    */
   onNavigateDashboard?: (dashboardId: string) => void;
+  /**
+   * Shows a route-aware Back control for dashboards reached through a button
+   * tile. The host still owns routing; this view only verifies that the source
+   * dashboard remains accessible before asking the host to navigate.
+   */
+  backNavigation?: {
+    fromDashboardId: string;
+    onBack: (dashboardId: string | null) => void;
+  };
 }) {
   const { density } = useAppearance();
   const gridGap = React.useMemo(dashboardGridGap, [density]);
@@ -315,6 +326,30 @@ export function DashboardView({
     queryKey: dashboardQueryKey(dashboardId),
     queryFn: ({ signal }) => api.getDashboard(dashboardId, signal),
   });
+  const accessibleDashboards = useQuery({
+    queryKey: dashboardsQueryKey,
+    queryFn: ({ signal }) => api.getDashboards(signal),
+    enabled: backNavigation !== undefined,
+  });
+
+  const returnToSourceDashboard = React.useCallback(async () => {
+    if (backNavigation === undefined) return;
+    try {
+      const result = await accessibleDashboards.refetch();
+      if (result.isError) {
+        backNavigation.onBack(null);
+        return;
+      }
+      const sourceStillAccessible = result.data?.some(
+        (candidate) => candidate.id === backNavigation.fromDashboardId,
+      );
+      backNavigation.onBack(sourceStillAccessible ? backNavigation.fromDashboardId : null);
+    } catch {
+      // A failed access refresh cannot safely prove the source still exists.
+      // The dashboards index is the useful, non-erroring fallback.
+      backNavigation.onBack(null);
+    }
+  }, [accessibleDashboards, backNavigation]);
 
   const placements = React.useMemo(
     () => dashboard.data?.placements ?? [],
@@ -593,80 +628,95 @@ export function DashboardView({
   return (
     <div className="flex flex-col gap-6">
       <div className="flex flex-col items-stretch justify-between gap-4 sm:flex-row sm:items-start">
-        <div className="min-w-0 flex-1">
-          {editingName ? (
-            <form
-              className="flex max-w-xl items-center gap-2"
-              onSubmit={(event) => {
-                event.preventDefault();
-                if (name.trim()) updateDashboard.mutate({ name });
-              }}
+        <div className="flex min-w-0 flex-1 items-start gap-2">
+          {backNavigation !== undefined ? (
+            <Button
+              type="button"
+              variant="ghost"
+              size="icon"
+              className="shrink-0"
+              aria-label="Back to originating dashboard"
+              disabled={accessibleDashboards.isFetching}
+              onClick={() => void returnToSourceDashboard()}
             >
-              <Input
-                aria-label="Dashboard name"
-                autoFocus
-                value={name}
-                onChange={(event) => setName(event.target.value)}
-              />
-              <Button
-                type="submit"
-                size="sm"
-                disabled={!name.trim() || updateDashboard.isPending}
-              >
-                {updateDashboard.isPending ? "Saving…" : "Save"}
-              </Button>
-              <Button
-                type="button"
-                variant="ghost"
-                size="sm"
-                onClick={() => {
-                  setEditingName(false);
-                  setName(detail.name);
-                  updateDashboard.reset();
+              <ArrowLeft aria-hidden="true" />
+            </Button>
+          ) : null}
+          <div className="min-w-0 flex-1">
+            {editingName ? (
+              <form
+                className="flex max-w-xl items-center gap-2"
+                onSubmit={(event) => {
+                  event.preventDefault();
+                  if (name.trim()) updateDashboard.mutate({ name });
                 }}
               >
-                Cancel
-              </Button>
-            </form>
-          ) : (
-            <div className="flex min-w-0 items-center gap-2">
-              <h1 className="truncate text-2xl font-semibold tracking-tight">{detail.name}</h1>
-              {isOwner ? (
+                <Input
+                  aria-label="Dashboard name"
+                  autoFocus
+                  value={name}
+                  onChange={(event) => setName(event.target.value)}
+                />
+                <Button
+                  type="submit"
+                  size="sm"
+                  disabled={!name.trim() || updateDashboard.isPending}
+                >
+                  {updateDashboard.isPending ? "Saving…" : "Save"}
+                </Button>
                 <Button
                   type="button"
                   variant="ghost"
-                  size="icon"
-                  className="h-8 w-8"
-                  aria-label={`Rename ${detail.name}`}
-                  onClick={() => setEditingName(true)}
+                  size="sm"
+                  onClick={() => {
+                    setEditingName(false);
+                    setName(detail.name);
+                    updateDashboard.reset();
+                  }}
                 >
-                  <Pencil aria-hidden="true" />
+                  Cancel
                 </Button>
-              ) : null}
-            </div>
-          )}
-          <div className="mt-2 flex items-center gap-2">
-            <Badge variant="outline" className="capitalize">
-              {detail.role}
-            </Badge>
-            {detail.hidden ? (
-              <Badge variant="secondary">
-                <EyeOff data-icon="inline-start" aria-hidden="true" />
-                Hidden
+              </form>
+            ) : (
+              <div className="flex min-w-0 items-center gap-2">
+                <h1 className="truncate text-2xl font-semibold tracking-tight">{detail.name}</h1>
+                {isOwner ? (
+                  <Button
+                    type="button"
+                    variant="ghost"
+                    size="icon"
+                    className="h-8 w-8"
+                    aria-label={`Rename ${detail.name}`}
+                    onClick={() => setEditingName(true)}
+                  >
+                    <Pencil aria-hidden="true" />
+                  </Button>
+                ) : null}
+              </div>
+            )}
+            <div className="mt-2 flex items-center gap-2">
+              <Badge variant="outline" className="capitalize">
+                {detail.role}
               </Badge>
+              {detail.hidden ? (
+                <Badge variant="secondary">
+                  <EyeOff data-icon="inline-start" aria-hidden="true" />
+                  Hidden
+                </Badge>
+              ) : null}
+              <span className="text-sm text-muted-foreground">
+                Owned by {detail.owner.username}
+              </span>
+            </div>
+            {updateDashboard.isError ? (
+              <Alert variant="destructive" className="mt-3 max-w-xl">
+                <AlertCircle aria-hidden="true" />
+                <AlertDescription>
+                  {describeConnectorError(updateDashboard.error)}
+                </AlertDescription>
+              </Alert>
             ) : null}
-            <span className="text-sm text-muted-foreground">
-              Owned by {detail.owner.username}
-            </span>
           </div>
-          {updateDashboard.isError ? (
-            <Alert variant="destructive" className="mt-3 max-w-xl">
-              <AlertCircle aria-hidden="true" />
-              <AlertDescription>
-                {describeConnectorError(updateDashboard.error)}
-              </AlertDescription>
-            </Alert>
-          ) : null}
         </div>
 
         <div className="flex flex-wrap items-center justify-end gap-2">

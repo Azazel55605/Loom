@@ -414,6 +414,18 @@
       transform var(--motion-fast) var(--motion-ease-standard);
   }
 
+  .loom-tabs-indicator {
+    opacity: 0;
+    transition:
+      width var(--motion-base) var(--motion-ease-emphasized),
+      transform var(--motion-base) var(--motion-ease-emphasized),
+      opacity var(--motion-fast) var(--motion-ease-standard);
+  }
+
+  .loom-tabs-indicator[data-visible="true"] {
+    opacity: 1;
+  }
+
   :root[data-animation-level="full"] .motion-search-focus:focus-visible {
     transform: scaleX(1.008);
     box-shadow: 0 0 0 3px hsl(var(--ring) / 0.14);
