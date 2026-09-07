@@ -1,5 +1,7 @@
+import * as React from "react";
 import { cva, type VariantProps } from "class-variance-authority";
 
+import { useAppearance } from "@loom/ui-kit/components/AccentThemeProvider";
 import { Skeleton } from "@loom/ui-kit/components/ui/skeleton";
 import { cn } from "@loom/ui-kit/lib/utils";
 import {
@@ -18,6 +20,10 @@ const statTileValue = cva("font-semibold leading-none tracking-tight tabular-num
   },
   defaultVariants: { size: "md" },
 });
+
+function isScalar(value: unknown): value is string | number | boolean | null {
+  return value === null || ["string", "number", "boolean"].includes(typeof value);
+}
 
 export function StatTileSkeleton({ className }: { className?: string }) {
   return <div className={cn("space-y-2", className)}><Skeleton className="h-8 w-24" /><Skeleton className="h-3 w-16" /></div>;
@@ -44,6 +50,20 @@ export function StatTileWidget({
   className,
   size,
 }: DisplayWidgetProps & VariantProps<typeof statTileValue>) {
+  const { effectiveAnimationLevel } = useAppearance();
+  const previousValue = React.useRef(value);
+  const hasRenderedValue = React.useRef(isScalar(value));
+  const [changeSequence, setChangeSequence] = React.useState(0);
+
+  React.useEffect(() => {
+    const hadValue = hasRenderedValue.current;
+    const scalar = isScalar(value);
+    const changed = hadValue && scalar && !Object.is(previousValue.current, value);
+    previousValue.current = value;
+    if (scalar) hasRenderedValue.current = true;
+    if (changed) setChangeSequence((current) => current + 1);
+  }, [value]);
+
   const numeric = typeof value === "number" ? formatNumericReading(value, unit) : null;
   const text = numeric?.text ?? formatReading(value);
   const displayedUnit = numeric?.unit ?? unit;
@@ -53,7 +73,15 @@ export function StatTileWidget({
 
   return (
     <div className={cn("flex min-w-0 flex-col justify-center gap-1", className)}>
-      <div className="flex min-w-0 flex-wrap items-baseline gap-x-1 gap-y-0">
+      <div
+        key={changeSequence}
+        className={cn(
+          "flex min-w-0 flex-wrap items-baseline gap-x-1 gap-y-0",
+          effectiveAnimationLevel === "full" && changeSequence > 0
+            ? "loom-stat-value-change"
+            : undefined,
+        )}
+      >
         {isMultiline ? (
           <span className="grid min-w-0 max-w-full gap-1 text-sm font-medium leading-snug">
             {lines.map((line, index) => (

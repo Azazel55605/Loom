@@ -136,7 +136,7 @@ export function ColorSwatchPicker({
             // uses, offset so it reads as a halo rather than a border — a
             // border would change the swatch's apparent size when selected.
             className={cn(
-              "flex h-8 w-8 items-center justify-center rounded-full transition-transform",
+              "flex size-[var(--touch-target-size)] items-center justify-center rounded-full transition-transform",
               "focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-background",
               selected && "ring-2 ring-ring ring-offset-2 ring-offset-background",
             )}

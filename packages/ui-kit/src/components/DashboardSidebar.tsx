@@ -310,7 +310,7 @@ function DashboardSidebarItem({
       >
         <span className="truncate">{dashboard.name}</span>
         {dashboard.role !== "owner" ? (
-          <Badge variant="outline" className="ml-auto px-1.5 py-0 text-[10px]">
+          <Badge variant="outline" className="ml-auto px-1.5 py-0 text-[0.625rem]">
             {dashboard.role === "editor" ? "Editor" : "Viewer"}
           </Badge>
         ) : null}

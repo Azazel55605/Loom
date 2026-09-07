@@ -1,23 +1,70 @@
+/* OFL-licensed, self-hosted WOFF2 Latin subsets from Fontsource. Explicit
+   faces avoid bundling the packages' legacy WOFF fallbacks and unused scripts. */
+@font-face {
+  font-family: "IBM Plex Sans";
+  font-style: normal;
+  font-display: swap;
+  font-weight: 400;
+  src: url("@fontsource/ibm-plex-sans/files/ibm-plex-sans-latin-400-normal.woff2") format("woff2");
+}
+@font-face {
+  font-family: "IBM Plex Sans";
+  font-style: normal;
+  font-display: swap;
+  font-weight: 500;
+  src: url("@fontsource/ibm-plex-sans/files/ibm-plex-sans-latin-500-normal.woff2") format("woff2");
+}
+@font-face {
+  font-family: "IBM Plex Sans";
+  font-style: normal;
+  font-display: swap;
+  font-weight: 600;
+  src: url("@fontsource/ibm-plex-sans/files/ibm-plex-sans-latin-600-normal.woff2") format("woff2");
+}
+@font-face {
+  font-family: "Nunito";
+  font-style: normal;
+  font-display: swap;
+  font-weight: 400;
+  src: url("@fontsource/nunito/files/nunito-latin-400-normal.woff2") format("woff2");
+}
+@font-face {
+  font-family: "Nunito";
+  font-style: normal;
+  font-display: swap;
+  font-weight: 500;
+  src: url("@fontsource/nunito/files/nunito-latin-500-normal.woff2") format("woff2");
+}
+@font-face {
+  font-family: "Nunito";
+  font-style: normal;
+  font-display: swap;
+  font-weight: 600;
+  src: url("@fontsource/nunito/files/nunito-latin-600-normal.woff2") format("woff2");
+}
+
 @tailwind base;
 @tailwind components;
 @tailwind utilities;
 
 @layer base {
   :root {
-    --background: 0 0% 100%;
-    --foreground: 222 47% 11%;
+    /* Slate is the stable default palette. The data-background-theme rules
+       below replace this complete neutral set without touching --accent. */
+    --background: 222 47% 11%;
+    --foreground: 210 40% 98%;
 
-    --card: 0 0% 100%;
-    --card-foreground: 222 47% 11%;
+    --card: 222 47% 13%;
+    --card-foreground: 210 40% 98%;
 
-    --muted: 210 40% 96%;
-    --muted-foreground: 215 16% 47%;
+    --muted: 217 33% 18%;
+    --muted-foreground: 215 20% 65%;
 
     --destructive: 0 84% 60%;
     --destructive-foreground: 210 40% 98%;
 
-    --border: 214 32% 91%;
-    --input: 214 32% 91%;
+    --border: 217 33% 20%;
+    --input: 217 33% 20%;
 
     /* Accent: bare HSL channels, no hsl() wrapper, so alpha and lightness can
        be recombined downstream. This single value drives every derived shade
@@ -34,16 +81,19 @@
        still tokens rather than per-component classes, so there is exactly one
        place to change them. --status-down reuses the destructive hue so a
        failing service and a destructive action read as the same kind of red. */
-    --status-healthy: 142 71% 38%;
-    --status-degraded: 38 92% 42%;
+    --status-healthy: 142 60% 45%;
+    --status-degraded: 38 92% 50%;
     --status-down: var(--destructive);
-    --status-unknown: 215 16% 47%;
+    --status-unknown: 215 20% 55%;
     --status-foreground: 210 40% 98%;
 
     /* Blur intensity for elevated/glass surfaces. Adjustable; set to 0 by the
        reduced-transparency fallback below. */
     --blur-surface: 12px;
-    --surface-alpha: 0.72;
+    --surface-alpha-standard: 0.78;
+    --surface-alpha-extra: 0.68;
+    --panel-alpha-extra: 0.4;
+    --surface-alpha: var(--surface-alpha-standard);
     /* Secondary surfaces — tab bars, inset panels. Solid at every level except
        "extra", where they join the glass. Separate from --surface-alpha so
        turning up the effect does not make every small inset panel translucent
@@ -58,9 +108,13 @@
     --table-row-padding: 0.5rem;
     --table-cell-padding: 0.5rem;
     --table-font-size: 0.875rem;
+
+    --font-scale: 100%;
+    --font-family: ui-sans-serif, system-ui, sans-serif, "Apple Color Emoji", "Segoe UI Emoji";
+    --touch-target-size: 44px;
   }
 
-  :root[data-density="dense"] {
+  :root[data-density="compact"] {
     --stat-tile-font-size: 1.125rem;
     --card-padding: 1rem;
     --dashboard-grid-gap: 8px;
@@ -69,29 +123,103 @@
     --table-font-size: 0.8125rem;
   }
 
-  .dark {
+  :root[data-density="dense"] {
+    --stat-tile-font-size: 0.875rem;
+    --card-padding: 0.75rem;
+    --dashboard-grid-gap: 6px;
+    --table-row-padding: 0.125rem;
+    --table-cell-padding: 0.25rem;
+    --table-font-size: 0.75rem;
+  }
+
+  :root[data-font-size="small"] { --font-scale: 90%; }
+  :root[data-font-size="medium"] { --font-scale: 100%; }
+  :root[data-font-size="large"] { --font-scale: 112.5%; }
+
+  :root[data-font-family="default"] {
+    --font-family: ui-sans-serif, system-ui, sans-serif, "Apple Color Emoji", "Segoe UI Emoji";
+  }
+  :root[data-font-family="compact"] {
+    --font-family: "IBM Plex Sans", ui-sans-serif, system-ui, sans-serif;
+  }
+  :root[data-font-family="rounded"] {
+    --font-family: "Nunito", ui-sans-serif, system-ui, sans-serif;
+  }
+
+  :root[data-background-theme="midnight"] {
+    --background: 225 28% 4%;
+    --foreground: 210 40% 98%;
+    --card: 225 24% 7%;
+    --card-foreground: 210 40% 98%;
+    --muted: 224 19% 11%;
+    --muted-foreground: 216 17% 67%;
+    --border: 222 18% 16%;
+    --input: 222 18% 16%;
+    --surface-alpha-standard: 0.84;
+    --surface-alpha-extra: 0.74;
+    --panel-alpha-extra: 0.48;
+  }
+
+  :root[data-background-theme="slate"] {
     --background: 222 47% 11%;
     --foreground: 210 40% 98%;
-
     --card: 222 47% 13%;
     --card-foreground: 210 40% 98%;
-
     --muted: 217 33% 18%;
     --muted-foreground: 215 20% 65%;
-
     --border: 217 33% 20%;
     --input: 217 33% 20%;
+    --surface-alpha-standard: 0.78;
+    --surface-alpha-extra: 0.68;
+    --panel-alpha-extra: 0.4;
+  }
 
-    /* Translucency reads differently against a dark ground — the same alpha
-       that looks frosted over white looks merely washed out over near-black,
-       so dark surfaces sit slightly more opaque. */
-    --surface-alpha: 0.78;
+  :root[data-background-theme="charcoal"] {
+    --background: 30 7% 10%;
+    --foreground: 36 18% 95%;
+    --card: 30 7% 13%;
+    --card-foreground: 36 18% 95%;
+    --muted: 28 6% 18%;
+    --muted-foreground: 30 9% 67%;
+    --border: 28 7% 22%;
+    --input: 28 7% 22%;
+    --surface-alpha-standard: 0.8;
+    --surface-alpha-extra: 0.7;
+    --panel-alpha-extra: 0.42;
+  }
 
-    /* Lifted for contrast against the dark background; the hues are unchanged
-       so a state reads as the same colour in both themes. */
-    --status-healthy: 142 60% 45%;
-    --status-degraded: 38 92% 50%;
-    --status-unknown: 215 20% 55%;
+  :root[data-background-theme="daylight"] {
+    --background: 0 0% 100%;
+    --foreground: 222 47% 11%;
+    --card: 0 0% 100%;
+    --card-foreground: 222 47% 11%;
+    --muted: 210 40% 96%;
+    --muted-foreground: 215 16% 42%;
+    --border: 214 32% 88%;
+    --input: 214 32% 88%;
+    --surface-alpha-standard: 0.74;
+    --surface-alpha-extra: 0.64;
+    --panel-alpha-extra: 0.58;
+    --status-healthy: 142 71% 34%;
+    --status-degraded: 38 92% 38%;
+    --status-unknown: 215 16% 42%;
+  }
+
+  :root[data-background-theme="cream"] {
+    --background: 42 38% 94%;
+    --foreground: 28 22% 16%;
+    --card: 42 45% 98%;
+    --card-foreground: 28 22% 16%;
+    --muted: 39 27% 88%;
+    --muted-foreground: 28 11% 40%;
+    --border: 35 20% 78%;
+    --input: 35 20% 78%;
+    --surface-alpha-standard: 0.76;
+    --surface-alpha-extra: 0.66;
+    --panel-alpha-extra: 0.6;
+    --status-healthy: 142 71% 32%;
+    --status-degraded: 38 92% 36%;
+    --status-unknown: 28 11% 42%;
   }
 
   /* Reduced transparency: solid surfaces instead of translucent ones.
@@ -117,7 +245,7 @@
      equal specificity, which is why the order of these three rules matters. */
   .force-transparency {
     --blur-surface: 12px;
-    --surface-alpha: 0.72;
+    --surface-alpha: var(--surface-alpha-standard);
     --panel-alpha: 1;
   }
 
@@ -127,26 +255,8 @@
      from whatever happens to be behind the surface. */
   .blur-extra {
     --blur-surface: 24px;
-    --surface-alpha: 0.62;
-    --panel-alpha: 0.45;
-  }
-
-  /* Translucency reads differently against a dark ground: the alpha that looks
-     frosted over white looks washed out over near-black, so dark surfaces sit
-     slightly more opaque at the same nominal level.
-   *
-   * These two-class rules are required, not decorative. `.dark` sets its own
-   * `--surface-alpha` and appears *earlier* in this sheet, so a single-class
-   * level rule below it would win on source order and flatten the dark value
-   * back to the light one. Matching both classes raises the specificity so the
-   * dark-specific number survives. */
-  .dark.force-transparency {
-    --surface-alpha: 0.78;
-  }
-
-  .dark.blur-extra {
-    --surface-alpha: 0.68;
-    --panel-alpha: 0.4;
+    --surface-alpha: var(--surface-alpha-extra);
+    --panel-alpha: var(--panel-alpha-extra);
   }
 
   /* Reduced motion means reduced, not merely faster: movement is removed
@@ -166,13 +276,25 @@
      it. There is deliberately no class that turns motion back *on*: the OS
      setting is a floor, and an app preference is not entitled to override an
      accessibility request. See AccentThemeProvider. */
-  .reduce-motion,
-  .reduce-motion *,
-  .reduce-motion *::before,
-  .reduce-motion *::after {
+  :root[data-animation-level="reduced"],
+  :root[data-animation-level="reduced"] *,
+  :root[data-animation-level="reduced"] *::before,
+  :root[data-animation-level="reduced"] *::after {
     animation-duration: 0.01ms !important;
     animation-iteration-count: 1 !important;
     transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+
+  /* None is intentionally stronger than Reduced: it removes animation and
+     transition declarations entirely, including micro-fades that a component
+     may explicitly retain as a reduced-motion alternative. */
+  :root[data-animation-level="none"],
+  :root[data-animation-level="none"] *,
+  :root[data-animation-level="none"] *::before,
+  :root[data-animation-level="none"] *::after {
+    animation: none !important;
+    transition: none !important;
     scroll-behavior: auto !important;
   }
 
@@ -182,7 +304,12 @@
 
   body {
     @apply bg-background text-foreground antialiased;
+    font-family: var(--font-family);
     font-feature-settings: "rlig" 1, "calt" 1;
+  }
+
+  html {
+    font-size: var(--font-scale);
   }
 }
 
@@ -429,8 +556,54 @@
 /* Reduced motion removes the easing, not the movement: an item still has to
    follow the pointer, and the placeholder still has to show where it lands.
    What goes is the animated settle afterwards. */
-.reduce-motion .react-grid-layout,
-.reduce-motion .react-grid-item,
-.reduce-motion .react-grid-item.react-grid-placeholder {
+:root[data-animation-level="reduced"] .react-grid-layout,
+:root[data-animation-level="reduced"] .react-grid-item,
+:root[data-animation-level="reduced"] .react-grid-item.react-grid-placeholder,
+:root[data-animation-level="none"] .react-grid-layout,
+:root[data-animation-level="none"] .react-grid-item,
+:root[data-animation-level="none"] .react-grid-item.react-grid-placeholder {
   transition: none;
+}
+
+/* Dashboard motion is deliberately applied around, not on, react-grid-layout's
+   positioned nodes: RGL owns their transform property and an animation there
+   would temporarily move tiles away from their calculated coordinates. */
+.loom-dashboard-grid-frame {
+  transform: scale(1);
+  opacity: 1;
+  transition: transform 160ms ease, opacity 160ms ease;
+}
+
+.loom-dashboard-grid-frame[data-editing="true"] {
+  transform: scale(0.995);
+  opacity: 0.97;
+}
+
+@keyframes loom-dashboard-tile-enter {
+  from { opacity: 0; transform: scale(0.985); }
+  to { opacity: 1; transform: scale(1); }
+}
+
+.loom-dashboard-grid > .react-grid-item > * {
+  animation: loom-dashboard-tile-enter 180ms ease-out both;
+  animation-delay: min(calc(var(--loom-tile-index, 0) * 35ms), 245ms);
+}
+
+@keyframes loom-stat-value-change {
+  0% { color: inherit; transform: scale(1); }
+  35% { color: hsl(var(--accent)); transform: scale(1.035); }
+  100% { color: inherit; transform: scale(1); }
+}
+
+.loom-stat-value-change {
+  animation: loom-stat-value-change 320ms ease-out;
+  transform-origin: left center;
+}
+
+/* Reduced keeps dashboard state changes immediate and skips the scale pulse.
+   None is enforced globally above and also suppresses every remaining fade. */
+:root[data-animation-level="reduced"] .loom-dashboard-grid-frame,
+:root[data-animation-level="none"] .loom-dashboard-grid-frame {
+  transform: none;
+  opacity: 1;
 }

@@ -13,7 +13,7 @@
 Loom's UI should feel **fluid, modern, and highly customizable**. Fluid meaning
 motion and layout respond to the user rather than snapping between states;
 modern meaning it looks like software from this decade; customizable meaning the
-things people actually want to change — accent color, blur, motion — are
+things people actually want to change — palette, accent, blur, typography, density, and motion — are
 user-adjustable at runtime, not constants a developer picked.
 
 The primary component source is **[shadcn/ui](https://ui.shadcn.com/)**: Radix
@@ -53,12 +53,12 @@ scroll horizontally inside their own region instead of widening the page.
 
 ## Customization axes
 
-All four are **user-adjustable at runtime**, not hardcoded values. Treat them
-as inputs to the design, not decisions inside it. Any new component must respond
-to all four without extra wiring — if a component only looks right at one
-accent color, one blur level, or one density, it is not finished.
+All appearance axes are **user-adjustable at runtime**, not hardcoded values.
+Treat them as inputs to the design, not decisions inside it. Any new component
+must respond without extra wiring — if it only looks right with one palette,
+accent, font, blur level, animation level, or density, it is not finished.
 
-> **Status: implemented in web-frontend, Desktop, and Mobile.** All four now have real controls,
+> **Status: implemented in web-frontend, Desktop, and Mobile.** Every axis has a real control,
 > under Settings → Appearance, driven by `AccentThemeProvider`, alongside a
 > light/dark/system palette choice. What follows describes working behavior,
 > not intent. All clients consume the same provider from `@loom/ui-kit`.
@@ -66,9 +66,11 @@ accent color, one blur level, or one density, it is not finished.
 ### Persistence is per device
 
 Preferences live in `localStorage` under `loom-accent-color`, `loom-blur-level`,
-`loom-reduce-motion`, `loom-density`, and `loom-theme`. They therefore **do not follow a
-user to another browser or machine**, and the Appearance panel says so on screen
-rather than letting someone assume otherwise.
+`loom-animation-level`, `loom-density`, `loom-font-size`, `loom-font-family`, and
+`loom-background-theme`. They therefore **do not follow a user to another browser
+or machine**, and the Appearance panel says so on screen rather than letting
+someone assume otherwise. Legacy motion, palette, blur, and two-tier density
+keys are migrated without unexpectedly changing an existing visual choice.
 
 That is the current model, not a settled one. Syncing preferences through the
 backend — columns on `users`, or a preferences table, plus a contract for
@@ -174,19 +176,35 @@ from the blur itself.
 
 ### Display density
 
-**Comfortable** is the default; **Dense** reduces non-interactive whitespace and
-display typography so more dashboard and table content fits on smaller screens.
+**Comfortable** is the default, **Compact** is the original tighter mode, and
+**Dense** is a deliberately more aggressive tier for information-heavy screens.
 The root `data-density` attribute selects CSS custom properties for stat-tile
 font size, card padding, dashboard-grid spacing, table row/cell padding, and
 table text size. Components consume those properties instead of branching on
-density themselves.
+density themselves. The former two-tier value named `dense` migrates once to
+`compact`; the migration is versioned so choosing the new Dense remains stable.
 
 Density must never shrink an interactive hit area. Buttons, icon buttons,
 checkboxes, switches, segmented-control options, interactive table rows, and
 dashboard resize handles retain a minimum 44 by 44 pixel target independently
 of the density properties. If a visual glyph or control stays small, its
 transparent hit area supplies the difference; table or card padding is never
-relied on to make an action reachable.
+relied on to make an action reachable. The shared `--touch-target-size: 44px`
+uses physical CSS pixels rather than rem, so changing the root font scale cannot
+silently shrink that guarantee either.
+
+### Typography
+
+Font size is a root rem scale with **Small**, **Medium** (default), and **Large**
+choices. Core typography uses rem-derived Tailwind sizes; even intentionally tiny
+badges use rem rather than pixels, so the scale reaches the entire application.
+
+Font family has three locally bundled choices: the existing system-ui stack,
+**IBM Plex Sans**, and **Nunito**. IBM Plex Sans was chosen instead of its
+Condensed cut: it is visibly narrower in dense tables while remaining easier to
+read at Loom's small status-label sizes. IBM Plex Sans and Nunito are distributed
+under the OFL and loaded from the application bundle through Fontsource; no font
+CDN or runtime network dependency is permitted.
 
 ### Animation
 
@@ -209,35 +227,31 @@ state swap. Nothing that conveys state may become invisible when motion is off �
 if the only indication a dialog opened is that it slid in, the dialog is broken
 for those users.
 
-The in-app "reduce motion" switch layers on top of that signal via a
-`.reduce-motion` class; it never competes with it. **The OS setting is a floor,
-not a default.** A user may force motion off when the OS has not asked for it,
-but nothing in the app may force motion back *on* against an OS request —
-reduced motion is an accessibility need for some people, and an app-level
-preference is not entitled to override it. The switch reflects this by showing
-as on-and-disabled when the OS is asking, rather than appearing to be off or
-silently doing nothing when clicked.
+The in-app selector has **Full**, **Reduced**, and **None** levels. Reduced
+removes movement/scaling while preserving the state being communicated; None
+disables transitions and animations entirely. `prefers-reduced-motion` remains
+a floor, not a default: selecting Full can never override an OS request for
+Reduced, while None may make it stricter. Stat-value flashes, dashboard edit
+transitions, and initial tile staggering all obey the effective level.
 
-### Light and dark
+### Background themes
 
-A fifth user-facing choice, alongside the four axes above: **Light**, **Dark**,
-or **System**. `System` follows `prefers-color-scheme` and is the default,
-because the OS already carries an answer and opening an app in blazing white at
-night is a bad first impression nobody asked for.
+Five complete neutral token sets are available: **Midnight** (near-black AMOLED),
+**Slate** (the default dark-navy palette), **Charcoal** (warm dark gray),
+**Daylight** (clean white), and **Cream** (warm off-white). They redefine the
+background, card, muted, border, input, foreground, and contrast tokens while
+leaving `--accent` untouched, so every background combines with every accent.
 
-Dark is a token swap, not a separate stylesheet — the `.dark` class redefines
-the same custom properties, so any component built from the tokens inverts
-without knowing dark mode exists. Two things do need explicit attention:
+Themes are token swaps, not separate stylesheets — components invert without
+knowing which preset is active. Two things do need explicit attention:
 
 - **`color-scheme` is set on the root** alongside the class. Without it the
   browser keeps painting its own surfaces — scrollbars, the overscroll
   canvas — from the light palette.
-- **Translucency is not portable between palettes.** The alpha that reads as
-  frosted over white reads as washed out over near-black, so the dark palette
-  carries its own `--surface-alpha`. Those overrides have to match *two*
-  classes (`.dark.force-transparency`) rather than one: `.dark` appears earlier
-  in the sheet than the level classes, so a single-class rule would win on
-  source order and flatten the dark value back to the light one.
+- **Translucency is not portable between palettes.** Each preset supplies its
+  own standard/extra surface alpha and secondary-panel alpha. Blur therefore
+  stays frosted and legible across true black, dark gray, white, and cream
+  rather than applying one dark-tuned tint everywhere.
 
 Status colours are deliberately **not** re-derived per palette beyond a
 lightness lift — the hues stay put, so "healthy" reads as the same colour in

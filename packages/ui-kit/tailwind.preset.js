@@ -3,6 +3,9 @@ export default {
   darkMode: ["class"],
   theme: {
     extend: {
+      fontFamily: {
+        sans: ["var(--font-family)"],
+      },
       colors: {
         border: "hsl(var(--border))",
         input: "hsl(var(--input))",

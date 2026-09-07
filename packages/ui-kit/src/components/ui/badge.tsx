@@ -26,8 +26,8 @@ const badgeVariants = cva(
         // accent rather than a --status-* token precisely because it is not a
         // verdict about the service — it is Loom saying what it is doing, and
         // it should read as activity rather than as a fourth kind of unwell.
-        // `.reduce-motion` is honoured globally, so the pulse stops for anyone
-        // who asked for that.
+        // The root animation level is honoured globally, so the pulse stops
+        // for Reduced/None and for an OS reduced-motion request.
         pending:
           "border-transparent bg-accent text-accent-foreground shadow animate-pulse",
       },

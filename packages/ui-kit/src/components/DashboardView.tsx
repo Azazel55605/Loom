@@ -802,7 +802,8 @@ export function DashboardView({
           // rather than asserting anything about the value. Remove when the
           // clients move to React 19.
           ref={containerRef as React.RefObject<HTMLDivElement>}
-          className="min-w-0"
+          className="loom-dashboard-grid-frame min-w-0"
+          data-editing={editingLayout}
         >
           {mounted ? (
             <ResponsiveGridLayout<GridBreakpoint>
@@ -827,7 +828,9 @@ export function DashboardView({
               // handle element even with resizing disabled, and a grip that
               // appears on hover and then refuses to move is worse than no grip
               // — particularly for a Viewer, who has no way to make it work.
-              className={editingLayout ? "loom-grid-editing" : undefined}
+              className={
+                editingLayout ? "loom-dashboard-grid loom-grid-editing" : "loom-dashboard-grid"
+              }
               // The header is the only drag surface, so a press on a slider or a
               // button inside a card never becomes a drag.
               dragConfig={{
@@ -839,8 +842,12 @@ export function DashboardView({
               onDragStop={onLayoutSettled}
               onResizeStop={onLayoutSettled}
             >
-              {placements.map((placement) => (
-                <div key={placementGridKey(placement.id)} className="min-w-0">
+              {placements.map((placement, index) => (
+                <div
+                  key={placementGridKey(placement.id)}
+                  className="min-w-0"
+                  style={{ "--loom-tile-index": index } as React.CSSProperties}
+                >
                   <PlacementTile
                     dashboardId={dashboardId}
                     placement={placement}
@@ -870,8 +877,16 @@ export function DashboardView({
                   />
                 </div>
               ))}
-              {placementGroups.map((group) => (
-                <div key={groupGridKey(group.id)} className="min-w-0">
+              {placementGroups.map((group, index) => (
+                <div
+                  key={groupGridKey(group.id)}
+                  className="min-w-0"
+                  style={
+                    {
+                      "--loom-tile-index": placements.length + index,
+                    } as React.CSSProperties
+                  }
+                >
                   <GroupTile
                     dashboardId={dashboardId}
                     group={group}

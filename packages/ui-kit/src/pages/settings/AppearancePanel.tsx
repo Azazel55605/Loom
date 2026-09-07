@@ -1,5 +1,5 @@
 import * as React from "react";
-import { Info, Monitor, Moon, Sparkles, Sun } from "lucide-react";
+import { Check, Info, Sparkles } from "lucide-react";
 
 import { Alert, AlertDescription } from "@loom/ui-kit/components/ui/alert";
 import { Button } from "@loom/ui-kit/components/ui/button";
@@ -14,8 +14,11 @@ import { ColorSwatchPicker, hexToHsl, hslToHex } from "@loom/ui-kit/components/C
 import { SegmentedControl } from "@loom/ui-kit/components/SegmentedControl";
 import { Input } from "@loom/ui-kit/components/ui/input";
 import { Label } from "@loom/ui-kit/components/ui/label";
-import { Switch } from "@loom/ui-kit/components/ui/switch";
-import { useAppearance } from "@loom/ui-kit/components/AccentThemeProvider";
+import {
+  useAppearance,
+  type BackgroundTheme,
+  type FontFamily,
+} from "@loom/ui-kit/components/AccentThemeProvider";
 
 /**
  * The customization axes from docs/UI_GUIDELINES.md, as controls.
@@ -29,20 +32,24 @@ export function AppearancePanel() {
   const {
     accent,
     setAccent,
-    theme,
-    setTheme,
+    backgroundTheme,
+    setBackgroundTheme,
     blurLevel,
     setBlurLevel,
-    reduceMotion,
-    setReduceMotion,
+    animationLevel,
+    setAnimationLevel,
     systemReduceMotion,
     density,
     setDensity,
+    fontSizeScale,
+    setFontSizeScale,
+    fontFamily,
+    setFontFamily,
     reset,
   } = useAppearance();
 
   return (
-    <div className="space-y-4">
+    <div className="flex flex-col gap-4">
       <Alert>
         <Info className="h-4 w-4" aria-hidden="true" />
         <AlertDescription>
@@ -53,26 +60,13 @@ export function AppearancePanel() {
 
       <Card>
         <CardHeader>
-          <CardTitle className="text-lg">Theme</CardTitle>
+          <CardTitle className="text-lg">Background theme</CardTitle>
           <CardDescription>
-            Follow your system, or pin one palette regardless of what it says.
+            Choose the neutral canvas and surfaces independently from your accent colour.
           </CardDescription>
         </CardHeader>
         <CardContent>
-          <SegmentedControl
-            label="Theme"
-            value={theme}
-            onChange={setTheme}
-            options={[
-              { value: "light", label: "Light", icon: <Sun aria-hidden="true" /> },
-              { value: "dark", label: "Dark", icon: <Moon aria-hidden="true" /> },
-              {
-                value: "system",
-                label: "System",
-                icon: <Monitor aria-hidden="true" />,
-              },
-            ]}
-          />
+          <BackgroundThemePicker value={backgroundTheme} onChange={setBackgroundTheme} />
         </CardContent>
       </Card>
 
@@ -80,8 +74,8 @@ export function AppearancePanel() {
         <CardHeader>
           <CardTitle className="text-lg">Display density</CardTitle>
           <CardDescription>
-            Dense mode reduces spacing and text size to fit more on screen — most
-            useful on smaller displays.
+            Comfortable, Compact, and Dense progressively reduce non-interactive
+            spacing. Controls keep the same touch-friendly hit areas.
           </CardDescription>
         </CardHeader>
         <CardContent>
@@ -91,9 +85,35 @@ export function AppearancePanel() {
             onChange={setDensity}
             options={[
               { value: "comfortable", label: "Comfortable" },
+              { value: "compact", label: "Compact" },
               { value: "dense", label: "Dense" },
             ]}
           />
+        </CardContent>
+      </Card>
+
+      <Card>
+        <CardHeader>
+          <CardTitle className="text-lg">Typography</CardTitle>
+          <CardDescription>
+            Scale text throughout Loom and choose a locally bundled interface typeface.
+          </CardDescription>
+        </CardHeader>
+        <CardContent className="flex flex-col gap-5">
+          <div className="flex flex-col gap-2">
+            <Label>Font size</Label>
+            <SegmentedControl
+              label="Font size"
+              value={fontSizeScale}
+              onChange={setFontSizeScale}
+              options={[
+                { value: "small", label: "Small" },
+                { value: "medium", label: "Medium" },
+                { value: "large", label: "Large" },
+              ]}
+            />
+          </div>
+          <FontFamilyPicker value={fontFamily} onChange={setFontFamily} />
         </CardContent>
       </Card>
 
@@ -105,7 +125,7 @@ export function AppearancePanel() {
             rings, selected states.
           </CardDescription>
         </CardHeader>
-        <CardContent className="space-y-4">
+        <CardContent className="flex flex-col gap-4">
           <ColorSwatchPicker value={accent} onChange={setAccent} />
           <CustomAccentField value={accent} onChange={setAccent} />
         </CardContent>
@@ -118,8 +138,8 @@ export function AppearancePanel() {
             Both are performance settings as much as visual ones.
           </CardDescription>
         </CardHeader>
-        <CardContent className="space-y-4">
-          <div className="space-y-2 rounded-md border p-3">
+        <CardContent className="flex flex-col gap-4">
+          <div className="flex flex-col gap-2 rounded-md border p-3">
             <Label id="blur-level-label">Blurred surfaces</Label>
             <p className="text-sm text-muted-foreground">
               {blurLevel === "off" &&
@@ -145,24 +165,22 @@ export function AppearancePanel() {
             />
           </div>
 
-          <div className="flex items-start justify-between gap-4 rounded-md border p-3">
-            <div className="space-y-0.5">
-              <Label htmlFor="motion-toggle">Reduce motion</Label>
-              <p className="text-sm text-muted-foreground">
-                {systemReduceMotion
-                  ? "Your system is set to reduce motion, so this is already on everywhere and cannot be turned off here."
-                  : "Replaces movement and scaling with instant changes. Nothing that indicates state disappears."}
-              </p>
-            </div>
-            <Switch
-              id="motion-toggle"
-              // Shown as on when the OS asks for it, because it *is* on. The
-              // switch is then disabled rather than merely ignored: a control
-              // that visibly does nothing when clicked reads as broken, and
-              // this setting is a floor the app must not lower.
-              checked={reduceMotion || systemReduceMotion}
-              disabled={systemReduceMotion}
-              onCheckedChange={setReduceMotion}
+          <div className="flex flex-col gap-2 rounded-md border p-3">
+            <Label>Animation</Label>
+            <p className="text-sm text-muted-foreground">
+              {systemReduceMotion
+                ? "Your system requests reduced motion, so Full is displayed as Reduced in practice. You can still choose None."
+                : "Reduced removes movement and scaling. None disables transitions and animations entirely."}
+            </p>
+            <SegmentedControl
+              label="Animation level"
+              value={animationLevel}
+              onChange={setAnimationLevel}
+              options={[
+                { value: "full", label: "Full" },
+                { value: "reduced", label: "Reduced" },
+                { value: "none", label: "None" },
+              ]}
             />
           </div>
         </CardContent>
@@ -173,6 +191,102 @@ export function AppearancePanel() {
           Reset to defaults
         </Button>
       </div>
+    </div>
+  );
+}
+
+const BACKGROUND_PRESETS: Array<{
+  value: BackgroundTheme;
+  label: string;
+  background: string;
+  surface: string;
+}> = [
+  { value: "midnight", label: "Midnight", background: "#080a10", surface: "#0e111a" },
+  { value: "slate", label: "Slate", background: "#0f172a", surface: "#172036" },
+  { value: "charcoal", label: "Charcoal", background: "#1d1b1a", surface: "#252220" },
+  { value: "daylight", label: "Daylight", background: "#ffffff", surface: "#f1f5f9" },
+  { value: "cream", label: "Cream", background: "#f5f0df", surface: "#fcf9ef" },
+];
+
+function BackgroundThemePicker({
+  value,
+  onChange,
+}: {
+  value: BackgroundTheme;
+  onChange: (theme: BackgroundTheme) => void;
+}) {
+  return (
+    <div role="group" aria-label="Background theme" className="flex flex-wrap gap-2">
+      {BACKGROUND_PRESETS.map((preset) => {
+        const selected = preset.value === value;
+        return (
+          <Button
+            key={preset.value}
+            type="button"
+            variant="outline"
+            aria-pressed={selected}
+            onClick={() => onChange(preset.value)}
+            className="h-auto gap-2 px-3"
+          >
+            <span
+              aria-hidden="true"
+              className="relative size-6 overflow-hidden rounded-full border shadow-sm"
+              style={{ backgroundColor: preset.background }}
+            >
+              <span
+                className="absolute inset-x-1 bottom-1 h-2 rounded-full"
+                style={{ backgroundColor: preset.surface }}
+              />
+            </span>
+            {preset.label}
+            {selected ? <Check aria-hidden="true" /> : null}
+          </Button>
+        );
+      })}
+    </div>
+  );
+}
+
+const FONT_FAMILIES: Array<{
+  value: FontFamily;
+  label: string;
+  css: string;
+}> = [
+  { value: "default", label: "Default", css: "ui-sans-serif, system-ui, sans-serif" },
+  { value: "compact", label: "IBM Plex Sans", css: '"IBM Plex Sans", sans-serif' },
+  { value: "rounded", label: "Nunito", css: '"Nunito", sans-serif' },
+];
+
+function FontFamilyPicker({
+  value,
+  onChange,
+}: {
+  value: FontFamily;
+  onChange: (family: FontFamily) => void;
+}) {
+  return (
+    <div className="flex flex-col gap-2">
+      <Label>Font family</Label>
+      <div role="group" aria-label="Font family" className="grid gap-2 sm:grid-cols-3">
+        {FONT_FAMILIES.map((option) => (
+          <Button
+            key={option.value}
+            type="button"
+            variant={value === option.value ? "secondary" : "outline"}
+            aria-pressed={value === option.value}
+            onClick={() => onChange(option.value)}
+            className="h-auto min-h-16 flex-col items-start whitespace-normal px-3 py-2 text-left"
+            style={{ fontFamily: option.css }}
+          >
+            <span className="font-semibold">{option.label}</span>
+            <span className="text-xs font-normal text-muted-foreground">Loom at a glance</span>
+          </Button>
+        ))}
+      </div>
+      <p className="text-sm text-muted-foreground">
+        IBM Plex Sans is the narrower option for compact layouts; Nunito provides a softer,
+        rounded alternative. Both are bundled for offline use.
+      </p>
     </div>
   );
 }
@@ -210,12 +324,12 @@ function CustomAccentField({
   }
 
   return (
-    <div className="space-y-2">
+    <div className="flex flex-col gap-2">
       <Label htmlFor="accent-hex">Custom colour</Label>
       <div className="flex items-center gap-2">
         <div
           aria-hidden="true"
-          className="h-9 w-9 shrink-0 rounded-md border"
+          className="size-9 shrink-0 rounded-md border"
           // Previews the value being typed, falling back to the applied accent
           // so the swatch is never blank.
           style={{ backgroundColor: `hsl(${parsed ?? value})` }}

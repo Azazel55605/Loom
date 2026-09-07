@@ -34,7 +34,7 @@ export function SetupGuidePanel({
         <Tabs defaultValue={initialVariant.id}>
           <TabsList className="h-auto w-full justify-start overflow-x-auto">
             {guide.variants.map((variant) => (
-              <TabsTrigger key={variant.id} value={variant.id} className="min-h-11 flex-1">
+              <TabsTrigger key={variant.id} value={variant.id} className="flex-1">
                 {variant.label}
               </TabsTrigger>
             ))}

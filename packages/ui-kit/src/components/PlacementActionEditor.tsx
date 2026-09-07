@@ -396,7 +396,7 @@ export function PlacementActionEditor({
                         <Settings2 data-icon="inline-start" aria-hidden="true" />
                         Set parameters
                       </Button>
-                      <Badge variant="secondary" className="font-mono text-[11px]">
+                      <Badge variant="secondary" className="font-mono text-[0.6875rem]">
                         {describeParams(
                           value?.type === "connectorAction" ? value.params : {},
                         )}

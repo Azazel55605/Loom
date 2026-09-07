@@ -379,10 +379,10 @@ export function ConnectorInstanceDialog({
               {setupGuide !== null && hasSetupGuide ? (
                 <Tabs defaultValue="configuration">
                   <TabsList className="h-auto w-full justify-start overflow-x-auto">
-                    <TabsTrigger value="configuration" className="min-h-11 flex-1">
+                    <TabsTrigger value="configuration" className="flex-1">
                       Configuration
                     </TabsTrigger>
-                    <TabsTrigger value="setup-guide" className="min-h-11 flex-1">
+                    <TabsTrigger value="setup-guide" className="flex-1">
                       Setup guide
                     </TabsTrigger>
                   </TabsList>
