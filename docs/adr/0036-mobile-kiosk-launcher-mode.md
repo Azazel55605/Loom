@@ -38,8 +38,21 @@ horizontal touch-start/touch-end threshold moves through that server-provided
 order, with dot controls showing and selecting the current position. Dashboard
 widgets remain ordinary interactive widgets.
 
-An idle screensaver suitable for a continuously mounted display remains planned
-for a later phase.
+Idle presentation splits configuration by ownership. Administrators select an
+ordered `screensaverConfig` of connector-instance, target, and data-point
+references on the kiosk user; the backend validates those references through
+the same live-descriptor path as dashboard display bindings. Each mobile device
+separately stores whether its screensaver is enabled and its idle timeout in
+Tauri Store, because two tablets using the same account can reasonably have
+different wake/sleep expectations.
+
+The kiosk shell records global pointer/touch activity and compares the last
+interaction timestamp with that device-local timeout. Once idle it replaces the
+dashboard tree with a dedicated ambient view: a large clock and date plus one
+configured live reading at a time, rotating every eight seconds. A wake tap
+only resumes the already-authorized dashboard session; it never crosses or
+weakens the separately authenticated exit boundary. Reading transitions are
+instant when either Loom or the operating system requests reduced motion.
 
 Exiting kiosk presentation is an authentication boundary, not a UI affordance.
 It requires signing in as a different, non-kiosk account. A physically unlocked
@@ -94,6 +107,6 @@ Kiosk users can use every existing permission, dashboard, audit, and session
 mechanism without special cases. Administrators must deliberately choose an
 appropriately narrow group. The flag alone is not protective, and client-side
 presentation gating is not authorization; the backend remains the enforcement
-point. Presentation, swipe navigation, authenticated exit, and same-identity
-recovery are implemented in Mobile; only the idle screensaver remains follow-up
-work.
+point. Kiosk-user setup, presentation and swipe navigation, authenticated exit,
+same-identity recovery, and the idle screensaver are implemented. This ADR's
+planned kiosk phases are complete.

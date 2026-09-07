@@ -2091,6 +2091,15 @@ export type User = {
   /** The groups this user belongs to. Membership is stated wholesale, never as
    *  a delta. */
   groupIds: string[];
+  /** Ordered connector readings used by Mobile's kiosk screensaver. */
+  screensaverConfig: ScreensaverDataPoint[];
+};
+
+/** A connector data point selected for the kiosk ambient display. */
+export type ScreensaverDataPoint = {
+  connectorInstanceId: string;
+  targetId: string | null;
+  dataPointId: string;
 };
 
 /** One active refresh-token session for a user. */
@@ -2113,6 +2122,7 @@ export type CreateUserRequest = {
   password: string;
   groupIds?: string[];
   isKiosk?: boolean;
+  screensaverConfig?: ScreensaverDataPoint[];
 };
 
 /**
@@ -2126,6 +2136,7 @@ export type UpdateUserRequest = {
   isActive?: boolean;
   isKiosk?: boolean;
   groupIds?: string[];
+  screensaverConfig?: ScreensaverDataPoint[];
 };
 
 /** A group with its grants, as returned by every `/groups` route. */
@@ -2337,6 +2348,8 @@ export type Account = {
   avatarUrl: string | null;
   createdAt: string;
   groups: AccountGroup[];
+  /** Server-owned ordered readings for kiosk idle presentation. */
+  screensaverConfig: ScreensaverDataPoint[];
 };
 
 /**

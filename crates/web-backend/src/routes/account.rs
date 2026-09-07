@@ -81,6 +81,8 @@ pub struct AccountResponse {
     avatar_url: Option<String>,
     created_at: String,
     groups: Vec<AccountGroup>,
+    /// Ordered ambient readings selected by an administrator for kiosk mode.
+    screensaver_config: Vec<super::users::ScreensaverDataPoint>,
 }
 
 /// A group the caller belongs to, named rather than just identified, since the
@@ -126,6 +128,7 @@ struct AccountRow {
     display_name: Option<String>,
     avatar_path: Option<String>,
     created_at: String,
+    screensaver_config: Option<String>,
 }
 
 /// `GET /account`
@@ -621,7 +624,8 @@ async fn load_account(
     user_id: &str,
 ) -> Result<Option<AccountResponse>, sqlx::Error> {
     let row = sqlx::query_as::<_, AccountRow>(
-        "SELECT id, username, is_kiosk, display_name, avatar_path, created_at FROM users WHERE id = ?",
+        "SELECT id, username, is_kiosk, display_name, avatar_path, created_at, screensaver_config \
+         FROM users WHERE id = ?",
     )
     .bind(user_id)
     .fetch_optional(&mut *conn)
@@ -638,6 +642,14 @@ async fn load_account(
     .fetch_all(&mut *conn)
     .await?;
 
+    let screensaver_config = row
+        .screensaver_config
+        .as_deref()
+        .map(serde_json::from_str)
+        .transpose()
+        .map_err(|error| sqlx::Error::Decode(Box::new(error)))?
+        .unwrap_or_default();
+
     Ok(Some(AccountResponse {
         id: row.id,
         username: row.username,
@@ -649,6 +661,7 @@ async fn load_account(
             .into_iter()
             .map(|(id, name)| AccountGroup { id, name })
             .collect(),
+        screensaver_config,
     }))
 }
 

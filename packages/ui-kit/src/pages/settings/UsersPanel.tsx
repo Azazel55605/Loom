@@ -6,6 +6,7 @@ import {
   AlertCircle,
   Laptop,
   Loader2,
+  MonitorCog,
   Pencil,
   TabletSmartphone,
   Trash2,
@@ -48,6 +49,7 @@ import {
 import { GroupMultiSelect } from "@loom/ui-kit/components/GroupMultiSelect";
 import { Input } from "@loom/ui-kit/components/ui/input";
 import { KioskSetupWizard } from "@loom/ui-kit/components/KioskSetupWizard";
+import { ScreensaverConfigEditor } from "@loom/ui-kit/components/DataPointPicker";
 import { SessionManager } from "@loom/ui-kit/components/SessionManager";
 import { Skeleton } from "@loom/ui-kit/components/ui/skeleton";
 import { Switch } from "@loom/ui-kit/components/ui/switch";
@@ -59,7 +61,7 @@ import {
   TableHeader,
   TableRow,
 } from "@loom/ui-kit/components/ui/table";
-import type { Group, User } from "@loom/ui-kit/lib/api";
+import type { Group, ScreensaverDataPoint, User } from "@loom/ui-kit/lib/api";
 import { useApiClient } from "@loom/ui-kit/lib/api-context";
 import { describeAdminFailure } from "@loom/ui-kit/lib/admin-error";
 import { useAuth } from "@loom/ui-kit/lib/auth-context";
@@ -101,6 +103,7 @@ export function UsersPanel() {
   const [editing, setEditing] = React.useState<User | null>(null);
   const [deleting, setDeleting] = React.useState<User | null>(null);
   const [sessionsFor, setSessionsFor] = React.useState<User | null>(null);
+  const [screensaverFor, setScreensaverFor] = React.useState<User | null>(null);
 
   const invalidate = React.useCallback(async () => {
     // Groups too: membership changes move `memberCount`, which the groups panel
@@ -224,6 +227,16 @@ export function UsersPanel() {
                           <Laptop aria-hidden="true" />
                           <span className="sr-only">Sessions for {entry.username}</span>
                         </Button>
+                        {entry.isKiosk ? (
+                          <Button
+                            variant="ghost"
+                            size="icon"
+                            onClick={() => setScreensaverFor(entry)}
+                            aria-label={`Configure screensaver for ${entry.username}`}
+                          >
+                            <MonitorCog aria-hidden="true" />
+                          </Button>
+                        ) : null}
                         <Button
                           variant="ghost"
                           size="icon"
@@ -281,6 +294,14 @@ export function UsersPanel() {
         groups={knownGroups}
         groupsUnavailable={groupsUnavailable}
         isSelf={editing?.id === currentUser?.id}
+        onUpdated={invalidate}
+      />
+
+      <ScreensaverConfigDialog
+        user={screensaverFor}
+        onOpenChange={(open) => {
+          if (!open) setScreensaverFor(null);
+        }}
         onUpdated={invalidate}
       />
 
@@ -343,6 +364,75 @@ export function UsersPanel() {
         </AlertDialogContent>
       </AlertDialog>
     </div>
+  );
+}
+
+function ScreensaverConfigDialog({
+  user,
+  onOpenChange,
+  onUpdated,
+}: {
+  user: User | null;
+  onOpenChange: (open: boolean) => void;
+  onUpdated: () => Promise<void>;
+}) {
+  const api = useApiClient();
+  const [value, setValue] = React.useState<Array<ScreensaverDataPoint | null>>([]);
+  const [failure, setFailure] = React.useState<string | null>(null);
+
+  React.useEffect(() => {
+    if (user === null) return;
+    setValue(user.screensaverConfig);
+    setFailure(null);
+  }, [user]);
+
+  const save = useMutation({
+    mutationFn: async () => {
+      if (user === null) throw new Error("no kiosk user selected");
+      if (value.some((entry) => entry === null)) {
+        throw new Error("Finish choosing every stat, or remove the incomplete row.");
+      }
+      return api.updateUser(user.id, {
+        screensaverConfig: value.filter(
+          (entry): entry is ScreensaverDataPoint => entry !== null,
+        ),
+      });
+    },
+    onSuccess: async () => {
+      toast.success(`Updated ${user?.username ?? "kiosk"}'s screensaver.`);
+      await onUpdated();
+      onOpenChange(false);
+    },
+    onError: (error: unknown) => setFailure(describeAdminFailure(error).message),
+  });
+
+  return (
+    <Dialog open={user !== null} onOpenChange={onOpenChange}>
+      <DialogContent className="max-h-[90dvh] overflow-y-auto sm:max-w-3xl">
+        <DialogHeader>
+          <DialogTitle>Configure screensaver for {user?.username}</DialogTitle>
+          <DialogDescription>
+            Choose and order the live readings that rotate beneath the kiosk clock.
+          </DialogDescription>
+        </DialogHeader>
+        <ScreensaverConfigEditor value={value} onChange={setValue} disabled={save.isPending} />
+        {failure !== null ? (
+          <Alert variant="destructive">
+            <AlertCircle aria-hidden="true" />
+            <AlertDescription>{failure}</AlertDescription>
+          </Alert>
+        ) : null}
+        <DialogFooter>
+          <Button type="button" variant="outline" disabled={save.isPending} onClick={() => onOpenChange(false)}>
+            Cancel
+          </Button>
+          <Button type="button" disabled={save.isPending} onClick={() => { setFailure(null); save.mutate(); }}>
+            {save.isPending ? <Loader2 className="animate-spin" aria-hidden="true" /> : null}
+            Save screensaver
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
   );
 }
 

@@ -132,6 +132,73 @@
     hsl(var(--muted) / 0.35);
 }
 
+.mobile-platform .mobile-kiosk-screensaver {
+  position: fixed;
+  top: var(--mobile-safe-area-top);
+  right: var(--mobile-safe-area-right);
+  bottom: var(--mobile-safe-area-bottom);
+  left: var(--mobile-safe-area-left);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: clamp(3rem, 12vh, 7rem);
+  overflow: hidden;
+  padding: 2rem;
+  color: hsl(var(--foreground));
+  background:
+    radial-gradient(circle at 50% 40%, hsl(var(--accent) / 0.12), transparent 42%),
+    hsl(var(--background));
+  touch-action: manipulation;
+  user-select: none;
+}
+
+.mobile-platform .mobile-kiosk-clock {
+  font-size: clamp(4rem, 18vw, 9rem);
+  font-weight: 600;
+  line-height: 0.9;
+  letter-spacing: -0.055em;
+}
+
+.mobile-platform .mobile-kiosk-reading-stage {
+  width: min(100%, 44rem);
+  min-height: 10rem;
+  display: grid;
+}
+
+.mobile-platform .mobile-kiosk-reading {
+  grid-area: 1 / 1;
+  text-align: center;
+}
+
+.mobile-platform .mobile-kiosk-reading-in {
+  animation: mobile-kiosk-reading-in 420ms ease-out both;
+}
+
+.mobile-platform .mobile-kiosk-reading-out {
+  animation: mobile-kiosk-reading-out 420ms ease-out both;
+}
+
+@keyframes mobile-kiosk-reading-in {
+  from {
+    opacity: 0;
+  }
+
+  to {
+    opacity: 1;
+  }
+}
+
+@keyframes mobile-kiosk-reading-out {
+  from {
+    opacity: 1;
+  }
+
+  to {
+    opacity: 0;
+  }
+}
+
 /* A phone turned sideways is wide enough to cross Tailwind's desktop `md`
    breakpoint but does not have the vertical room for desktop chrome. Tablets
    remain unchanged because their landscape viewport is taller than 600px. */

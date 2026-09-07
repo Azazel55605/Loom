@@ -28,8 +28,10 @@ import type { Group, User } from "@loom/ui-kit/lib/api";
 import { useApiClient } from "@loom/ui-kit/lib/api-context";
 import { describeAdminFailure } from "@loom/ui-kit/lib/admin-error";
 import { GroupDialog } from "@loom/ui-kit/pages/settings/GroupsPanel";
+import { ScreensaverConfigEditor } from "@loom/ui-kit/components/DataPointPicker";
+import type { ScreensaverDataPoint } from "@loom/ui-kit/lib/api";
 
-const STEPS = ["Account", "Permissions group", "Dashboards", "Summary"] as const;
+const STEPS = ["Account", "Permissions group", "Dashboards", "Screensaver", "Summary"] as const;
 
 type KioskSetupWizardProps = {
   open: boolean;
@@ -60,6 +62,9 @@ export function KioskSetupWizard({
   const [password, setPassword] = React.useState("");
   const [groupId, setGroupId] = React.useState("");
   const [dashboardIds, setDashboardIds] = React.useState<string[]>([]);
+  const [screensaverConfig, setScreensaverConfig] = React.useState<
+    Array<ScreensaverDataPoint | null>
+  >([]);
   const [failure, setFailure] = React.useState<string | null>(null);
   const [submitting, setSubmitting] = React.useState(false);
   const [createdUser, setCreatedUser] = React.useState<User | null>(null);
@@ -91,6 +96,7 @@ export function KioskSetupWizard({
     setPassword("");
     setGroupId("");
     setDashboardIds([]);
+    setScreensaverConfig([]);
     setFailure(null);
     setSubmitting(false);
     setCreatedUser(null);
@@ -114,6 +120,10 @@ export function KioskSetupWizard({
       setFailure("Choose a permissions group.");
       return;
     }
+    if (step === 3 && screensaverConfig.some((entry) => entry === null)) {
+      setFailure("Finish choosing every screensaver stat, or remove the incomplete row.");
+      return;
+    }
     setStep((current) => Math.min(current + 1, STEPS.length - 1));
   }
 
@@ -129,6 +139,9 @@ export function KioskSetupWizard({
           password,
           groupIds: [groupId],
           isKiosk: true,
+          screensaverConfig: screensaverConfig.filter(
+            (entry): entry is ScreensaverDataPoint => entry !== null,
+          ),
         });
         setCreatedUser(user);
         // Drop the secret as soon as the account exists. Retrying dashboard
@@ -183,7 +196,7 @@ export function KioskSetupWizard({
             </DialogDescription>
           </DialogHeader>
 
-          <ol className="grid grid-cols-4 gap-2" aria-label="Kiosk setup progress">
+          <ol className="grid grid-cols-5 gap-2" aria-label="Kiosk setup progress">
             {STEPS.map((label, index) => (
               <li key={label} className="min-w-0 text-center">
                 <div
@@ -309,6 +322,22 @@ export function KioskSetupWizard({
             )}
 
             {step === 3 && (
+              <div className="flex flex-col gap-3">
+                <div>
+                  <h3 className="text-sm font-medium">Screensaver stats</h3>
+                  <p className="text-sm text-muted-foreground">
+                    Optional. These readings rotate beneath the clock while a kiosk is idle.
+                  </p>
+                </div>
+                <ScreensaverConfigEditor
+                  value={screensaverConfig}
+                  onChange={setScreensaverConfig}
+                  disabled={submitting}
+                />
+              </div>
+            )}
+
+            {step === 4 && (
               <dl className="grid grid-cols-[auto_1fr] gap-x-4 gap-y-3 rounded-md border p-4 text-sm">
                 <dt className="text-muted-foreground">Username</dt>
                 <dd className="font-medium">{username.trim()}</dd>
@@ -320,6 +349,10 @@ export function KioskSetupWizard({
                 <dd className="font-medium">{dashboardIds.length}</dd>
                 <dt className="text-muted-foreground">Dashboard role</dt>
                 <dd><Badge variant="outline">Viewer</Badge></dd>
+                <dt className="text-muted-foreground">Screensaver stats</dt>
+                <dd className="font-medium">
+                  {screensaverConfig.filter((entry) => entry !== null).length}
+                </dd>
               </dl>
             )}
           </div>

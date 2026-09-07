@@ -3527,6 +3527,13 @@ the tables below.
   "displayName": "The Admin",
   "avatarUrl": "/avatars/2f1c8b90-5d3e-4a71-9c02-6b8d4e1f7a35.png",
   "createdAt": "2026-08-19T17:04:11.882401553+00:00",
+  "screensaverConfig": [
+    {
+      "connectorInstanceId": "<connector instance id>",
+      "targetId": null,
+      "dataPointId": "load"
+    }
+  ],
   "groups": [
     { "id": "00000000-0000-4000-8000-000000000001", "name": "Administrators" }
   ]
@@ -3535,6 +3542,9 @@ the tables below.
 
 `isKiosk` is the informational marker administrators use to designate an
 account for mobile kiosk presentation. It grants no permissions by itself.
+`screensaverConfig` is the administrator-selected ordered list of live readings
+for that account's kiosk idle screen. It is empty for clock-only presentation;
+`targetId: null` addresses the connector's host view.
 `displayName` and `avatarUrl` are `null` when unset. As everywhere else in this
 API, **there is no password field**.
 
@@ -3712,7 +3722,8 @@ Requires `users.manage`.
     "isActive": true,
     "isKiosk": false,
     "createdAt": "2026-08-19T17:04:11.882401553+00:00",
-    "groupIds": ["00000000-0000-4000-8000-000000000001"]
+    "groupIds": ["00000000-0000-4000-8000-000000000001"],
+    "screensaverConfig": []
   }
 ]
 ```
@@ -3730,14 +3741,17 @@ Requires `users.manage`.
   "username": "housemate",
   "password": "a-good-password",
   "isKiosk": false,
-  "groupIds": ["<group id>"]
+  "groupIds": ["<group id>"],
+  "screensaverConfig": []
 }
 ```
 
 `groupIds` may be omitted or empty — an account with no groups can sign in and
 do nothing, which is a valid state. `isKiosk` is optional and defaults to
 `false`; it distinguishes the account in clients but does not alter permission
-enforcement. The password floor is **8 characters**, the same constant
+enforcement. `screensaverConfig` is optional and defaults to `[]`; every entry
+is validated against the connector instance's current target and data-point
+descriptors. The password floor is **8 characters**, the same constant
 `POST /setup` uses, so the rule cannot drift between the two ways an account is
 created.
 
@@ -3755,20 +3769,29 @@ Requires `users.manage`. All fields are optional; an absent field is left
 alone.
 
 ```json
-{ "isActive": false, "isKiosk": true, "groupIds": ["<group id>"] }
+{
+  "isActive": false,
+  "isKiosk": true,
+  "groupIds": ["<group id>"],
+  "screensaverConfig": []
+}
 ```
 
 `groupIds` **replaces** membership wholesale rather than applying a delta: the
 caller states the membership it wants and gets exactly that, with no dependence
 on what it believed the previous state to be. `isKiosk` remains informational;
 turning it on never grants access that the resulting group memberships do not.
+`screensaverConfig` replaces the ordered list wholesale when present and stays
+unchanged when absent. Each reference must name a real, currently available
+connector instance, a valid host/sub-target view, and a data point declared for
+exactly that view — the same validation used by dashboard display bindings.
 
 **Response 200** — the updated user.
 
 | Status | Meaning |
 | --- | --- |
 | 200 | Applied. |
-| 400 | An unknown group id. |
+| 400 | An unknown group id or invalid screensaver data-point reference. |
 | 404 | No such user. |
 | 409 | [A safeguard refused it](#safeguards): this is you, or it would leave no active administrator. |
 

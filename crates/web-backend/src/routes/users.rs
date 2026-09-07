@@ -41,6 +41,8 @@ use crate::auth::password::{hash_password, MIN_PASSWORD_LENGTH};
 use crate::error::{internal_error, ErrorBody};
 use crate::state::AppState;
 
+use super::dashboards::validate_data_point_reference;
+
 /// A user as the API reports them.
 ///
 /// There is no field for the password hash and there must never be one. It is
@@ -56,6 +58,17 @@ pub struct UserResponse {
     created_at: String,
     /// Ids of every group the user belongs to.
     group_ids: Vec<String>,
+    /// Ordered ambient readings configured for kiosk presentation.
+    screensaver_config: Vec<ScreensaverDataPoint>,
+}
+
+/// One live connector reading shown by a kiosk's idle screensaver.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ScreensaverDataPoint {
+    connector_instance_id: String,
+    target_id: Option<String>,
+    data_point_id: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -70,6 +83,9 @@ pub struct CreateUserRequest {
     /// Presentation-only marker for accounts intended for a kiosk device.
     #[serde(default)]
     is_kiosk: bool,
+    /// Optional ordered ambient readings. Empty is a clock-only screensaver.
+    #[serde(default)]
+    screensaver_config: Vec<ScreensaverDataPoint>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -85,6 +101,8 @@ pub struct UpdateUserRequest {
     /// wants and gets exactly that, with no dependence on what it believed the
     /// previous state to be.
     group_ids: Option<Vec<String>>,
+    /// Absent leaves it alone; present replaces the ordered list wholesale.
+    screensaver_config: Option<Vec<ScreensaverDataPoint>>,
 }
 
 #[derive(sqlx::FromRow)]
@@ -94,6 +112,7 @@ struct UserRow {
     is_active: bool,
     is_kiosk: bool,
     created_at: String,
+    screensaver_config: Option<String>,
 }
 
 #[derive(Debug, sqlx::FromRow)]
@@ -263,7 +282,8 @@ pub async fn list_users(
     State(state): State<AppState>,
 ) -> Response {
     let users = sqlx::query_as::<_, UserRow>(
-        "SELECT id, username, is_active, is_kiosk, created_at FROM users ORDER BY username",
+        "SELECT id, username, is_active, is_kiosk, created_at, screensaver_config \
+         FROM users ORDER BY username",
     )
     .fetch_all(&state.pool)
     .await;
@@ -285,21 +305,30 @@ pub async fn list_users(
         Err(error) => return internal_error("listing group memberships", error),
     };
 
-    let responses: Vec<UserResponse> = users
+    let responses = users
         .into_iter()
-        .map(|user| UserResponse {
-            group_ids: memberships
-                .iter()
-                .filter(|(user_id, _)| user_id == &user.id)
-                .map(|(_, group_id)| group_id.clone())
-                .collect(),
-            id: user.id,
-            username: user.username,
-            is_active: user.is_active,
-            is_kiosk: user.is_kiosk,
-            created_at: user.created_at,
+        .map(|user| {
+            let screensaver_config = decode_screensaver_config(user.screensaver_config.as_deref())?;
+            Ok(UserResponse {
+                group_ids: memberships
+                    .iter()
+                    .filter(|(user_id, _)| user_id == &user.id)
+                    .map(|(_, group_id)| group_id.clone())
+                    .collect(),
+                id: user.id,
+                username: user.username,
+                is_active: user.is_active,
+                is_kiosk: user.is_kiosk,
+                created_at: user.created_at,
+                screensaver_config,
+            })
         })
-        .collect();
+        .collect::<Result<Vec<_>, serde_json::Error>>();
+
+    let responses = match responses {
+        Ok(responses) => responses,
+        Err(error) => return internal_error("reading a user's screensaver configuration", error),
+    };
 
     Json(responses).into_response()
 }
@@ -327,6 +356,15 @@ pub async fn create_user(
             format!("password must be at least {MIN_PASSWORD_LENGTH} characters"),
         );
     }
+
+    if let Err(response) = validate_screensaver_config(&state, &request.screensaver_config).await {
+        return *response;
+    }
+
+    let screensaver_config = match encode_screensaver_config(&request.screensaver_config) {
+        Ok(config) => config,
+        Err(error) => return internal_error("serializing screensaver configuration", error),
+    };
 
     let password_hash = match hash_password(&request.password) {
         Ok(hash) => hash,
@@ -360,14 +398,16 @@ pub async fn create_user(
     let now = Utc::now().to_rfc3339();
 
     if let Err(error) = sqlx::query(
-        "INSERT INTO users (id, username, password_hash, is_active, is_kiosk, created_at) \
-         VALUES (?, ?, ?, TRUE, ?, ?)",
+        "INSERT INTO users \
+         (id, username, password_hash, is_active, is_kiosk, created_at, screensaver_config) \
+         VALUES (?, ?, ?, TRUE, ?, ?, ?)",
     )
     .bind(&user_id)
     .bind(username)
     .bind(&password_hash)
     .bind(request.is_kiosk)
     .bind(&now)
+    .bind(screensaver_config)
     .execute(&mut *tx)
     .await
     {
@@ -393,6 +433,7 @@ pub async fn create_user(
             is_kiosk: request.is_kiosk,
             created_at: now,
             group_ids: request.group_ids,
+            screensaver_config: request.screensaver_config,
         }),
     )
         .into_response()
@@ -414,13 +455,20 @@ pub async fn update_user(
         );
     }
 
+    if let Some(config) = &request.screensaver_config {
+        if let Err(response) = validate_screensaver_config(&state, config).await {
+            return *response;
+        }
+    }
+
     let mut tx = match state.pool.begin().await {
         Ok(tx) => tx,
         Err(error) => return internal_error("beginning the update-user transaction", error),
     };
 
     let existing = sqlx::query_as::<_, UserRow>(
-        "SELECT id, username, is_active, is_kiosk, created_at FROM users WHERE id = ?",
+        "SELECT id, username, is_active, is_kiosk, created_at, screensaver_config \
+         FROM users WHERE id = ?",
     )
     .bind(&id)
     .fetch_optional(&mut *tx)
@@ -433,6 +481,14 @@ pub async fn update_user(
         }
         Err(error) => return internal_error("loading the user", error),
     };
+
+    let existing_screensaver_config =
+        match decode_screensaver_config(existing.screensaver_config.as_deref()) {
+            Ok(config) => config,
+            Err(error) => {
+                return internal_error("reading the user's screensaver configuration", error)
+            }
+        };
 
     if let Some(is_active) = request.is_active {
         if let Err(error) = sqlx::query("UPDATE users SET is_active = ? WHERE id = ?")
@@ -462,6 +518,21 @@ pub async fn update_user(
         }
     }
 
+    if let Some(config) = &request.screensaver_config {
+        let encoded = match encode_screensaver_config(config) {
+            Ok(encoded) => encoded,
+            Err(error) => return internal_error("serializing screensaver configuration", error),
+        };
+        if let Err(error) = sqlx::query("UPDATE users SET screensaver_config = ? WHERE id = ?")
+            .bind(encoded)
+            .bind(&id)
+            .execute(&mut *tx)
+            .await
+        {
+            return internal_error("updating screensaver configuration", error);
+        }
+    }
+
     // Checked *after* applying the change and before committing, so it asks
     // about the state the commit would actually produce rather than predicting
     // it. Any path that empties the Administrators group — deactivation,
@@ -484,6 +555,11 @@ pub async fn update_user(
         return internal_error("committing the user update", error);
     }
 
+    let screensaver_config = match request.screensaver_config {
+        Some(config) => config,
+        None => existing_screensaver_config,
+    };
+
     Json(UserResponse {
         id,
         username: existing.username,
@@ -491,8 +567,44 @@ pub async fn update_user(
         is_kiosk: request.is_kiosk.unwrap_or(existing.is_kiosk),
         created_at: existing.created_at,
         group_ids,
+        screensaver_config,
     })
     .into_response()
+}
+
+fn encode_screensaver_config(
+    config: &[ScreensaverDataPoint],
+) -> Result<Option<String>, serde_json::Error> {
+    if config.is_empty() {
+        Ok(None)
+    } else {
+        serde_json::to_string(config).map(Some)
+    }
+}
+
+fn decode_screensaver_config(
+    stored: Option<&str>,
+) -> Result<Vec<ScreensaverDataPoint>, serde_json::Error> {
+    Ok(match stored {
+        Some(stored) => serde_json::from_str(stored)?,
+        None => Vec::new(),
+    })
+}
+
+async fn validate_screensaver_config(
+    state: &AppState,
+    config: &[ScreensaverDataPoint],
+) -> Result<(), Box<Response>> {
+    for item in config {
+        validate_data_point_reference(
+            state,
+            &item.connector_instance_id,
+            item.target_id.as_deref(),
+            &item.data_point_id,
+        )
+        .await?;
+    }
+    Ok(())
 }
 
 /// `DELETE /users/{id}`

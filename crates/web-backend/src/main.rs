@@ -5832,6 +5832,7 @@ mod tests {
     async fn kiosk_marker_round_trips_through_user_admin_and_account() {
         let app = test_app().await;
         let (admin, _) = setup_and_login(&app.router).await;
+        let connector_id = create_debug_instance(&app.router, &admin, "Ambient fixture").await;
 
         let (status, created) = send(
             &app.router,
@@ -5842,12 +5843,21 @@ mod tests {
                     "username": "wall-display",
                     "password": "a-good-password",
                     "isKiosk": true,
+                    "screensaverConfig": [{
+                        "connectorInstanceId": connector_id,
+                        "targetId": null,
+                        "dataPointId": loom_core::connector::debug::DATA_POINT_LOAD,
+                    }],
                 }),
             ),
         )
         .await;
         assert_eq!(status, StatusCode::CREATED, "{created:#}");
         assert_eq!(created["isKiosk"], true);
+        assert_eq!(
+            created["screensaverConfig"][0]["connectorInstanceId"],
+            connector_id
+        );
         let user_id = created["id"].as_str().expect("id");
 
         let (status, updated) = send(
@@ -5861,6 +5871,7 @@ mod tests {
         .await;
         assert_eq!(status, StatusCode::OK, "{updated:#}");
         assert_eq!(updated["isKiosk"], false);
+        assert_eq!(updated["screensaverConfig"][0]["dataPointId"], "load");
 
         let (status, updated) = send(
             &app.router,
@@ -5894,6 +5905,24 @@ mod tests {
         .await;
         assert_eq!(status, StatusCode::OK, "{account:#}");
         assert_eq!(account["isKiosk"], true);
+        assert_eq!(account["screensaverConfig"][0]["dataPointId"], "load");
+
+        let (status, rejected) = send(
+            &app.router,
+            patch_json_auth(
+                &format!("/users/{user_id}"),
+                &admin,
+                serde_json::json!({
+                    "screensaverConfig": [{
+                        "connectorInstanceId": connector_id,
+                        "targetId": null,
+                        "dataPointId": "not-a-real-reading",
+                    }],
+                }),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{rejected:#}");
     }
 
     #[tokio::test]

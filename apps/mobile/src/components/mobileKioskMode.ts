@@ -5,8 +5,12 @@ export type MobileKioskModeContextValue = {
   isTransitioning: boolean;
   enabled: boolean;
   accountId: string | null;
+  screensaverEnabled: boolean;
+  screensaverIdleSeconds: number;
   enable: (accountId: string) => Promise<void>;
   disable: () => Promise<void>;
+  setScreensaverEnabled: (enabled: boolean) => Promise<void>;
+  setScreensaverIdleSeconds: (seconds: number) => Promise<void>;
   exitWith: (activateDifferentAccount: () => Promise<void>) => Promise<void>;
 };
 

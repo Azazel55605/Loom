@@ -491,6 +491,7 @@ export function AddPlacementDialog({
                     </p>
                   </div>
                   <PlacementBindingEditor
+                    connectorInstanceId={instanceId}
                     dataPoints={detail.data.dataPoints}
                     actions={detail.data.actions}
                     resourceKinds={resourceKinds.data ?? []}

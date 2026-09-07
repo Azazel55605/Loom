@@ -12,6 +12,8 @@ import { useApiClient } from "@loom/ui-kit/lib/api-context";
 import { useAuth } from "@loom/ui-kit/lib/auth-context";
 import { describeConnectorError } from "@loom/ui-kit/lib/connector-error";
 import { cn } from "@loom/ui-kit/lib/utils";
+import { ScreensaverView } from "@/components/ScreensaverView";
+import { useMobileKioskMode } from "@/components/mobileKioskMode";
 
 const SWIPE_THRESHOLD_PX = 60;
 const EXIT_HOLD_MS = 3_000;
@@ -20,12 +22,15 @@ export function MobileKioskShell({ onExited }: { onExited: () => void }) {
   const api = useApiClient();
   const queryClient = useQueryClient();
   const { user } = useAuth();
+  const kiosk = useMobileKioskMode();
   const dashboards = useQuery({
     queryKey: dashboardsQueryKey,
     queryFn: ({ signal }) => api.getDashboards(signal),
   });
   const [index, setIndex] = React.useState(0);
   const [exitOpen, setExitOpen] = React.useState(false);
+  const [screensaverVisible, setScreensaverVisible] = React.useState(false);
+  const lastActivityAt = React.useRef(Date.now());
   const touchStart = React.useRef<{ x: number; y: number } | null>(null);
   const holdTimer = React.useRef<ReturnType<typeof setTimeout> | null>(null);
 
@@ -44,6 +49,35 @@ export function MobileKioskShell({ onExited }: { onExited: () => void }) {
     [],
   );
 
+  React.useEffect(() => {
+    if (!kiosk.screensaverEnabled) {
+      setScreensaverVisible(false);
+      return;
+    }
+    const recordActivity = () => {
+      lastActivityAt.current = Date.now();
+      setScreensaverVisible(false);
+    };
+    const checkIdle = () => {
+      if (Date.now() - lastActivityAt.current >= kiosk.screensaverIdleSeconds * 1_000) {
+        setScreensaverVisible(true);
+      }
+    };
+    window.addEventListener("pointerdown", recordActivity, { passive: true });
+    window.addEventListener("touchstart", recordActivity, { passive: true });
+    const timer = window.setInterval(checkIdle, 1_000);
+    return () => {
+      window.removeEventListener("pointerdown", recordActivity);
+      window.removeEventListener("touchstart", recordActivity);
+      window.clearInterval(timer);
+    };
+  }, [kiosk.screensaverEnabled, kiosk.screensaverIdleSeconds]);
+
+  const account = useQuery({
+    queryKey: ["account"],
+    queryFn: ({ signal }) => api.getAccount(signal),
+  });
+
   function stopExitHold() {
     if (holdTimer.current !== null) clearTimeout(holdTimer.current);
     holdTimer.current = null;
@@ -52,6 +86,18 @@ export function MobileKioskShell({ onExited }: { onExited: () => void }) {
   function navigateToDashboard(dashboardId: string) {
     const nextIndex = dashboardList.findIndex((dashboard) => dashboard.id === dashboardId);
     if (nextIndex >= 0) setIndex(nextIndex);
+  }
+
+  if (screensaverVisible) {
+    return (
+      <ScreensaverView
+        config={account.data?.screensaverConfig ?? []}
+        onDismiss={() => {
+          lastActivityAt.current = Date.now();
+          setScreensaverVisible(false);
+        }}
+      />
+    );
   }
 
   return (

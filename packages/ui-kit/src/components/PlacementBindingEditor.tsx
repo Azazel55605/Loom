@@ -12,6 +12,7 @@ import {
   SelectValue,
 } from "@loom/ui-kit/components/ui/select";
 import { SegmentedControl } from "@loom/ui-kit/components/SegmentedControl";
+import { DataPointPicker } from "@loom/ui-kit/components/DataPointPicker";
 import { cn } from "@loom/ui-kit/lib/utils";
 import { matchesTarget } from "@loom/ui-kit/lib/connector-details";
 import type {
@@ -75,6 +76,7 @@ function numberField(config: Record<string, unknown>, key: string): string {
  * the API can still be nonsense.
  */
 export function PlacementBindingEditor({
+  connectorInstanceId,
   dataPoints,
   actions,
   resourceKinds,
@@ -84,6 +86,7 @@ export function PlacementBindingEditor({
   disabled,
   className,
 }: {
+  connectorInstanceId: string;
   dataPoints: DataPointDescriptor[];
   actions: ConnectorAction[];
   resourceKinds: ResourceKindDescriptor[];
@@ -175,6 +178,8 @@ export function PlacementBindingEditor({
             <li key={rowKeys.current[index]} className="surface-panel rounded-lg border p-3">
               <BindingRow
                 binding={binding}
+                connectorInstanceId={connectorInstanceId}
+                targetId={targetId}
                 dataPoints={availableDataPoints}
                 actions={availableActions}
                 resourceKinds={resourceKinds}
@@ -212,6 +217,8 @@ export function PlacementBindingEditor({
 
 function BindingRow({
   binding,
+  connectorInstanceId,
+  targetId,
   dataPoints,
   actions,
   resourceKinds,
@@ -221,6 +228,8 @@ function BindingRow({
   onRemove,
 }: {
   binding: WidgetBinding;
+  connectorInstanceId: string;
+  targetId: string | null;
   dataPoints: DataPointDescriptor[];
   actions: ConnectorAction[];
   resourceKinds: ResourceKindDescriptor[];
@@ -306,6 +315,8 @@ function BindingRow({
       {"display" in binding ? (
         <DisplayBindingFields
           binding={binding.display}
+          connectorInstanceId={connectorInstanceId}
+          targetId={targetId}
           dataPoints={dataPoints}
           disabled={disabled}
           idPrefix={idPrefix}
@@ -352,12 +363,16 @@ type ActionBinding = Extract<WidgetBinding, { action: unknown }>["action"];
 
 function DisplayBindingFields({
   binding,
+  connectorInstanceId,
+  targetId,
   dataPoints,
   disabled,
   idPrefix,
   onChange,
 }: {
   binding: DisplayBinding;
+  connectorInstanceId: string;
+  targetId: string | null;
   dataPoints: DataPointDescriptor[];
   disabled?: boolean;
   idPrefix: string;
@@ -397,15 +412,17 @@ function DisplayBindingFields({
 
   return (
     <div className="grid gap-3 sm:grid-cols-2">
-      <Field id={`${idPrefix}-point`} label="Data point">
-        <Select
-          value={binding.dataPointId}
-          disabled={disabled || dataPoints.length === 0}
-          onValueChange={(nextId) => {
-            // Radix reports "" when it clears its own selection; no data point
-            // is ever named that, so it is never a real choice.
-            if (nextId === "") return;
-            const point = dataPoints.find((candidate) => candidate.id === nextId);
+      <div className="flex flex-col gap-1">
+        <DataPointPicker
+          value={{ connectorInstanceId, targetId, dataPointId: binding.dataPointId }}
+          fixedContext={{ connectorInstanceId, targetId, dataPoints }}
+          disabled={disabled}
+          idPrefix={idPrefix}
+          onChange={(selection) => {
+            if (selection === null) return;
+            const point = dataPoints.find(
+              (candidate) => candidate.id === selection.dataPointId,
+            );
             if (point === undefined) return;
             const allowed = getCompatibleWidgetTypes(point.valueType);
             // Keep the chosen widget when the new data point still supports it;
@@ -414,28 +431,17 @@ function DisplayBindingFields({
             const key = allowed.includes(currentKey) ? currentKey : allowed[0];
             onChange({
               ...binding,
-              dataPointId: nextId,
+              dataPointId: selection.dataPointId,
               widgetType: displayWidgetFromKey(key, chartType),
             });
           }}
-        >
-          <SelectTrigger id={`${idPrefix}-point`}>
-            <SelectValue placeholder="Choose a data point" />
-          </SelectTrigger>
-          <SelectContent>
-            {dataPoints.map((point) => (
-              <SelectItem key={point.id} value={point.id}>
-                {point.label}
-              </SelectItem>
-            ))}
-          </SelectContent>
-        </Select>
+        />
         {descriptor === undefined ? (
           <p className="text-xs text-destructive">
             This connector no longer declares <code className="font-mono">{binding.dataPointId}</code>.
           </p>
         ) : null}
-      </Field>
+      </div>
 
       <Field id={`${idPrefix}-widget`} label="Widget">
         <Select

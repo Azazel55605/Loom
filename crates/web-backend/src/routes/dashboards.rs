@@ -7,13 +7,14 @@
 //! instance-wide routes live under `/admin/dashboards`.
 
 use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
 
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::Json;
 use chrono::Utc;
-use loom_core::connector::WidgetBinding;
+use loom_core::connector::{Connector, WidgetBinding};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sqlx::SqlitePool;
@@ -2134,6 +2135,33 @@ async fn validate_placement(
     requested_bindings: Option<Vec<WidgetBinding>>,
     existing_bindings: Option<Vec<WidgetBinding>>,
 ) -> RouteResult<Vec<WidgetBinding>> {
+    let connector = resolve_connector_target(state, connector_id, target_id).await?;
+
+    let (minimum_width, minimum_height) = connector.metadata().min_size;
+    if width < i64::from(minimum_width) || height < i64::from(minimum_height) {
+        return Err(Box::new(ErrorBody::message(
+            StatusCode::BAD_REQUEST,
+            format!(
+                "placement size must be at least {minimum_width}x{minimum_height} for this connector"
+            ),
+        )));
+    }
+
+    let bindings = requested_bindings
+        .or(existing_bindings)
+        .unwrap_or_else(|| connector.default_layout_for(target_id).bindings);
+    validate_widget_bindings(connector.as_ref(), target_id, &bindings).await?;
+    Ok(bindings)
+}
+
+/// Resolves a stored connector reference and, when present, verifies its live
+/// sub-target. Dashboard bindings and kiosk screensaver selections deliberately
+/// share this path so the two saved-reference surfaces cannot drift.
+async fn resolve_connector_target(
+    state: &AppState,
+    connector_id: &str,
+    target_id: Option<&str>,
+) -> RouteResult<Arc<dyn Connector>> {
     let exists = sqlx::query_scalar::<_, bool>(
         "SELECT EXISTS(SELECT 1 FROM connector_instances WHERE id = ?)",
     )
@@ -2157,16 +2185,6 @@ async fn validate_placement(
         ))
     })?;
 
-    let (minimum_width, minimum_height) = connector.metadata().min_size;
-    if width < i64::from(minimum_width) || height < i64::from(minimum_height) {
-        return Err(Box::new(ErrorBody::message(
-            StatusCode::BAD_REQUEST,
-            format!(
-                "placement size must be at least {minimum_width}x{minimum_height} for this connector"
-            ),
-        )));
-    }
-
     if let Some(target_id) = target_id {
         if !connector.supports_sub_targets() {
             return Err(Box::new(bad_request(
@@ -2185,20 +2203,24 @@ async fn validate_placement(
         }
     }
 
-    let bindings = requested_bindings
-        .or(existing_bindings)
-        .unwrap_or_else(|| connector.default_layout_for(target_id).bindings);
+    Ok(connector)
+}
+
+/// Validates only the descriptor namespaces after the connector and target
+/// have been resolved. Kept separate so a kiosk reading can use the identical
+/// data-point lookup without inventing a second convention.
+async fn validate_widget_bindings(
+    connector: &dyn Connector,
+    target_id: Option<&str>,
+    bindings: &[WidgetBinding],
+) -> RouteResult<()> {
     // Each binding kind resolves against its own namespace: a display binding
     // names a data point, an action binding names an action, and a
     // resource-kind binding names a browsable kind. They are all strings and
     // they are not interchangeable, so checking one list for all three would
     // either reject valid bindings or wave through bindings that can never
     // render.
-    let data_point_ids: HashSet<(String, Option<String>)> = connector
-        .data_points()
-        .into_iter()
-        .map(|point| (point.id, point.target_id))
-        .collect();
+    let data_point_ids = connector_data_point_ids(connector);
     let action_ids: HashSet<(String, Option<String>)> = connector
         .actions()
         .await
@@ -2218,7 +2240,7 @@ async fn validate_placement(
     let mut unknown_data_points: Vec<&str> = Vec::new();
     let mut unknown_actions: Vec<&str> = Vec::new();
     let mut unknown_resource_kinds: Vec<&str> = Vec::new();
-    for binding in &bindings {
+    for binding in bindings {
         match binding {
             WidgetBinding::Display { data_point_id, .. }
                 if !data_point_ids.contains(&(data_point_id.clone(), selected_target.clone())) =>
@@ -2279,7 +2301,36 @@ async fn validate_placement(
     // placement never grants `connectors.view` or `connectors.control`; action
     // requests still pass through the existing connector endpoint and are
     // checked against the viewer's own grants there.
-    Ok(bindings)
+    Ok(())
+}
+
+/// Validates one kiosk/screensaver reading through the same live connector,
+/// target, and data-point checks used for dashboard display bindings.
+pub(crate) async fn validate_data_point_reference(
+    state: &AppState,
+    connector_id: &str,
+    target_id: Option<&str>,
+    data_point_id: &str,
+) -> RouteResult<()> {
+    let connector = resolve_connector_target(state, connector_id, target_id).await?;
+    let selected_target = target_id.map(str::to_owned);
+    if connector_data_point_ids(connector.as_ref())
+        .contains(&(data_point_id.to_owned(), selected_target))
+    {
+        Ok(())
+    } else {
+        Err(Box::new(bad_request(format!(
+            "unknown data point for the selected connector view: {data_point_id}"
+        ))))
+    }
+}
+
+fn connector_data_point_ids(connector: &dyn Connector) -> HashSet<(String, Option<String>)> {
+    connector
+        .data_points()
+        .into_iter()
+        .map(|point| (point.id, point.target_id))
+        .collect()
 }
 
 async fn require_role(

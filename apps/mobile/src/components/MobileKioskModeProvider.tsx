@@ -1,9 +1,12 @@
 import * as React from "react";
 
 import {
+  DEFAULT_SCREENSAVER_IDLE_SECONDS,
   disableMobileKioskMode,
   enableMobileKioskMode,
   getMobileKioskSettings,
+  setMobileScreensaverEnabled,
+  setMobileScreensaverIdleSeconds,
 } from "@/adapters/mobileKioskSettings";
 import { MobileKioskModeContext } from "@/components/mobileKioskMode";
 
@@ -12,6 +15,10 @@ export function MobileKioskModeProvider({ children }: { children: React.ReactNod
   const [isTransitioning, setIsTransitioning] = React.useState(false);
   const [enabled, setEnabled] = React.useState(false);
   const [accountId, setAccountId] = React.useState<string | null>(null);
+  const [screensaverEnabled, setScreensaverEnabledState] = React.useState(true);
+  const [screensaverIdleSeconds, setScreensaverIdleSecondsState] = React.useState(
+    DEFAULT_SCREENSAVER_IDLE_SECONDS,
+  );
 
   React.useEffect(() => {
     let cancelled = false;
@@ -20,6 +27,8 @@ export function MobileKioskModeProvider({ children }: { children: React.ReactNod
         if (cancelled) return;
         setEnabled(settings.enabled);
         setAccountId(settings.accountId);
+        setScreensaverEnabledState(settings.screensaverEnabled);
+        setScreensaverIdleSecondsState(settings.screensaverIdleSeconds);
       })
       .catch(() => {
         if (cancelled) return;
@@ -46,6 +55,17 @@ export function MobileKioskModeProvider({ children }: { children: React.ReactNod
     setAccountId(null);
   }, []);
 
+  const setScreensaverEnabled = React.useCallback(async (next: boolean) => {
+    await setMobileScreensaverEnabled(next);
+    setScreensaverEnabledState(next);
+  }, []);
+
+  const setScreensaverIdleSeconds = React.useCallback(async (next: number) => {
+    const normalized = Math.max(1, Math.round(next));
+    await setMobileScreensaverIdleSeconds(normalized);
+    setScreensaverIdleSecondsState(normalized);
+  }, []);
+
   const exitWith = React.useCallback(
     async (activateDifferentAccount: () => Promise<void>) => {
       setIsTransitioning(true);
@@ -65,8 +85,32 @@ export function MobileKioskModeProvider({ children }: { children: React.ReactNod
   );
 
   const value = React.useMemo(
-    () => ({ isLoading, isTransitioning, enabled, accountId, enable, disable, exitWith }),
-    [accountId, disable, enable, enabled, exitWith, isLoading, isTransitioning],
+    () => ({
+      isLoading,
+      isTransitioning,
+      enabled,
+      accountId,
+      screensaverEnabled,
+      screensaverIdleSeconds,
+      enable,
+      disable,
+      setScreensaverEnabled,
+      setScreensaverIdleSeconds,
+      exitWith,
+    }),
+    [
+      accountId,
+      disable,
+      enable,
+      enabled,
+      exitWith,
+      isLoading,
+      isTransitioning,
+      screensaverEnabled,
+      screensaverIdleSeconds,
+      setScreensaverEnabled,
+      setScreensaverIdleSeconds,
+    ],
   );
 
   return (

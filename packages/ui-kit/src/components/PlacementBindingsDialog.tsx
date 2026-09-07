@@ -173,6 +173,7 @@ export function PlacementBindingsDialog({
                 </Alert>
               ) : (
                 <PlacementBindingEditor
+                  connectorInstanceId={instanceId as string}
                   dataPoints={detail.data.dataPoints}
                   actions={detail.data.actions}
                   resourceKinds={resourceKinds.data ?? []}

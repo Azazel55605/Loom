@@ -9,5 +9,5 @@
   "web-frontend": "0.3.5",
   "desktop": "0.3.2",
   "mobile": "0.4.0",
-  "mobile-android-version-code": 4
+  "mobile-android-version-code": "040"
 }
