@@ -272,10 +272,17 @@ function DashboardSection({ title, children }: { title: string; children: React.
         {title}
         <ChevronDown
           aria-hidden="true"
-          className={cn("transition-transform", !open && "-rotate-90")}
+          className={cn(
+            "transition-transform [transition-duration:var(--motion-fast)] [transition-timing-function:var(--motion-ease-standard)]",
+            !open && "-rotate-90",
+          )}
         />
       </Button>
-      {open ? <div className="mt-1 flex flex-col gap-1">{children}</div> : null}
+      <div className="motion-collapse-grid" data-state={open ? "open" : "closed"}>
+        <div className="min-h-0 overflow-hidden">
+          <div className="mt-1 flex flex-col gap-1">{children}</div>
+        </div>
+      </div>
     </section>
   );
 }

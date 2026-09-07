@@ -3,6 +3,7 @@ import * as React from "react";
 import { Tabs, TabsList, TabsTrigger } from "@loom/ui-kit/components/ui/tabs";
 import { useAuth } from "@loom/ui-kit/lib/auth-context";
 import { hasPermission, PERMISSION_KEYS } from "@loom/ui-kit/lib/permissions";
+import { MotionContent } from "@loom/ui-kit/components/MotionContent";
 
 export function SettingsLayout({
   activeSection,
@@ -69,7 +70,9 @@ export function SettingsLayout({
         </div>
       </Tabs>
 
-      {children}
+      <MotionContent motionKey={activeSection} variant="tab">
+        {children}
+      </MotionContent>
     </div>,
   );
 }

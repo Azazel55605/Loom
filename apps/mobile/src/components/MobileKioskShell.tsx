@@ -5,6 +5,7 @@ import { LockKeyhole } from "lucide-react";
 import { KioskExitDialog } from "@/components/KioskExitDialog";
 import { dashboardsQueryKey } from "@loom/ui-kit/components/DashboardSidebar";
 import { DashboardView } from "@loom/ui-kit/components/DashboardView";
+import { MotionContent } from "@loom/ui-kit/components/MotionContent";
 import { Alert, AlertDescription, AlertTitle } from "@loom/ui-kit/components/ui/alert";
 import { Button } from "@loom/ui-kit/components/ui/button";
 import { Skeleton } from "@loom/ui-kit/components/ui/skeleton";
@@ -141,12 +142,13 @@ export function MobileKioskShell({ onExited }: { onExited: () => void }) {
           </div>
         ) : null}
         {activeDashboard !== undefined ? (
-          <DashboardView
-            key={activeDashboard.id}
-            dashboardId={activeDashboard.id}
-            onDeleted={() => undefined}
-            onNavigateDashboard={navigateToDashboard}
-          />
+          <MotionContent motionKey={activeDashboard.id}>
+            <DashboardView
+              dashboardId={activeDashboard.id}
+              onDeleted={() => undefined}
+              onNavigateDashboard={navigateToDashboard}
+            />
+          </MotionContent>
         ) : null}
       </div>
 

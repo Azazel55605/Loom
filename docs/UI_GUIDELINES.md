@@ -234,6 +234,24 @@ a floor, not a default: selecting Full can never override an OS request for
 Reduced, while None may make it stricter. Stat-value flashes, dashboard edit
 transitions, and initial tile staggering all obey the effective level.
 
+Use the shared scale from `packages/ui-kit/src/lib/motion.ts` and its mirrored
+CSS custom properties rather than adding local durations:
+
+| Tier | Full | Reduced | Intended use |
+| ---- | ---- | ------- | ------------ |
+| Fast | 120 ms | 80 ms | press, focus, tooltip, and hover feedback |
+| Base | 200 ms | 120 ms | tabs, collapsibles, dialogs, and ordinary layout changes |
+| Slow | 320 ms | 160 ms | page/dashboard navigation and emphasized state changes |
+
+Full uses the shared standard/emphasized curves and may use small amounts of
+travel or scale. Reduced uses `ease-out`, retains short structural opacity
+feedback, and removes travel, scale, hover lift, stagger, and indefinite pulse.
+None makes every transition and animation instant. Navigation should therefore
+be the most prominent motion, component transitions quieter, and
+micro-interactions the subtlest. CSS-only work uses the `--motion-*` properties;
+JavaScript that genuinely needs a timeout reads `useAnimationLevel()`. Do not
+use JavaScript merely to reproduce a CSS `data-state` transition.
+
 ### Background themes
 
 Five complete neutral token sets are available: **Midnight** (near-black AMOLED),

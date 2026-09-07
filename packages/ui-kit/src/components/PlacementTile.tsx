@@ -375,7 +375,12 @@ function ConnectorPlacementTile({
         label={clickLabel(placement, instance.name)}
         onActivate={click.run}
       >
-      <Card className="flex h-full flex-col overflow-hidden">
+      <Card
+        className={cn(
+          "flex h-full flex-col overflow-hidden",
+          !editing && !grouping && "motion-hover-lift",
+        )}
+      >
         <CardHeader
           className={cn(
             "flex-row items-center justify-between space-y-0 gap-2 py-3",
@@ -685,6 +690,7 @@ function StaticPlacementTile({
       <Card
         className={cn(
           "flex h-full flex-col overflow-hidden",
+          !editing && !grouping && "motion-hover-lift",
           // The whole card is the drag surface: there is no header to aim at,
           // and a one-by-one tile has no room for a grip.
           editing &&

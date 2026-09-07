@@ -188,13 +188,21 @@ export function AppShell({
           <aside
             id="app-sidebar"
             className={cn(
-              "surface-panel sticky top-14 hidden h-[calc(100vh-3.5rem)] shrink-0 overflow-y-auto border-r transition-[width] md:block",
+              "surface-panel sticky top-14 hidden h-[calc(100vh-3.5rem)] shrink-0 overflow-hidden border-r transition-[width,border-color] [transition-duration:var(--motion-base)] [transition-timing-function:var(--motion-ease-standard)] md:block",
               sidebarCollapsed
                 ? "w-0 border-r-0"
                 : "w-64",
             )}
           >
-            {sidebarCollapsed ? null : sidebar}
+            <div
+              className={cn(
+                "h-full w-64 overflow-y-auto transition-opacity [transition-duration:var(--motion-fast)] [transition-timing-function:var(--motion-ease-standard)]",
+                sidebarCollapsed && "invisible pointer-events-none opacity-0",
+              )}
+              aria-hidden={sidebarCollapsed}
+            >
+              {sidebar}
+            </div>
           </aside>
           <main className="app-shell-main min-w-0 flex-1">
             <div className="mx-auto w-full max-w-7xl px-4 py-8 md:px-6">{children}</div>

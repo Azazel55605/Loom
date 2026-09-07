@@ -112,6 +112,16 @@
     --font-scale: 100%;
     --font-family: ui-sans-serif, system-ui, sans-serif, "Apple Color Emoji", "Segoe UI Emoji";
     --touch-target-size: 44px;
+
+    /* One motion scale for CSS. lib/motion.ts mirrors these millisecond values
+       for the few behaviors which must schedule work from JavaScript. */
+    --motion-fast: 120ms;
+    --motion-base: 200ms;
+    --motion-slow: 320ms;
+    --motion-ease-standard: cubic-bezier(0.2, 0.8, 0.2, 1);
+    --motion-ease-emphasized: cubic-bezier(0.22, 1, 0.36, 1);
+    --motion-travel: 0.5rem;
+    --motion-press-scale: 0.97;
   }
 
   :root[data-density="compact"] {
@@ -259,16 +269,18 @@
     --panel-alpha: var(--panel-alpha-extra);
   }
 
-  /* Reduced motion means reduced, not merely faster: movement is removed
-     rather than shortened. Nothing that conveys state may disappear. */
+  /* Reduced keeps short opacity-based structural feedback, but removes travel,
+     scale, hover lift, stagger and pulses. AccentThemeProvider applies the same
+     effective level when the OS signal changes at runtime. */
   @media (prefers-reduced-motion: reduce) {
-    *,
-    *::before,
-    *::after {
-      animation-duration: 0.01ms !important;
-      animation-iteration-count: 1 !important;
-      transition-duration: 0.01ms !important;
-      scroll-behavior: auto !important;
+    :root {
+      --motion-fast: 80ms;
+      --motion-base: 120ms;
+      --motion-slow: 160ms;
+      --motion-ease-standard: ease-out;
+      --motion-ease-emphasized: ease-out;
+      --motion-travel: 0px;
+      --motion-press-scale: 1;
     }
   }
 
@@ -276,14 +288,14 @@
      it. There is deliberately no class that turns motion back *on*: the OS
      setting is a floor, and an app preference is not entitled to override an
      accessibility request. See AccentThemeProvider. */
-  :root[data-animation-level="reduced"],
-  :root[data-animation-level="reduced"] *,
-  :root[data-animation-level="reduced"] *::before,
-  :root[data-animation-level="reduced"] *::after {
-    animation-duration: 0.01ms !important;
-    animation-iteration-count: 1 !important;
-    transition-duration: 0.01ms !important;
-    scroll-behavior: auto !important;
+  :root[data-animation-level="reduced"] {
+    --motion-fast: 80ms;
+    --motion-base: 120ms;
+    --motion-slow: 160ms;
+    --motion-ease-standard: ease-out;
+    --motion-ease-emphasized: ease-out;
+    --motion-travel: 0px;
+    --motion-press-scale: 1;
   }
 
   /* None is intentionally stronger than Reduced: it removes animation and
@@ -324,6 +336,158 @@
 
   .surface-panel {
     background-color: hsl(var(--muted));
+  }
+
+  @keyframes loom-page-enter {
+    from { opacity: 0; transform: translateX(var(--motion-travel)); }
+    to { opacity: 1; transform: translateX(0); }
+  }
+
+  @keyframes loom-tab-enter {
+    from { opacity: 0; transform: translateX(calc(var(--motion-travel) * 0.5)); }
+    to { opacity: 1; transform: translateX(0); }
+  }
+
+  @keyframes loom-content-enter {
+    from { opacity: 0; }
+    to { opacity: 1; }
+  }
+
+  @keyframes loom-pending-pulse {
+    0%, 100% { box-shadow: 0 0 0 0 hsl(var(--accent) / 0); }
+    50% { box-shadow: 0 0 0 0.3rem hsl(var(--accent) / 0.16); }
+  }
+
+  .motion-page-content {
+    animation: loom-page-enter var(--motion-slow) var(--motion-ease-emphasized) both;
+  }
+
+  .motion-tab-content {
+    animation: loom-tab-enter var(--motion-base) var(--motion-ease-standard) both;
+  }
+
+  .motion-content-reveal {
+    animation: loom-content-enter var(--motion-base) var(--motion-ease-standard) both;
+  }
+
+  .motion-hover-lift {
+    transition:
+      transform var(--motion-fast) var(--motion-ease-standard),
+      box-shadow var(--motion-fast) var(--motion-ease-standard);
+  }
+
+  :root[data-animation-level="full"] .motion-hover-lift:hover {
+    transform: translateY(-2px) scale(1.01);
+    box-shadow: 0 0.75rem 1.5rem hsl(var(--background) / 0.24);
+  }
+
+  .motion-table-row {
+    transition:
+      color var(--motion-fast) var(--motion-ease-standard),
+      background-color var(--motion-fast) var(--motion-ease-standard),
+      box-shadow var(--motion-fast) var(--motion-ease-standard),
+      transform var(--motion-fast) var(--motion-ease-standard);
+  }
+
+  :root[data-animation-level="full"] .motion-table-row:hover {
+    transform: translateX(2px);
+    box-shadow: inset 3px 0 0 hsl(var(--accent) / 0.35);
+  }
+
+  :root[data-animation-level="full"] .motion-button-press:active:not(:disabled) {
+    transform: scale(var(--motion-press-scale));
+  }
+
+  .motion-button-press {
+    transition:
+      color var(--motion-fast) var(--motion-ease-standard),
+      background-color var(--motion-fast) var(--motion-ease-standard),
+      border-color var(--motion-fast) var(--motion-ease-standard),
+      box-shadow var(--motion-fast) var(--motion-ease-standard),
+      transform var(--motion-fast) var(--motion-ease-standard);
+  }
+
+  .motion-search-focus {
+    transition:
+      border-color var(--motion-fast) var(--motion-ease-standard),
+      box-shadow var(--motion-fast) var(--motion-ease-standard),
+      transform var(--motion-fast) var(--motion-ease-standard);
+  }
+
+  :root[data-animation-level="full"] .motion-search-focus:focus-visible {
+    transform: scaleX(1.008);
+    box-shadow: 0 0 0 3px hsl(var(--ring) / 0.14);
+  }
+
+  .motion-collapse-grid {
+    display: grid;
+    grid-template-rows: 1fr;
+    opacity: 1;
+    transition:
+      grid-template-rows var(--motion-base) var(--motion-ease-standard),
+      opacity var(--motion-fast) var(--motion-ease-standard);
+  }
+
+  .motion-collapse-grid[data-state="closed"] {
+    grid-template-rows: 0fr;
+    opacity: 0;
+  }
+
+  .motion-table-group-row {
+    transform-origin: top;
+    transition:
+      opacity var(--motion-base) var(--motion-ease-standard),
+      transform var(--motion-base) var(--motion-ease-standard),
+      visibility 0s;
+  }
+
+  .motion-table-group-row[data-collapse-state="closed"] {
+    visibility: collapse;
+    opacity: 0;
+    transform: scaleY(0.96);
+    transition:
+      opacity var(--motion-base) var(--motion-ease-standard),
+      transform var(--motion-base) var(--motion-ease-standard),
+      visibility 0s var(--motion-base);
+  }
+
+  .motion-pending-pulse {
+    animation: loom-pending-pulse 2.4s ease-in-out infinite;
+  }
+
+  /* Radix/tailwindcss-animate popups keep their accessible mount lifecycle.
+     Reduced zeroes the plugin's movement/scale variables but retains a short
+     fade; None is removed by the global rule above. */
+  .motion-radix-popup,
+  .motion-radix-overlay,
+  .motion-radix-dialog,
+  .motion-radix-sheet {
+    /* tailwindcss-animate's generated utilities live in the later utilities
+       layer and carry a stock 150ms value. These declarations deliberately
+       win so Radix overlays actually use Loom's shared scale. */
+    animation-duration: var(--motion-base) !important;
+    animation-timing-function: var(--motion-ease-emphasized) !important;
+  }
+
+  .motion-radix-popup { animation-duration: var(--motion-fast) !important; }
+
+  :root[data-animation-level="reduced"] .motion-radix-popup,
+  :root[data-animation-level="reduced"] .motion-radix-dialog,
+  :root[data-animation-level="reduced"] .motion-radix-sheet {
+    --tw-enter-translate-x: 0 !important;
+    --tw-enter-translate-y: 0 !important;
+    --tw-exit-translate-x: 0 !important;
+    --tw-exit-translate-y: 0 !important;
+    --tw-enter-scale: 1 !important;
+    --tw-exit-scale: 1 !important;
+  }
+
+  :root[data-animation-level="reduced"] .motion-hover-lift,
+  :root[data-animation-level="reduced"] .motion-pending-pulse,
+  :root[data-animation-level="reduced"] .animate-pulse {
+    animation: none;
+    transform: none;
+    box-shadow: inherit;
   }
 
   /* Apply translucent surfaces only when the rendering engine recognizes a
@@ -456,11 +620,19 @@
  */
 .react-grid-layout {
   position: relative;
-  transition: height 200ms ease;
+  transition: height var(--motion-base) var(--motion-ease-standard);
+}
+
+/* Sonner owns the directional transforms needed to enter from its configured
+   edge. Loom only supplies the shared scale so toasts do not become a separate
+   animation system. The global None rule above still wins via !important. */
+[data-sonner-toast] {
+  transition-duration: var(--motion-base) !important;
+  transition-timing-function: var(--motion-ease-emphasized) !important;
 }
 
 .react-grid-item {
-  transition: all 200ms ease;
+  transition: all var(--motion-base) var(--motion-ease-standard);
   transition-property: transform, width, height;
 }
 
@@ -483,7 +655,7 @@
   border-radius: var(--radius);
   background: hsl(var(--accent) / 0.18);
   border: 1px dashed hsl(var(--accent) / 0.5);
-  transition-duration: 100ms;
+  transition-duration: var(--motion-fast);
   user-select: none;
 }
 
@@ -503,7 +675,7 @@
   width: 44px;
   height: 44px;
   opacity: 0;
-  transition: opacity 150ms ease;
+  transition: opacity var(--motion-fast) var(--motion-ease-standard);
 }
 
 .loom-grid-editing .react-grid-item > .react-resizable-handle {
@@ -571,7 +743,9 @@
 .loom-dashboard-grid-frame {
   transform: scale(1);
   opacity: 1;
-  transition: transform 160ms ease, opacity 160ms ease;
+  transition:
+    transform var(--motion-base) var(--motion-ease-standard),
+    opacity var(--motion-base) var(--motion-ease-standard);
 }
 
 .loom-dashboard-grid-frame[data-editing="true"] {
@@ -585,7 +759,7 @@
 }
 
 .loom-dashboard-grid > .react-grid-item > * {
-  animation: loom-dashboard-tile-enter 180ms ease-out both;
+  animation: loom-dashboard-tile-enter var(--motion-base) var(--motion-ease-standard) both;
   animation-delay: min(calc(var(--loom-tile-index, 0) * 35ms), 245ms);
 }
 
@@ -596,7 +770,7 @@
 }
 
 .loom-stat-value-change {
-  animation: loom-stat-value-change 320ms ease-out;
+  animation: loom-stat-value-change var(--motion-slow) var(--motion-ease-standard);
   transform-origin: left center;
 }
 
@@ -606,4 +780,9 @@
 :root[data-animation-level="none"] .loom-dashboard-grid-frame {
   transform: none;
   opacity: 1;
+}
+
+:root[data-animation-level="reduced"] .loom-dashboard-grid > .react-grid-item > *,
+:root[data-animation-level="reduced"] .loom-stat-value-change {
+  animation: none;
 }

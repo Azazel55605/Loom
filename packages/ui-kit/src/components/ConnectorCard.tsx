@@ -176,7 +176,7 @@ export function ConnectorCard({
   const hasManageControls = canDiscover || onEdit !== undefined || onDelete !== undefined;
 
   return (
-    <Card className="surface-elevated">
+    <Card className="motion-hover-lift surface-elevated">
       <CardHeader>
         <div className="flex items-start justify-between gap-3">
           <div className="flex min-w-0 items-start gap-3">

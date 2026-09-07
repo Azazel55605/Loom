@@ -11,9 +11,9 @@ import { useAppearance } from "@loom/ui-kit/components/AccentThemeProvider";
  *
  * The toast surface is styled from the same tokens as every other elevated
  * surface rather than Sonner's own palette, so the accent colour and the
- * reduced-transparency fallback reach it like anything else. Sonner respects
- * `prefers-reduced-motion` itself, and the global rule in index.css covers the
- * rest.
+ * reduced-transparency fallback reach it like anything else. Sonner owns the
+ * anchored slide/fade lifecycle while the shared motion CSS supplies its
+ * duration/easing and removes it entirely at the effective None level.
  *
  * The resolved palette is still handed to Sonner explicitly, matching what
  * shadcn's own wrapper does with `next-themes`. Our classes set the toast's

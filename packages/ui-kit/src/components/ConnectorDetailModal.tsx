@@ -43,11 +43,7 @@ import {
 } from "@loom/ui-kit/lib/connector-details";
 import { hasPermission, PERMISSION_KEYS } from "@loom/ui-kit/lib/permissions";
 import { useRetainedStatusDetails } from "@loom/ui-kit/lib/use-retained-status-details";
-
-/** How long the dialog's open animation needs before its body can be scrolled
- *  meaningfully. Comfortably longer than the 150ms transition it is waiting on;
- *  a scroll that lands late is invisible, one that lands early does nothing. */
-const DIALOG_OPEN_SETTLE_MS = 220;
+import { useAnimationLevel } from "@loom/ui-kit/lib/motion";
 
 type LiveReading = {
   status: ConnectorStatus | null;
@@ -92,6 +88,7 @@ export function ConnectorDetailModal({
   const queryClient = useQueryClient();
   const socket = useConnectorStatusSocket();
   const { user } = useAuth();
+  const { timing } = useAnimationLevel();
   const instance = placement.connector;
   const [live, setLive] = React.useState<LiveReading | null>(null);
   const canControl = hasPermission(user?.permissions ?? [], PERMISSION_KEYS.connectorsControl);
@@ -214,8 +211,8 @@ export function ConnectorDetailModal({
     // at the bottom edge.
     scrollTimer.current = window.setTimeout(() => {
       window.requestAnimationFrame(() => node.scrollIntoView({ block: "start" }));
-    }, DIALOG_OPEN_SETTLE_MS);
-  }, []);
+    }, timing.base === 0 ? 0 : timing.base + 20);
+  }, [timing.base]);
 
   // Only the kinds that mean something at this altitude. A container's modal
   // must not offer "Images" — the daemon's image list is not a smaller thing

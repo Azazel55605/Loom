@@ -48,6 +48,7 @@ export function SearchablePickerList({
   return (
     <div className="flex min-h-0 flex-col gap-3">
       <Input
+        className="motion-search-focus"
         aria-label={searchLabel}
         placeholder={searchLabel}
         value={query}

@@ -455,7 +455,10 @@ export function ConnectorsView({
                               >
                                 <ChevronDown
                                   aria-hidden="true"
-                                  className={cn("transition-transform", collapsed && "-rotate-90")}
+                                  className={cn(
+                                    "transition-transform [transition-duration:var(--motion-fast)] [transition-timing-function:var(--motion-ease-standard)]",
+                                    collapsed && "-rotate-90",
+                                  )}
                                 />
                                 <ConnectorIcon typeIcon={group.icon} iconOverride={null} size={18} />
                                 <span className="font-semibold">{group.displayName}</span>
@@ -465,12 +468,11 @@ export function ConnectorsView({
                               </Button>
                             </TableCell>
                           </TableRow>
-                          {collapsed
-                            ? null
-                            : group.instances.map((instance) => (
+                          {group.instances.map((instance) => (
                                 <ConnectorTableRow
                                   key={instance.id}
                                   instance={instance}
+                                  collapsed={collapsed}
                                   selectMode={selectMode}
                                   selected={selectedIds.has(instance.id)}
                                   canManage={canManage}
@@ -567,7 +569,7 @@ function ConnectorFilters({
           <Search className="pointer-events-none absolute left-3 top-1/2 size-4 -translate-y-1/2 text-muted-foreground" aria-hidden="true" />
           <Input
             value={searchText}
-            className="pl-9"
+            className="motion-search-focus pl-9"
             placeholder="Search names and tags"
             aria-label="Search connectors"
             onChange={(event) => onSearchTextChange(event.target.value)}
@@ -618,6 +620,7 @@ function ConnectorFilters({
 
 function ConnectorTableRow({
   instance,
+  collapsed,
   selectMode,
   selected,
   canManage,
@@ -628,6 +631,7 @@ function ConnectorTableRow({
   onDelete,
 }: {
   instance: ConnectorInstanceSummary;
+  collapsed: boolean;
   selectMode: boolean;
   selected: boolean;
   canManage: boolean;
@@ -641,7 +645,12 @@ function ConnectorTableRow({
   const canDiscover = canManage && type?.discoverableType != null;
 
   return (
-    <TableRow data-state={selected ? "selected" : undefined}>
+    <TableRow
+      className="motion-table-group-row"
+      data-state={selected ? "selected" : undefined}
+      data-collapse-state={collapsed ? "closed" : "open"}
+      aria-hidden={collapsed}
+    >
       {selectMode ? (
         <TableCell className="w-10 pl-3">
           <Checkbox

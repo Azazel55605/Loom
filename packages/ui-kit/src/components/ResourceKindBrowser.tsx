@@ -189,7 +189,7 @@ export function ResourceKindBrowser({
       : null;
 
   /** One row, identical whether it stands alone or under a group heading. */
-  function renderRow(item: ResourceItem) {
+  function renderRow(item: ResourceItem, groupOpen = true) {
     const open = openTarget === null ? undefined : () => openTarget(item);
     return (
       <TableRow
@@ -198,12 +198,14 @@ export function ResourceKindBrowser({
         // keyboard and to a screen reader — a click handler on a `<tr>` alone
         // is a control only a mouse can find.
         role={open === undefined ? undefined : "button"}
-        tabIndex={open === undefined ? undefined : 0}
+        tabIndex={open === undefined || !groupOpen ? undefined : 0}
         aria-label={open === undefined ? undefined : `Open ${item.id}`}
-        className={open === undefined ? undefined : "cursor-pointer"}
-        onClick={open}
+        aria-hidden={!groupOpen}
+        data-collapse-state={groupOpen ? "open" : "closed"}
+        className={cn("motion-table-group-row", open !== undefined && "cursor-pointer")}
+        onClick={groupOpen ? open : undefined}
         onKeyDown={
-          open === undefined
+          open === undefined || !groupOpen
             ? undefined
             : (event) => {
                 if (event.key === "Enter" || event.key === " ") {
@@ -306,7 +308,7 @@ export function ResourceKindBrowser({
           onChange={(event) => setQuery(event.target.value)}
           placeholder={`Search ${descriptor.label.toLowerCase()}…`}
           aria-label={`Search ${descriptor.label}`}
-          className="pl-8"
+          className="motion-search-focus pl-8"
         />
       </div>
 
@@ -379,7 +381,7 @@ export function ResourceKindBrowser({
                   // its rows directly, and reaching past the filter here is how
                   // a search box ends up looking like it works — the empty
                   // result is filtered, every non-empty one is not.
-                  visible.map(renderRow)
+                  visible.map((item) => renderRow(item))
                 : groups.map((group) => {
                     const open = searching || expanded.has(group.value);
                     return (
@@ -406,7 +408,10 @@ export function ResourceKindBrowser({
                             >
                               <ChevronDown
                                 aria-hidden="true"
-                                className={cn("transition-transform", !open && "-rotate-90")}
+                                className={cn(
+                                  "transition-transform [transition-duration:var(--motion-fast)] [transition-timing-function:var(--motion-ease-standard)]",
+                                  !open && "-rotate-90",
+                                )}
                               />
                               <span className="font-semibold">{group.value}</span>
                               {/* What the heading has to say to be worth
@@ -427,7 +432,7 @@ export function ResourceKindBrowser({
                             </Button>
                           </TableCell>
                         </TableRow>
-                        {open ? group.items.map(renderRow) : null}
+                        {group.items.map((item) => renderRow(item, open))}
                       </React.Fragment>
                     );
                   })}

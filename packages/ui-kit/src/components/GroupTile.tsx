@@ -142,7 +142,12 @@ export function GroupTile({
 
   return (
     <>
-      <Card className="flex h-full min-h-0 flex-col overflow-hidden">
+      <Card
+        className={cn(
+          "flex h-full min-h-0 flex-col overflow-hidden",
+          !editing && "motion-hover-lift",
+        )}
+      >
         <CardHeader
           className={cn(
             "flex-row items-center justify-between gap-3 space-y-0 px-4 py-3",

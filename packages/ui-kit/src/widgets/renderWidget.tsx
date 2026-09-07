@@ -28,6 +28,7 @@ import {
 import { Skeleton } from "@loom/ui-kit/components/ui/skeleton";
 import { soleParameterName } from "@loom/ui-kit/widgets/compatibility";
 import type { WidgetExecute } from "@loom/ui-kit/widgets/types";
+import { cn } from "@loom/ui-kit/lib/utils";
 
 /** Everything one binding needs to become a widget. */
 export type RenderWidgetOptions = {
@@ -122,6 +123,8 @@ export function renderWidget({
   loading = true,
   onExpand,
 }: RenderWidgetOptions) {
+  const revealedClassName = cn("motion-content-reveal", className);
+
   if ("resourceKindDisplay" in binding) {
     const { resourceKind } = binding.resourceKindDisplay;
     if (resourceKinds === undefined || instanceId === undefined) {
@@ -129,7 +132,7 @@ export function renderWidget({
     }
     const descriptor = resourceKinds.find((kind) => kind.kind === resourceKind);
     if (descriptor === undefined) {
-      return <MissingBinding what="resource kind" id={resourceKind} className={className} />;
+      return <MissingBinding what="resource kind" id={resourceKind} className={revealedClassName} />;
     }
     // No card, no padding, no heading of its own. The placement is already a
     // card, and a table inside a second frame inside the first is the "widget
@@ -142,7 +145,7 @@ export function renderWidget({
         descriptor={descriptor}
         disabled={disabled === true || unavailableReason != null}
         disabledReason={unavailableReason}
-        className={className}
+        className={revealedClassName}
       />
     );
   }
@@ -151,7 +154,7 @@ export function renderWidget({
     const { dataPointId, widgetType, config } = binding.display;
     const descriptor = dataPoints.find((point) => point.id === dataPointId);
     if (descriptor === undefined) {
-      return <MissingBinding what="data point" id={dataPointId} className={className} />;
+      return <MissingBinding what="data point" id={dataPointId} className={revealedClassName} />;
     }
 
     const shared = {
@@ -163,7 +166,7 @@ export function renderWidget({
       // to total bytes). Keep that relationship declarative in the connector
       // layout rather than teaching a primitive about connector-specific ids.
       config: resolveStatusConfig(config, statusDetails),
-      className,
+      className: revealedClassName,
     };
 
     if (shared.value === undefined && loading) {
@@ -207,7 +210,7 @@ export function renderWidget({
         // are updated in different repositories' worth of code — Core adds the
         // variant, this file draws it — and the gap between those two commits
         // should look like a labelled hole, not a crash.
-        return <MissingBinding what="widget type" id={String(widgetType)} className={className} />;
+        return <MissingBinding what="widget type" id={String(widgetType)} className={revealedClassName} />;
     }
   }
 
@@ -223,7 +226,7 @@ export function renderWidget({
   }
   const action = actions.find((candidate) => candidate.id === actionId);
   if (action === undefined) {
-    return <MissingBinding what="action" id={actionId} className={className} />;
+    return <MissingBinding what="action" id={actionId} className={revealedClassName} />;
   }
 
   const shared = {
@@ -239,7 +242,7 @@ export function renderWidget({
     ),
     onExecute,
     disabled: disabled === true || unavailableReason != null,
-    className,
+    className: revealedClassName,
   };
 
   const control = (() => {
@@ -260,7 +263,7 @@ export function renderWidget({
   })();
 
   if (control === null) {
-    return <MissingBinding what="widget type" id={String(widgetType)} className={className} />;
+    return <MissingBinding what="widget type" id={String(widgetType)} className={revealedClassName} />;
   }
 
   // Wrapped here rather than inside each of the five widgets: the explanation

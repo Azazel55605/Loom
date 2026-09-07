@@ -172,11 +172,11 @@
 }
 
 .mobile-platform .mobile-kiosk-reading-in {
-  animation: mobile-kiosk-reading-in 420ms ease-out both;
+  animation: mobile-kiosk-reading-in var(--motion-slow) var(--motion-ease-standard) both;
 }
 
 .mobile-platform .mobile-kiosk-reading-out {
-  animation: mobile-kiosk-reading-out 420ms ease-out both;
+  animation: mobile-kiosk-reading-out var(--motion-slow) var(--motion-ease-standard) both;
 }
 
 @keyframes mobile-kiosk-reading-in {
