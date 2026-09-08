@@ -2623,6 +2623,24 @@ impl DockerConnector {
         // deliberately-rate-limited endpoint if it were read anywhere else.
         let (disk_usage, image_disk_usage, image_storage_breakdown, container_state_breakdown) =
             match usage {
+                Ok(usage)
+                    if usage.image_usage.is_none()
+                        && usage.container_usage.is_none()
+                        && usage.volume_usage.is_none()
+                        && usage.build_cache_usage.is_none() =>
+                {
+                    // Older Docker Engine API versions return the legacy
+                    // LayersSize/Images/Containers/Volumes/BuildCache shape.
+                    // Bollard's current model ignores those unknown fields,
+                    // leaving an apparently-successful but empty response.
+                    // Treat that as unavailable instead of reporting a
+                    // misleading 0 B while keeping the connector Healthy.
+                    errors.push(
+                        "Docker disk usage is unavailable: /system/df returned no recognized usage fields; the daemon may use an older Docker API response format"
+                            .to_owned(),
+                    );
+                    (None, None, None, None)
+                }
                 Ok(usage) => {
                     let images = usage
                         .image_usage
@@ -3466,6 +3484,29 @@ mod tests {
             .data_point_value("error")
             .and_then(Value::as_str)
             .is_some_and(|error| error.contains("Docker disk usage is unavailable")));
+    }
+
+    #[tokio::test]
+    async fn an_unrecognized_successful_system_df_is_diagnostic_not_zero_disk_usage() {
+        let host = mock_proxy(everything()).await;
+        let status = detached(&host, &[]).status().await.expect("host status");
+
+        assert_eq!(status.health, HealthState::Degraded);
+        for id in [
+            DATA_POINT_DISK_USAGE_BYTES,
+            DATA_POINT_IMAGE_DISK_USAGE_BYTES,
+            DATA_POINT_IMAGE_STORAGE_BREAKDOWN,
+            DATA_POINT_CONTAINER_STATE_BREAKDOWN,
+        ] {
+            assert!(
+                status.data_point_value(id).is_none(),
+                "{id} must be absent when /system/df has no recognized fields"
+            );
+        }
+        assert!(status
+            .data_point_value("error")
+            .and_then(Value::as_str)
+            .is_some_and(|error| error.contains("no recognized usage fields")));
     }
 
     fn labelled(name: &str, project: Option<&str>) -> ContainerSummary {
