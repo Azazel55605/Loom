@@ -10,7 +10,7 @@
 
 services:
   web-backend:
-    image: ghcr.io/${LOOM_IMAGE_OWNER:-loom-project}/loom-web-backend:${LOOM_WEB_BACKEND_TAG:-latest}
+    image: ghcr.io/azazel55605/loom-web-backend:${LOOM_WEB_BACKEND_TAG:-latest}
     ports: ["8080:8080"]
     environment:
       - LOOM_BIND_ADDR=0.0.0.0:8080
@@ -25,7 +25,7 @@ services:
     restart: unless-stopped
 
   web-frontend:
-    image: ghcr.io/${LOOM_IMAGE_OWNER:-loom-project}/loom-web-frontend:${LOOM_WEB_FRONTEND_TAG:-latest}
+    image: ghcr.io/azazel55605/loom-web-frontend:${LOOM_WEB_FRONTEND_TAG:-latest}
     ports: ["3000:80"]
     environment:
       # nginx proxies /api here, so the browser only ever talks to the frontend's

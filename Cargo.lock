@@ -1343,7 +1343,7 @@ dependencies = [
 
 [[package]]
 name = "loom-web-backend"
-version = "0.3.5"
+version = "0.3.6"
 dependencies = [
  "aes-gcm",
  "argon2",

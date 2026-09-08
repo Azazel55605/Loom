@@ -384,6 +384,12 @@ Locally built images are tagged `loom-web-backend:local` and
 `loom-web-frontend:local`, so they never collide with the `:latest` images
 `docker-compose.yml` pulls from GHCR.
 
+Tagged web releases publish both `linux/amd64` and `linux/arm64` variants for
+the frontend and backend under one multi-platform GHCR manifest. Docker selects
+the matching image automatically when the same version or `latest` tag is
+pulled on either architecture. The release workflows install QEMU before
+Buildx because GitHub's hosted release runner is amd64.
+
 Both Compose files mount a `loom-data` volume at `/data`, where the backend will
 persist generated secrets and instance config once that system exists.
 
