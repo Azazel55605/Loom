@@ -42,22 +42,34 @@ jobs:
           echo "version=$tag_version" >> "$GITHUB_OUTPUT"
 
   build-tauri:
-    name: Bundle (${{ matrix.os }})
+    name: Bundle (${{ matrix.name }})
     needs: check-version
     strategy:
       fail-fast: false
       matrix:
-        os: [macos-latest, ubuntu-22.04, windows-latest]
-    runs-on: ${{ matrix.os }}
+        include:
+          - name: macOS
+            runner: macos-latest
+            linux: false
+          - name: Linux x86_64
+            runner: ubuntu-22.04
+            linux: true
+          - name: Linux aarch64
+            runner: ubuntu-22.04-arm
+            linux: true
+          - name: Windows
+            runner: windows-latest
+            linux: false
+    runs-on: ${{ matrix.runner }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      # Pinned to ubuntu-22.04 rather than ubuntu-latest: the deb and rpm link
-      # against the builder's glibc, so building on the oldest supported distro
-      # keeps the packages installable on the widest range of systems.
+      # Both Linux architectures use Ubuntu 22.04: the deb and rpm link against
+      # the builder's glibc, so native builds on the oldest supported distro
+      # keep both packages installable on the widest range of systems.
       - name: Install Linux system dependencies
-        if: matrix.os == 'ubuntu-22.04'
+        if: matrix.linux
         run: |
           sudo apt-get update
           sudo apt-get install -y \
@@ -107,9 +119,9 @@ jobs:
             Desktop client v${{ needs.check-version.outputs.version }}.
 
             Unsigned build — macOS users see docs/DESKTOP_MACOS_UNSIGNED.md.
-          # Draft, so nothing reaches users until a human reviews the artifacts.
+          # The final job publishes this only after every bundle job succeeds.
           releaseDraft: true
-          prerelease: false
+          prerelease: true
 
   build-flatpak:
     name: Bundle (flatpak)
@@ -133,6 +145,7 @@ jobs:
           bundle: loom-desktop-${{ needs.check-version.outputs.version }}.flatpak
           manifest-path: packaging/flatpak/dev.loom.Desktop.yml
           cache-key: flatpak-builder-${{ github.sha }}
+          artifact-name: loom-desktop-${{ needs.check-version.outputs.version }}-flatpak
 
   validate-arch-pkgbuild:
     name: Validate PKGBUILD (arch)
@@ -169,11 +182,39 @@ jobs:
       # it proves the PKGBUILD is structurally valid and actually buildable
       # without a published release existing.
       #
-      # NOTE: this validates only. Publishing to the AUR (SSH deploy key,
-      # .SRCINFO generation, push to aur.archlinux.org) is a follow-up once the
-      # pipeline is otherwise proven.
+      # NOTE: this build validates the PKGBUILD, but its binary package is not
+      # uploaded. Arch users should build through the PKGBUILD; publishing it
+      # to the AUR itself requires its own repository and SSH deploy key.
       - name: Run makepkg
         run: sudo -u builder bash -c 'cd /home/builder && makepkg --noconfirm --nocheck --syncdeps'
 
       - name: Show built package
         run: ls -lh /home/builder/*.pkg.tar.* || true
+
+  publish-release:
+    name: Publish GitHub release
+    needs:
+      - check-version
+      - build-tauri
+      - build-flatpak
+      - validate-arch-pkgbuild
+    runs-on: ubuntu-latest
+    steps:
+      # Native bundles, including both architectures' deb/rpm packages, are
+      # already attached to the draft by tauri-action. Pull in the Flatpak so
+      # the release becomes public only after every platform succeeded.
+      - name: Download Flatpak bundle
+        uses: actions/download-artifact@v4
+        with:
+          name: loom-desktop-${{ needs.check-version.outputs.version }}-flatpak
+          path: release-assets
+
+      - name: Attach Flatpak and publish release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          find release-assets -maxdepth 1 -type f -print
+          gh release upload "${GITHUB_REF_NAME}" release-assets/* --clobber
+          gh release edit "${GITHUB_REF_NAME}" --draft=false

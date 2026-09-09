@@ -205,9 +205,10 @@ Tauri's system dependencies (see Prerequisites) — on Debian/Ubuntu that is
 `libwebkit2gtk-4.1-dev`, `librsvg2-dev`, `libxdo-dev` and `libssl-dev`.
 
 Bundle targets are `deb`, `rpm`, `msi`, `nsis`, `dmg` and `app`; Tauri keeps
-whichever are valid for the host OS. **AppImage is deliberately not built** — it
-is more trouble than it is worth, and the deb, rpm, Arch and Flatpak packages
-cover Linux.
+whichever are valid for the host OS. Tagged desktop releases build `deb` and
+`rpm` packages natively for both `x86_64` and `aarch64`. **AppImage is
+deliberately not built** — it is more trouble than it is worth, and the deb,
+rpm, Arch and Flatpak packages cover Linux.
 
 `apps/desktop/src-tauri` is deliberately **its own Cargo workspace**, detached
 from the root one, so `cargo build --workspace` and CI's Rust job do not require
@@ -238,6 +239,12 @@ a Flatpak manifest, both exercised by `.github/workflows/release-desktop.yml`.
 The Flatpak manifest declares the Node 22 and stable Rust SDK extensions used
 inside flatpak-builder's isolated build environment; tools installed on the CI
 container itself are not visible inside that environment.
+For a matching desktop tag, the workflow keeps the GitHub release as a draft
+until the macOS, Windows, Linux, Flatpak, and Arch builds have all succeeded. It
+then attaches the Flatpak beside Tauri's native bundles and publishes the
+release. Arch users build through the validated PKGBUILDs rather than receiving
+a binary Arch artifact. Publishing to the AUR or Flathub themselves remains a
+separate process requiring their own reviewed repositories and credentials.
 macOS builds are unsigned; see
 [`DESKTOP_MACOS_UNSIGNED.md`](./DESKTOP_MACOS_UNSIGNED.md).
 
