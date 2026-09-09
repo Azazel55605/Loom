@@ -26,6 +26,7 @@ import { MobileKioskModeProvider } from "@/components/MobileKioskModeProvider";
 import { useMobileKioskMode } from "@/components/mobileKioskMode";
 import { MobileKioskShell } from "@/components/MobileKioskShell";
 import { KioskRecoveryScreen } from "@/components/KioskRecoveryScreen";
+import { MobileBackNavigation } from "@/components/MobileBackNavigation";
 import { ConnectorsPage } from "@/pages/ConnectorsPage";
 import {
   DashboardDetailPage,
@@ -188,65 +189,67 @@ function MobileRoutes({
   onServerChanged: (connection: ServerConnection) => Promise<void>;
 }) {
   return (
-    <RequireSetup>
-      <MobileExperience>
-        <Routes>
-        <Route path="/setup" element={<SetupPage />} />
-        <Route path="/login" element={<LoginPage />} />
-        <Route path="/" element={<Navigate to="/dashboards" replace />} />
-        <Route
-          path="/dashboards"
-          element={
-            <RequireAuth>
-              <DashboardsIndexPage />
-            </RequireAuth>
-          }
-        />
-        <Route
-          path="/dashboards/:id"
-          element={
-            <RequireAuth>
-              <DashboardDetailPage />
-            </RequireAuth>
-          }
-        />
-        <Route
-          path="/connectors"
-          element={
-            <RequireAuth>
-              <ConnectorsPage />
-            </RequireAuth>
-          }
-        />
-        <Route
-          path="/settings"
-          element={
-            <RequireAuth>
-              <MobileSettingsRoute
-                connection={connection}
-                onServerChanged={onServerChanged}
-              />
-            </RequireAuth>
-          }
-        >
-          <Route index element={<Navigate to="general" replace />} />
-          <Route path="general" element={null} />
-          <Route path="account" element={<AccountPanel />} />
-          <Route path="appearance" element={<AppearancePanel />} />
-          <Route path="audit-log" element={<AuditLogPage />} />
-          <Route path="dashboards" element={<DashboardsPanel />} />
-          <Route path="permissions" element={<MobilePermissionsRoute />}>
-            <Route index element={<MobilePermissionsIndexRedirect />} />
-            <Route path="users" element={<UsersPanel />} />
-            <Route path="groups" element={<GroupsPanel />} />
-            <Route path="*" element={<Navigate to="users" replace />} />
-          </Route>
-          <Route path="*" element={<Navigate to="general" replace />} />
-        </Route>
-        <Route path="*" element={<Navigate to="/dashboards" replace />} />
-        </Routes>
-      </MobileExperience>
-    </RequireSetup>
+    <MobileBackNavigation>
+      <RequireSetup>
+        <MobileExperience>
+          <Routes>
+            <Route path="/setup" element={<SetupPage />} />
+            <Route path="/login" element={<LoginPage />} />
+            <Route path="/" element={<Navigate to="/dashboards" replace />} />
+            <Route
+              path="/dashboards"
+              element={
+                <RequireAuth>
+                  <DashboardsIndexPage />
+                </RequireAuth>
+              }
+            />
+            <Route
+              path="/dashboards/:id"
+              element={
+                <RequireAuth>
+                  <DashboardDetailPage />
+                </RequireAuth>
+              }
+            />
+            <Route
+              path="/connectors"
+              element={
+                <RequireAuth>
+                  <ConnectorsPage />
+                </RequireAuth>
+              }
+            />
+            <Route
+              path="/settings"
+              element={
+                <RequireAuth>
+                  <MobileSettingsRoute
+                    connection={connection}
+                    onServerChanged={onServerChanged}
+                  />
+                </RequireAuth>
+              }
+            >
+              <Route index element={<Navigate to="general" replace />} />
+              <Route path="general" element={null} />
+              <Route path="account" element={<AccountPanel />} />
+              <Route path="appearance" element={<AppearancePanel />} />
+              <Route path="audit-log" element={<AuditLogPage />} />
+              <Route path="dashboards" element={<DashboardsPanel />} />
+              <Route path="permissions" element={<MobilePermissionsRoute />}>
+                <Route index element={<MobilePermissionsIndexRedirect />} />
+                <Route path="users" element={<UsersPanel />} />
+                <Route path="groups" element={<GroupsPanel />} />
+                <Route path="*" element={<Navigate to="users" replace />} />
+              </Route>
+              <Route path="*" element={<Navigate to="general" replace />} />
+            </Route>
+            <Route path="*" element={<Navigate to="/dashboards" replace />} />
+          </Routes>
+        </MobileExperience>
+      </RequireSetup>
+    </MobileBackNavigation>
   );
 }
 

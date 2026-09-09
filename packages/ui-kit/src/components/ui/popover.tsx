@@ -2,8 +2,22 @@ import * as React from "react";
 import * as PopoverPrimitive from "@radix-ui/react-popover";
 
 import { cn } from "@loom/ui-kit/lib/utils";
+import { useBackAwareOpenState } from "@loom/ui-kit/lib/use-back-aware-open-state";
 
-const Popover = PopoverPrimitive.Root;
+function Popover({
+  open: controlledOpen,
+  defaultOpen,
+  onOpenChange,
+  ...props
+}: React.ComponentProps<typeof PopoverPrimitive.Root>) {
+  const [open, setOpen] = useBackAwareOpenState(
+    controlledOpen,
+    defaultOpen,
+    onOpenChange,
+  );
+  return <PopoverPrimitive.Root {...props} open={open} onOpenChange={setOpen} />;
+}
+Popover.displayName = PopoverPrimitive.Root.displayName;
 
 const PopoverTrigger = PopoverPrimitive.Trigger;
 

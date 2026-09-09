@@ -4,8 +4,22 @@ import { cva, type VariantProps } from "class-variance-authority";
 import { X } from "lucide-react";
 
 import { cn } from "@loom/ui-kit/lib/utils";
+import { useBackAwareOpenState } from "@loom/ui-kit/lib/use-back-aware-open-state";
 
-const Sheet = SheetPrimitive.Root;
+function Sheet({
+  open: controlledOpen,
+  defaultOpen,
+  onOpenChange,
+  ...props
+}: React.ComponentProps<typeof SheetPrimitive.Root>) {
+  const [open, setOpen] = useBackAwareOpenState(
+    controlledOpen,
+    defaultOpen,
+    onOpenChange,
+  );
+  return <SheetPrimitive.Root {...props} open={open} onOpenChange={setOpen} />;
+}
+Sheet.displayName = SheetPrimitive.Root.displayName;
 
 const SheetTrigger = SheetPrimitive.Trigger;
 

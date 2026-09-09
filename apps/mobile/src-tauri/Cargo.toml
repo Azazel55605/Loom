@@ -1,7 +1,7 @@
 [package]
 name = "loom-mobile"
 description = "Loom mobile client (Tauri, Android)."
-version = "0.4.0"
+version = "0.4.2"
 edition = "2021"
 license = "MIT"
 rust-version = "1.82"
@@ -24,6 +24,7 @@ tauri-build = { version = "2", features = [] }
 [dependencies]
 tauri = { version = "2", features = [] }
 tauri-plugin-http = { version = "2", features = ["dangerous-settings"] }
+tauri-plugin-process = "2"
 tauri-plugin-store = "2"
 tauri-plugin-stronghold = "2"
 serde = { version = "1", features = ["derive"] }

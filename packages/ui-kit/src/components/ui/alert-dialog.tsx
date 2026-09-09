@@ -3,6 +3,7 @@ import * as AlertDialogPrimitive from "@radix-ui/react-alert-dialog";
 
 import { cn } from "@loom/ui-kit/lib/utils";
 import { buttonVariants } from "@loom/ui-kit/components/ui/button";
+import { useBackAwareOpenState } from "@loom/ui-kit/lib/use-back-aware-open-state";
 
 /**
  * Radix AlertDialog, themed. Deliberately distinct from `Dialog`.
@@ -16,7 +17,22 @@ import { buttonVariants } from "@loom/ui-kit/components/ui/button";
  * Reserved for destructive confirmation. Anything with a form in it is a
  * `Dialog`.
  */
-const AlertDialog = AlertDialogPrimitive.Root;
+function AlertDialog({
+  open: controlledOpen,
+  defaultOpen,
+  onOpenChange,
+  ...props
+}: React.ComponentProps<typeof AlertDialogPrimitive.Root>) {
+  const [open, setOpen] = useBackAwareOpenState(
+    controlledOpen,
+    defaultOpen,
+    onOpenChange,
+  );
+  return (
+    <AlertDialogPrimitive.Root {...props} open={open} onOpenChange={setOpen} />
+  );
+}
+AlertDialog.displayName = AlertDialogPrimitive.Root.displayName;
 const AlertDialogTrigger = AlertDialogPrimitive.Trigger;
 const AlertDialogPortal = AlertDialogPrimitive.Portal;
 

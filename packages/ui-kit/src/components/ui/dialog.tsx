@@ -3,6 +3,7 @@ import * as DialogPrimitive from "@radix-ui/react-dialog";
 import { X } from "lucide-react";
 
 import { cn } from "@loom/ui-kit/lib/utils";
+import { useBackAwareOpenState } from "@loom/ui-kit/lib/use-back-aware-open-state";
 
 /**
  * Radix Dialog, themed.
@@ -15,7 +16,20 @@ import { cn } from "@loom/ui-kit/lib/utils";
  * reduced-transparency tokens reach it like every other elevated surface, and
  * its contrast comes from the solid fallback colour rather than from the blur.
  */
-const Dialog = DialogPrimitive.Root;
+function Dialog({
+  open: controlledOpen,
+  defaultOpen,
+  onOpenChange,
+  ...props
+}: React.ComponentProps<typeof DialogPrimitive.Root>) {
+  const [open, setOpen] = useBackAwareOpenState(
+    controlledOpen,
+    defaultOpen,
+    onOpenChange,
+  );
+  return <DialogPrimitive.Root {...props} open={open} onOpenChange={setOpen} />;
+}
+Dialog.displayName = DialogPrimitive.Root.displayName;
 const DialogTrigger = DialogPrimitive.Trigger;
 const DialogPortal = DialogPrimitive.Portal;
 const DialogClose = DialogPrimitive.Close;

@@ -165,6 +165,14 @@ that could unhide it.
 
 ## Consequences
 
+Android hardware/gesture back is no longer special-cased around navigate-tile
+state. Mobile now consumes Tauri's back-button event through a general priority
+stack: the last-opened shared overlay closes first, router history is popped
+second, and a true navigation root opens an explicit quit confirmation. The
+button-navigation marker remains responsible for DashboardView's visible Back
+control and its access-aware fallback, while the originating route already in
+router history makes Android back follow the same dashboard-to-dashboard path.
+
 - `WidgetBinding` gains a variant, which is a **breaking change for every
   exhaustive match** over it — in Core, in the connector contract test kit, in
   connector crates, and in placement validation. That is the intended cost of

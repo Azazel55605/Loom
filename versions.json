@@ -8,6 +8,6 @@
   "web-backend": "0.3.6",
   "web-frontend": "0.3.6",
   "desktop": "0.3.4",
-  "mobile": "0.4.0",
+  "mobile": "0.4.2",
   "mobile-android-version-code": "040"
 }
