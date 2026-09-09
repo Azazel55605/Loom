@@ -7,7 +7,7 @@
   "connector-unifi-network": "0.9.1",
   "web-backend": "0.3.6",
   "web-frontend": "0.3.6",
-  "desktop": "0.3.2",
+  "desktop": "0.3.3",
   "mobile": "0.4.0",
   "mobile-android-version-code": "040"
 }
