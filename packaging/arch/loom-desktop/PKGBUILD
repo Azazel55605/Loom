@@ -17,7 +17,7 @@ pkgver=0.1.0
 pkgrel=1
 pkgdesc="Loom desktop client — a modular, extensible homelab management platform"
 arch=('x86_64')
-url="https://github.com/Azazel55605/loom"
+url="https://github.com/<owner>/loom"
 license=('MIT')
 depends=('webkit2gtk-4.1' 'gtk3' 'hicolor-icon-theme')
 provides=('loom-desktop')
@@ -27,7 +27,7 @@ options=('!strip' '!debug')
 source=("${pkgname}-${pkgver}.deb::${url}/releases/download/v${pkgver}-desktop/Loom_${pkgver}_amd64.deb")
 # Replace with the real digest at release time (`updpkgsums`). SKIP is only
 # acceptable while the release artifacts do not exist yet.
-sha256sums=('updkgsums')
+sha256sums=('SKIP')
 
 package() {
   # A .deb is an ar archive; the payload we want is its data.tar.* member.

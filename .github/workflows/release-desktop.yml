@@ -161,9 +161,9 @@ jobs:
       # whichever repository is running this workflow.
       - name: Point the PKGBUILD at this repository
         run: |
-          sed -i "s|https://github.com/Azazel55605/loom|${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}|g" \
+          sed -i "s|https://github.com/<owner>/loom|${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}|g" \
             /home/builder/PKGBUILD
-          grep -n "github.com" /home/builder/PKGBUILD
+          grep -Fn "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}" /home/builder/PKGBUILD
 
       # A full `makepkg` compiles the Tauri app from source, which is the point:
       # it proves the PKGBUILD is structurally valid and actually buildable
