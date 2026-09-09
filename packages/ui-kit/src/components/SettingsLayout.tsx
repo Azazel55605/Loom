@@ -8,11 +8,14 @@ import { MotionContent } from "@loom/ui-kit/components/MotionContent";
 export function SettingsLayout({
   activeSection,
   onSectionChange,
+  extraSections = [],
   renderShell,
   children,
 }: {
   activeSection: string;
   onSectionChange: (section: string) => void;
+  /** Platform-owned settings appended without teaching shared UI about a host. */
+  extraSections?: ReadonlyArray<{ value: string; label: string }>;
   renderShell: (content: React.ReactNode) => React.ReactNode;
   children: React.ReactNode;
 }) {
@@ -51,6 +54,15 @@ export function SettingsLayout({
             <TabsTrigger className="shrink-0" value="appearance">
               Appearance
             </TabsTrigger>
+            {extraSections.map((section) => (
+              <TabsTrigger
+                className="shrink-0"
+                key={section.value}
+                value={section.value}
+              >
+                {section.label}
+              </TabsTrigger>
+            ))}
             {canAdminister && (
               <TabsTrigger className="shrink-0" value="permissions">
                 Permissions

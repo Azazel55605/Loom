@@ -32,6 +32,7 @@ export function DesktopSettingsRoute({
     <SettingsLayout
       activeSection={section}
       onSectionChange={(value) => navigate(`/settings/${value}`)}
+      extraSections={[{ value: "updates", label: "Updates" }]}
       renderShell={(content) => <DesktopAppShell>{content}</DesktopAppShell>}
     >
       {section === "general" ? (

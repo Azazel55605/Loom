@@ -5,19 +5,30 @@ import { Link, useLocation, useNavigate } from "react-router-dom";
 import { AppShell } from "@loom/ui-kit/components/AppShell";
 import { DashboardSidebar } from "@loom/ui-kit/components/DashboardSidebar";
 import { buttonVariants } from "@loom/ui-kit/components/ui/button";
+import { Badge } from "@loom/ui-kit/components/ui/badge";
+import { useDesktopUpdates } from "@/updater/desktop-update-context";
 
 export function DesktopAppShell({ children }: { children: React.ReactNode }) {
   const navigate = useNavigate();
   const location = useLocation();
   const dashboardMatch = /^\/dashboards\/([^/]+)$/.exec(location.pathname);
+  const { update } = useDesktopUpdates();
 
   return (
     <AppShell
       sidebarNavigationKey={location.pathname}
       homeControl={
-        <Link to="/dashboards" className="text-base font-semibold tracking-tight">
-          Loom
-        </Link>
+        <div className="flex items-center gap-2">
+          <Link to="/dashboards" className="text-base font-semibold tracking-tight">
+            Loom
+          </Link>
+          <Badge variant="outline">desktop v{__APP_VERSION__}</Badge>
+          {update !== null ? (
+            <Link to="/settings/updates" aria-label={`Update v${update.version} available`}>
+              <Badge variant="secondary">Update available</Badge>
+            </Link>
+          ) : null}
+        </div>
       }
       settingsControl={
         <Link

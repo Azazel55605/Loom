@@ -104,13 +104,15 @@ jobs:
       # only those valid for the current OS (dmg/app on macOS, msi/nsis on
       # Windows, deb/rpm on Linux), then attaches them to the release.
       #
-      # NOTE: nothing here is code-signed or notarized. macOS artifacts will be
-      # blocked by Gatekeeper — see docs/DESKTOP_MACOS_UNSIGNED.md. Signing is a
-      # known follow-up.
+      # NOTE: the updater signature proves an artifact came from Loom, but the
+      # installers are not yet OS code-signed or notarized. macOS artifacts will
+      # be blocked by Gatekeeper — see docs/DESKTOP_MACOS_UNSIGNED.md.
       - name: Build and attach bundles
         uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         with:
           projectPath: apps/desktop
           tagName: ${{ github.ref_name }}
@@ -122,6 +124,11 @@ jobs:
           # The final job publishes this only after every bundle job succeeds.
           releaseDraft: true
           prerelease: true
+          # Only Windows is installable in-app. Keeping one job authoritative
+          # also prevents matrix jobs from replacing latest.json with a
+          # manifest for a check-only platform.
+          uploadUpdaterJson: ${{ matrix.name == 'Windows' }}
+          updaterJsonPreferNsis: true
 
   build-flatpak:
     name: Bundle (flatpak)

@@ -210,6 +210,20 @@ whichever are valid for the host OS. Tagged desktop releases build `deb` and
 deliberately not built** — it is more trouble than it is worth, and the deb,
 rpm, Arch and Flatpak packages cover Linux.
 
+Desktop updater artifacts are enabled for Tauri v2. Release builds receive the
+existing signing key through the `TAURI_SIGNING_PRIVATE_KEY` and
+`TAURI_SIGNING_PRIVATE_KEY_PASSWORD` GitHub repository secrets; the private key
+must never be committed or placed in an `.env` file. `tauri-plugin-updater`
+provides signature verification and Windows installation, while
+`tauri-plugin-opener` opens the published release for check-only platforms.
+These dependencies are required specifically for the two native boundaries and
+do not move update policy into the shared UI package.
+
+Back up the signing key independently of GitHub. If it is lost, generate a new
+keypair and redistribute an application containing the new public key manually.
+Existing installations trust only the old public key and cannot recover their
+automatic update path from a replacement private key.
+
 `apps/desktop/src-tauri` is deliberately **its own Cargo workspace**, detached
 from the root one, so `cargo build --workspace` and CI's Rust job do not require
 those libraries.
@@ -245,6 +259,10 @@ then attaches the Flatpak beside Tauri's native bundles and publishes the
 release. Arch users build through the validated PKGBUILDs rather than receiving
 a binary Arch artifact. Publishing to the AUR or Flathub themselves remains a
 separate process requiring their own reviewed repositories and credentials.
+The Windows job alone writes `latest.json`, using the signed NSIS updater
+artifact. Drafts remain undiscoverable at the configured GitHub `latest`
+endpoint. That endpoint also excludes prereleases, so a published stable release
+is required for a real end-to-end updater discovery test.
 macOS builds are unsigned; see
 [`DESKTOP_MACOS_UNSIGNED.md`](./DESKTOP_MACOS_UNSIGNED.md).
 

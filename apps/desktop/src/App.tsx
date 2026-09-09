@@ -57,6 +57,9 @@ const AuditLogPage = React.lazy(async () => ({
 const DashboardsPanel = React.lazy(async () => ({
   default: (await import("@loom/ui-kit/pages/settings/DashboardsPanel")).DashboardsPanel,
 }));
+const DesktopUpdatesPanel = React.lazy(async () => ({
+  default: (await import("@/components/DesktopUpdatesPanel")).DesktopUpdatesPanel,
+}));
 
 type ServerState =
   | { kind: "loading" }
@@ -222,6 +225,7 @@ function DesktopRoutes({
           <Route path="general" element={null} />
           <Route path="account" element={<AccountPanel />} />
           <Route path="appearance" element={<AppearancePanel />} />
+          <Route path="updates" element={<DesktopUpdatesPanel />} />
           <Route path="audit-log" element={<AuditLogPage />} />
           <Route path="dashboards" element={<DashboardsPanel />} />
           <Route path="permissions" element={<DesktopPermissionsRoute />}>
