@@ -11,8 +11,10 @@ import {
   type DesktopUpdateSummary,
 } from "@/updater/desktop-update-context";
 
-const LATEST_MANIFEST_URL =
-  "https://github.com/Azazel55605/Loom/releases/latest/download/latest.json";
+const LATEST_MANIFEST_URLS = [
+  "https://github.com/Azazel55605/Loom/releases/download/desktop-updater/latest.json",
+  "https://github.com/Azazel55605/Loom/releases/latest/download/latest.json",
+] as const;
 interface LatestManifest {
   version?: unknown;
   notes?: unknown;
@@ -28,12 +30,24 @@ async function loadPlatform(): Promise<DesktopPlatformInfo> {
 }
 
 async function checkPublishedManifest(): Promise<DesktopUpdateSummary | null> {
-  const response = await tauriFetch(LATEST_MANIFEST_URL, {
-    method: "GET",
-    redirect: "follow",
-  });
-  if (!response.ok) {
-    throw new Error(`GitHub returned HTTP ${response.status} while checking updates.`);
+  let response: Response | null = null;
+  for (const url of LATEST_MANIFEST_URLS) {
+    const candidate = await tauriFetch(url, {
+      method: "GET",
+      redirect: "follow",
+    });
+    if (candidate.ok) {
+      response = candidate;
+      break;
+    }
+    if (candidate.status !== 404) {
+      throw new Error(
+        `GitHub returned HTTP ${candidate.status} while checking updates.`,
+      );
+    }
+  }
+  if (response === null) {
+    throw new Error("No published desktop update manifest is available yet.");
   }
   const manifest = (await response.json()) as LatestManifest;
   if (typeof manifest.version !== "string") {

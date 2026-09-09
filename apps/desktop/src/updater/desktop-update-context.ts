@@ -1,7 +1,7 @@
 import * as React from "react";
 
 export const DESKTOP_RELEASES_URL =
-  "https://github.com/Azazel55605/Loom/releases/latest";
+  "https://github.com/Azazel55605/Loom/releases";
 
 export type DesktopPlatform = "windows" | "macos" | "linux" | "unknown";
 

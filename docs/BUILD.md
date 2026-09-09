@@ -266,9 +266,11 @@ release. Arch users build through the validated PKGBUILDs rather than receiving
 a binary Arch artifact. Publishing to the AUR or Flathub themselves remains a
 separate process requiring their own reviewed repositories and credentials.
 The Windows job alone writes `latest.json`, using the signed NSIS updater
-artifact. Drafts remain undiscoverable at the configured GitHub `latest`
-endpoint. That endpoint also excludes prereleases, so a published stable release
-is required for a real end-to-end updater discovery test.
+artifact. After all jobs succeed, the publish job refreshes the fixed
+`desktop-updater` release asset with that manifest. This stable metadata URL
+allows both stable and prerelease desktop versions to be discovered while the
+manifest continues to point at the signed installer on its versioned release.
+Drafts remain undiscoverable because this refresh happens only after publication.
 macOS builds are unsigned; see
 [`DESKTOP_MACOS_UNSIGNED.md`](./DESKTOP_MACOS_UNSIGNED.md).
 

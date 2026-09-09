@@ -36,7 +36,11 @@ undiscoverable until every platform and packaging validation job succeeds.
   grant is likewise isolated in a Windows-only capability file so non-Windows
   builds never attempt to resolve a permission for an absent plugin.
 - The release workflow generates `latest.json` only from the Windows job and
-  prefers the NSIS artifact when both NSIS and MSI installers are present.
+  prefers the NSIS artifact when both NSIS and MSI installers are present. Once
+  every build and packaging validation succeeds and the versioned release is
+  published, the workflow copies that manifest to the fixed, prerelease-marked
+  `desktop-updater` metadata release. This provides a stable endpoint without
+  moving or duplicating the signed installer itself.
 - macOS and non-Flatpak Linux fetch the same published `latest.json` only to
   compare its version with the running application. They never invoke the
   updater's download or install APIs. macOS links to the release; Linux tells
@@ -48,10 +52,14 @@ undiscoverable until every platform and packaging validation job succeeds.
 - Every platform performs one silent check on launch. An available release is
   represented by a small badge beside the Desktop version; installation is
   never automatic.
-- The updater endpoint uses GitHub's `releases/latest/download/latest.json`.
-  Draft releases are therefore not discoverable. GitHub prereleases are also
-  excluded by `releases/latest`; testing the end-to-end discovery path requires
-  a published non-prerelease release.
+- The primary updater endpoint is
+  `releases/download/desktop-updater/latest.json`, with GitHub's
+  `releases/latest/download/latest.json` retained as a fallback for repositories
+  that have not created the channel yet. GitHub deliberately excludes
+  prereleases from `/releases/latest`; the fixed channel therefore allows Loom's
+  intentionally published prereleases to be discovered. Draft releases remain
+  undiscoverable because the channel is refreshed only after the versioned
+  release is published.
 
 ## Consequences
 

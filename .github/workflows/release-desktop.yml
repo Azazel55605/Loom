@@ -225,3 +225,28 @@ jobs:
           find release-assets -maxdepth 1 -type f -print
           gh release upload "${GITHUB_REF_NAME}" release-assets/* --clobber
           gh release edit "${GITHUB_REF_NAME}" --draft=false
+
+      # GitHub's /releases/latest alias deliberately excludes prereleases.
+      # Keep one stable metadata URL for every published desktop release while
+      # the manifest itself continues to reference the versioned, signed NSIS
+      # artifact attached to the real release.
+      - name: Refresh desktop updater channel
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          mkdir -p updater-channel
+          gh release download "${GITHUB_REF_NAME}" \
+            --pattern latest.json \
+            --dir updater-channel
+
+          if gh release view desktop-updater >/dev/null 2>&1; then
+            gh release upload desktop-updater updater-channel/latest.json --clobber
+          else
+            gh release create desktop-updater updater-channel/latest.json \
+              --target "${GITHUB_SHA}" \
+              --title "Desktop updater metadata" \
+              --notes "Automated update-channel metadata. Download installers from the versioned desktop releases." \
+              --prerelease
+          fi
