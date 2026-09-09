@@ -39,13 +39,21 @@ fn desktop_platform_info() -> DesktopPlatformInfo {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    tauri::Builder::default()
+    let builder = tauri::Builder::default()
         .plugin(tauri_plugin_http::init())
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_websocket::init())
         .plugin(tauri_plugin_store::Builder::default().build())
-        .plugin(tauri_plugin_keyring_store::init())
-        .plugin(tauri_plugin_updater::Builder::new().build())
+        .plugin(tauri_plugin_keyring_store::init());
+
+    // The updater configuration exists only in tauri.windows.conf.json.
+    // Registering the plugin elsewhere makes Tauri pass a null configuration
+    // to its deserializer, which aborts application startup before the
+    // check-only Linux/macOS update path can run.
+    #[cfg(target_os = "windows")]
+    let builder = builder.plugin(tauri_plugin_updater::Builder::new().build());
+
+    builder
         .invoke_handler(tauri::generate_handler![desktop_platform_info])
         .run(tauri::generate_context!())
         .expect("error while running Loom desktop");

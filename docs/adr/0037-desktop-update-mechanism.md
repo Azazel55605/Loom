@@ -28,9 +28,13 @@ undiscoverable until every platform and packaging validation job succeeds.
   `bundle.createUpdaterArtifacts` setting live in
   `tauri.windows.conf.json`. Tauri merges that override only for Windows
   targets, so local Linux builds and third-party packaging builds never need
-  the updater signing key. The plugin remains registered in Rust on every
-  desktop platform because its empty default configuration is safe and the UI
-  invokes its update APIs only on Windows.
+  the updater signing key. The Rust-side updater plugin is also registered only
+  on Windows: with no platform configuration, Tauri supplies a null plugin
+  value that the updater cannot deserialize and non-Windows applications would
+  panic during startup. Linux and macOS use the frontend's check-only release
+  manifest path and do not need the native updater plugin. Its Tauri capability
+  grant is likewise isolated in a Windows-only capability file so non-Windows
+  builds never attempt to resolve a permission for an absent plugin.
 - The release workflow generates `latest.json` only from the Windows job and
   prefers the NSIS artifact when both NSIS and MSI installers are present.
 - macOS and non-Flatpak Linux fetch the same published `latest.json` only to

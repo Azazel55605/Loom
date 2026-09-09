@@ -219,8 +219,11 @@ repository secrets; the private key must never be committed or placed in an
 installation, while `tauri-plugin-opener` opens the published release for
 check-only platforms. Linux/macOS developer builds, Arch PKGBUILD builds, and
 Flatpak builds neither create updater artifacts nor require either signing
-variable. These dependencies are required specifically for the two native
-boundaries and do not move update policy into the shared UI package.
+variable. The native updater plugin is registered only in Windows builds;
+registering it without the Windows-only configuration causes Tauri to reject a
+null plugin configuration during application startup. These dependencies are
+required specifically for the two native boundaries and do not move update
+policy into the shared UI package.
 
 Back up the signing key independently of GitHub. If it is lost, generate a new
 keypair and redistribute an application containing the new public key manually.

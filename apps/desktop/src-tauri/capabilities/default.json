@@ -8,7 +8,6 @@
     "store:default",
     "keyring-store:default",
     "opener:default",
-    "updater:default",
     "websocket:default",
     {
       "identifier": "http:default",
