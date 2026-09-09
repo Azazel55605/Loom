@@ -1,12 +1,11 @@
 # Loom
 
 [![Compile Check](https://github.com/Azazel55605/Loom/actions/workflows/ci.yml/badge.svg)](https://github.com/Azazel55605/Loom/actions/workflows/ci.yml)
-
 [![Release web-frontend](https://github.com/Azazel55605/Loom/actions/workflows/release-web-frontend.yml/badge.svg)](https://github.com/Azazel55605/Loom/actions/workflows/release-web-frontend.yml)
-
 [![Release web-backend](https://github.com/Azazel55605/Loom/actions/workflows/release-web-backend.yml/badge.svg)](https://github.com/Azazel55605/Loom/actions/workflows/release-web-backend.yml)
-
 [![Release desktop](https://github.com/Azazel55605/Loom/actions/workflows/release-desktop.yml/badge.svg)](https://github.com/Azazel55605/Loom/actions/workflows/release-desktop.yml)
+
+---
 
 A modular, extensible homelab management platform — not just a dashboard. Loom
 can *act* on your services through their APIs, not merely show you whether
