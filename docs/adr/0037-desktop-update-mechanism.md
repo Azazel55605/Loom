@@ -24,6 +24,13 @@ undiscoverable until every platform and packaging validation job succeeds.
   embedded in the application; CI receives the private key and password only
   through `TAURI_SIGNING_PRIVATE_KEY` and
   `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` repository secrets.
+- The updater endpoint, public key, Windows install mode, and
+  `bundle.createUpdaterArtifacts` setting live in
+  `tauri.windows.conf.json`. Tauri merges that override only for Windows
+  targets, so local Linux builds and third-party packaging builds never need
+  the updater signing key. The plugin remains registered in Rust on every
+  desktop platform because its empty default configuration is safe and the UI
+  invokes its update APIs only on Windows.
 - The release workflow generates `latest.json` only from the Windows job and
   prefers the NSIS artifact when both NSIS and MSI installers are present.
 - macOS and non-Flatpak Linux fetch the same published `latest.json` only to
@@ -46,7 +53,9 @@ undiscoverable until every platform and packaging validation job succeeds.
 
 Windows users get a signature-verified in-app update path without background
 installation. Other packages keep their native ownership and remediation
-instructions. The app embeds only the public verification key.
+instructions. Only Windows builds embed the public verification key or create
+signed updater artifacts. Arch PKGBUILD, Flatpak, and ordinary non-Windows
+developer builds remain independent of Loom's updater signing credentials.
 
 The signing private key is a permanent compatibility boundary. If it is lost,
 a new keypair must be generated and embedded in a newly distributed build;

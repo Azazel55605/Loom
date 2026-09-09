@@ -210,14 +210,17 @@ whichever are valid for the host OS. Tagged desktop releases build `deb` and
 deliberately not built** — it is more trouble than it is worth, and the deb,
 rpm, Arch and Flatpak packages cover Linux.
 
-Desktop updater artifacts are enabled for Tauri v2. Release builds receive the
-existing signing key through the `TAURI_SIGNING_PRIVATE_KEY` and
-`TAURI_SIGNING_PRIVATE_KEY_PASSWORD` GitHub repository secrets; the private key
-must never be committed or placed in an `.env` file. `tauri-plugin-updater`
-provides signature verification and Windows installation, while
-`tauri-plugin-opener` opens the published release for check-only platforms.
-These dependencies are required specifically for the two native boundaries and
-do not move update policy into the shared UI package.
+Desktop updater artifacts are enabled only by the Windows-specific
+`apps/desktop/src-tauri/tauri.windows.conf.json` override. Windows release
+builds receive the existing signing key through the
+`TAURI_SIGNING_PRIVATE_KEY` and `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` GitHub
+repository secrets; the private key must never be committed or placed in an
+`.env` file. `tauri-plugin-updater` provides signature verification and Windows
+installation, while `tauri-plugin-opener` opens the published release for
+check-only platforms. Linux/macOS developer builds, Arch PKGBUILD builds, and
+Flatpak builds neither create updater artifacts nor require either signing
+variable. These dependencies are required specifically for the two native
+boundaries and do not move update policy into the shared UI package.
 
 Back up the signing key independently of GitHub. If it is lost, generate a new
 keypair and redistribute an application containing the new public key manually.

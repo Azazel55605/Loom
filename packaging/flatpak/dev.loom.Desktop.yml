@@ -49,6 +49,9 @@ modules:
         - --share=network
       env:
         CARGO_HOME: /run/build/loom-desktop/cargo
+        # Keep pnpm non-interactive when a local validation build copies an
+        # existing workspace node_modules tree into the Flatpak build sandbox.
+        CI: "true"
     build-commands:
       # npm comes from the Node SDK extension. Run the repository-pinned pnpm
       # without a global install, which would try to write into the read-only
@@ -56,7 +59,11 @@ modules:
       - npx --yes pnpm@11.3.0 install --frozen-lockfile
       - npx --yes pnpm@11.3.0 --filter desktop tauri build --bundles deb
       # Unpack the .deb Tauri produced and lay its contents into /app.
-      - ar x apps/desktop/src-tauri/target/release/bundle/deb/*.deb
+      # flatpak-builder does not expand globs in a one-line simple build
+      # command, so resolve the generated package explicitly in a shell block.
+      - |
+        deb=$(find apps/desktop/src-tauri/target/release/bundle/deb -name '*.deb' -print -quit)
+        ar x "$deb"
       - tar -xf data.tar.gz
       - install -Dm755 usr/bin/loom-desktop /app/bin/loom-desktop
       - install -Dm644 usr/share/applications/Loom.desktop
