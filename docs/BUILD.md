@@ -235,6 +235,9 @@ pnpm --filter desktop tauri icon /tmp/loom-icon.png
 
 Packaging beyond Tauri's own bundles lives in `packaging/` — Arch PKGBUILDs and
 a Flatpak manifest, both exercised by `.github/workflows/release-desktop.yml`.
+The Flatpak manifest declares the Node 22 and stable Rust SDK extensions used
+inside flatpak-builder's isolated build environment; tools installed on the CI
+container itself are not visible inside that environment.
 macOS builds are unsigned; see
 [`DESKTOP_MACOS_UNSIGNED.md`](./DESKTOP_MACOS_UNSIGNED.md).
 
