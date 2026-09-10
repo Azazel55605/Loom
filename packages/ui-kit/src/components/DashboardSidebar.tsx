@@ -2,7 +2,7 @@ import * as React from "react";
 import { DndContext, KeyboardSensor, PointerSensor, closestCenter, useDroppable, useSensor, useSensors, type DragEndEvent } from "@dnd-kit/core";
 import { SortableContext, arrayMove, sortableKeyboardCoordinates, useSortable, verticalListSortingStrategy } from "@dnd-kit/sortable";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { AlertCircle, ChevronDown, Folder, FolderPlus, GripVertical, MoreHorizontal, Pin, PinOff, Plus } from "lucide-react";
+import { AlertCircle, Check, ChevronDown, Folder, FolderPlus, GripVertical, MoreHorizontal, Pencil, Pin, PinOff, Plus } from "lucide-react";
 import { toast } from "sonner";
 
 import { Alert, AlertDescription } from "@loom/ui-kit/components/ui/alert";
@@ -10,10 +10,11 @@ import { AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent, 
 import { Badge } from "@loom/ui-kit/components/ui/badge";
 import { Button } from "@loom/ui-kit/components/ui/button";
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle, DialogTrigger } from "@loom/ui-kit/components/ui/dialog";
-import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuLabel, DropdownMenuSeparator, DropdownMenuSub, DropdownMenuSubContent, DropdownMenuSubTrigger, DropdownMenuTrigger } from "@loom/ui-kit/components/ui/dropdown-menu";
+import { DropdownMenu, DropdownMenuContent, DropdownMenuGroup, DropdownMenuItem, DropdownMenuLabel, DropdownMenuSeparator, DropdownMenuSub, DropdownMenuSubContent, DropdownMenuSubTrigger, DropdownMenuTrigger } from "@loom/ui-kit/components/ui/dropdown-menu";
 import { Input } from "@loom/ui-kit/components/ui/input";
 import { Label } from "@loom/ui-kit/components/ui/label";
 import { Skeleton } from "@loom/ui-kit/components/ui/skeleton";
+import { Tooltip, TooltipContent, TooltipTrigger } from "@loom/ui-kit/components/ui/tooltip";
 import { useApiClient } from "@loom/ui-kit/lib/api-context";
 import type { DashboardFolder, DashboardSummary } from "@loom/ui-kit/lib/api";
 import { describeConnectorError } from "@loom/ui-kit/lib/connector-error";
@@ -41,6 +42,7 @@ function reindex(dashboards: DashboardSummary[], container: ContainerKey, ids: s
 export function DashboardSidebar({ activeDashboardId, onNavigate, footerControl }: { activeDashboardId?: string; onNavigate: (dashboardId: string) => void; footerControl?: React.ReactNode }) {
   const api = useApiClient();
   const queryClient = useQueryClient();
+  const [sidebarEditMode, setSidebarEditMode] = React.useState(false);
   const dashboards = useQuery({ queryKey: dashboardsQueryKey, queryFn: ({ signal }) => api.getDashboards(signal) });
   const folders = useQuery({ queryKey: dashboardFoldersQueryKey, queryFn: ({ signal }) => api.getDashboardFolders(signal) });
   const sensors = useSensors(useSensor(PointerSensor, { activationConstraint: { distance: 6 } }), useSensor(KeyboardSensor, { coordinateGetter: sortableKeyboardCoordinates }));
@@ -113,7 +115,7 @@ export function DashboardSidebar({ activeDashboardId, onNavigate, footerControl 
   }, [saveFolderOrder, sortedFolders]);
 
   const handleDragEnd = React.useCallback(({ active, over }: DragEndEvent) => {
-    if (!over || !dashboards.data || !folders.data) return;
+    if (!sidebarEditMode || !over || !dashboards.data || !folders.data) return;
     if (active.data.current?.type === "folder") {
       const activeId = String(active.data.current.folderId ?? "");
       const overId = String(
@@ -147,30 +149,40 @@ export function DashboardSidebar({ activeDashboardId, onNavigate, footerControl 
       if (from < to) index += 1;
     }
     moveDashboard(id, target, index < 0 ? targetItems.length : index);
-  }, [dashboards.data, folders.data, moveDashboard, saveFolderOrder]);
+  }, [dashboards.data, folders.data, moveDashboard, saveFolderOrder, sidebarEditMode]);
 
   const error = dashboards.isError ? dashboards.error : folders.isError ? folders.error : null;
   return (
     <nav aria-label="Dashboard navigation" className="flex h-full flex-col gap-4 p-4">
-      <div className="flex gap-2">
-        <DashboardCreateDialog onCreated={(dashboard) => onNavigate(dashboard.id)} trigger={<Button className="min-w-0 flex-1" size="sm"><Plus aria-hidden="true" />New dashboard</Button>} />
-        <DashboardFolderDialog mode="create" trigger={<Button type="button" variant="outline" size="icon" aria-label="New folder"><FolderPlus aria-hidden="true" /></Button>} />
+      <div className="flex min-h-[var(--touch-target-size)] items-center justify-between gap-3 px-1">
+        <span className="text-sm font-semibold">Dashboards</span>
+        <Button
+          type="button"
+          variant={sidebarEditMode ? "secondary" : "ghost"}
+          size="sm"
+          aria-pressed={sidebarEditMode}
+          onClick={() => setSidebarEditMode((current) => !current)}
+        >
+          {sidebarEditMode ? <Check data-icon="inline-start" aria-hidden="true" /> : <Pencil data-icon="inline-start" aria-hidden="true" />}
+          {sidebarEditMode ? "Done" : "Edit"}
+        </Button>
       </div>
+      {sidebarEditMode ? <div className="flex gap-2"><DashboardCreateDialog onCreated={(dashboard) => onNavigate(dashboard.id)} trigger={<Button className="min-w-0 flex-1" size="sm"><Plus data-icon="inline-start" aria-hidden="true" />New dashboard</Button>} /><DashboardFolderDialog mode="create" trigger={<Button type="button" variant="outline" size="icon" aria-label="New folder"><FolderPlus aria-hidden="true" /></Button>} /></div> : null}
       {dashboards.isPending || folders.isPending ? <DashboardSidebarSkeleton /> : null}
       {error ? <Alert variant="destructive" className="px-3 py-2"><AlertCircle aria-hidden="true" /><AlertDescription>{describeConnectorError(error)}</AlertDescription></Alert> : null}
       {dashboards.isSuccess && folders.isSuccess ? (
         <DndContext sensors={sensors} collisionDetection={closestCenter} onDragEnd={handleDragEnd}>
-          <div className="flex flex-col gap-2">
-            {normalized.some((dashboard) => dashboard.pinned) ? <DashboardSection title="Pinned">{normalized.filter((dashboard) => dashboard.pinned).map((dashboard) => <SidebarItem key={`pinned-${dashboard.id}`} dashboard={dashboard} container={dashboardContainer(dashboard)} folders={sortedFolders} siblings={ordered(normalized, dashboardContainer(dashboard))} active={dashboard.id === activeDashboardId} draggable={false} pending={saveDashboardOrder.isPending} pinPending={changePin.isPending && changePin.variables.dashboard.id === dashboard.id} onNavigate={onNavigate} onMove={moveDashboard} onTogglePin={() => changePin.mutate({ dashboard, pinned: false })} />)}</DashboardSection> : null}
+          <div className={cn("flex flex-col gap-3 rounded-lg border border-transparent p-1 transition-colors", sidebarEditMode && "border-border bg-muted/30")}>
+            {normalized.some((dashboard) => dashboard.pinned) ? <DashboardSection title="Pinned">{normalized.filter((dashboard) => dashboard.pinned).map((dashboard) => <SidebarItem key={`pinned-${dashboard.id}`} dashboard={dashboard} container={dashboardContainer(dashboard)} folders={sortedFolders} siblings={ordered(normalized, dashboardContainer(dashboard))} active={dashboard.id === activeDashboardId} editMode={sidebarEditMode} draggable={false} pending={saveDashboardOrder.isPending} pinPending={changePin.isPending && changePin.variables.dashboard.id === dashboard.id} onNavigate={onNavigate} onMove={moveDashboard} onTogglePin={() => changePin.mutate({ dashboard, pinned: false })} />)}</DashboardSection> : null}
             <SortableContext items={sortedFolders.map((folder) => folderDragId(folder.id))} strategy={verticalListSortingStrategy}>
               {sortedFolders.map((folder, folderIndex) => {
                 const container: ContainerKey = `folder:${folder.id}`;
                 const members = ordered(normalized, container);
-                return <FolderSection key={folder.id} folder={folder} count={members.length} movePending={saveFolderOrder.isPending} canMoveUp={folderIndex > 0} canMoveDown={folderIndex < sortedFolders.length - 1} onMove={(offset) => moveFolder(folder.id, offset)}><DropZone container={container} dashboards={members}>{members.length ? members.map((dashboard) => <SidebarItem key={dashboard.id} dashboard={dashboard} container={container} folders={sortedFolders} siblings={members} active={dashboard.id === activeDashboardId} draggable pending={saveDashboardOrder.isPending} pinPending={changePin.isPending && changePin.variables.dashboard.id === dashboard.id} onNavigate={onNavigate} onMove={moveDashboard} onTogglePin={() => changePin.mutate({ dashboard, pinned: !dashboard.pinned })} />) : <p className="px-2 py-2 text-xs text-muted-foreground">Drop dashboards here.</p>}</DropZone></FolderSection>;
+                return <FolderSection key={folder.id} folder={folder} count={members.length} editMode={sidebarEditMode} movePending={saveFolderOrder.isPending} canMoveUp={folderIndex > 0} canMoveDown={folderIndex < sortedFolders.length - 1} onMove={(offset) => moveFolder(folder.id, offset)}><DropZone container={container} dashboards={members} enabled={sidebarEditMode}>{members.length ? members.map((dashboard) => <SidebarItem key={dashboard.id} dashboard={dashboard} container={container} folders={sortedFolders} siblings={members} active={dashboard.id === activeDashboardId} editMode={sidebarEditMode} draggable={sidebarEditMode} pending={saveDashboardOrder.isPending} pinPending={changePin.isPending && changePin.variables.dashboard.id === dashboard.id} onNavigate={onNavigate} onMove={moveDashboard} onTogglePin={() => changePin.mutate({ dashboard, pinned: !dashboard.pinned })} />) : sidebarEditMode ? <p className="px-3 py-2 text-xs text-muted-foreground">Drop dashboards here.</p> : null}</DropZone></FolderSection>;
               })}
             </SortableContext>
-            <UngroupedSection title="My Dashboards" container="ungrouped:owner" dashboards={ordered(normalized, "ungrouped:owner")} folders={sortedFolders} activeDashboardId={activeDashboardId} pending={saveDashboardOrder.isPending} pinMutation={changePin} onNavigate={onNavigate} onMove={moveDashboard} empty="Create a dashboard to arrange your services." />
-            {ordered(normalized, "ungrouped:shared").length ? <UngroupedSection title="Shared with me" container="ungrouped:shared" dashboards={ordered(normalized, "ungrouped:shared")} folders={sortedFolders} activeDashboardId={activeDashboardId} pending={saveDashboardOrder.isPending} pinMutation={changePin} onNavigate={onNavigate} onMove={moveDashboard} /> : null}
+            <UngroupedSection title="My Dashboards" container="ungrouped:owner" dashboards={ordered(normalized, "ungrouped:owner")} folders={sortedFolders} activeDashboardId={activeDashboardId} editMode={sidebarEditMode} pending={saveDashboardOrder.isPending} pinMutation={changePin} onNavigate={onNavigate} onMove={moveDashboard} empty="Use Edit to create your first dashboard." />
+            {ordered(normalized, "ungrouped:shared").length ? <UngroupedSection title="Shared with me" container="ungrouped:shared" dashboards={ordered(normalized, "ungrouped:shared")} folders={sortedFolders} activeDashboardId={activeDashboardId} editMode={sidebarEditMode} pending={saveDashboardOrder.isPending} pinMutation={changePin} onNavigate={onNavigate} onMove={moveDashboard} /> : null}
           </div>
         </DndContext>
       ) : null}
@@ -179,8 +191,8 @@ export function DashboardSidebar({ activeDashboardId, onNavigate, footerControl 
   );
 }
 
-function UngroupedSection({ title, container, dashboards, folders, activeDashboardId, pending, pinMutation, onNavigate, onMove, empty }: { title: string; container: ContainerKey; dashboards: DashboardSummary[]; folders: DashboardFolder[]; activeDashboardId?: string; pending: boolean; pinMutation: { isPending: boolean; variables?: { dashboard: DashboardSummary; pinned: boolean }; mutate: (variables: { dashboard: DashboardSummary; pinned: boolean }) => void }; onNavigate: (id: string) => void; onMove: (id: string, target: ContainerKey, index?: number) => void; empty?: string }) {
-  return <DashboardSection title={title}><DropZone container={container} dashboards={dashboards}>{dashboards.length ? dashboards.map((dashboard) => <SidebarItem key={dashboard.id} dashboard={dashboard} container={container} folders={folders} siblings={dashboards} active={dashboard.id === activeDashboardId} draggable pending={pending} pinPending={pinMutation.isPending && pinMutation.variables?.dashboard.id === dashboard.id} onNavigate={onNavigate} onMove={onMove} onTogglePin={() => pinMutation.mutate({ dashboard, pinned: !dashboard.pinned })} />) : <p className="px-2 py-1 text-xs text-muted-foreground">{empty}</p>}</DropZone></DashboardSection>;
+function UngroupedSection({ title, container, dashboards, folders, activeDashboardId, editMode, pending, pinMutation, onNavigate, onMove, empty }: { title: string; container: ContainerKey; dashboards: DashboardSummary[]; folders: DashboardFolder[]; activeDashboardId?: string; editMode: boolean; pending: boolean; pinMutation: { isPending: boolean; variables?: { dashboard: DashboardSummary; pinned: boolean }; mutate: (variables: { dashboard: DashboardSummary; pinned: boolean }) => void }; onNavigate: (id: string) => void; onMove: (id: string, target: ContainerKey, index?: number) => void; empty?: string }) {
+  return <DashboardSection title={title}><DropZone container={container} dashboards={dashboards} enabled={editMode}>{dashboards.length ? dashboards.map((dashboard) => <SidebarItem key={dashboard.id} dashboard={dashboard} container={container} folders={folders} siblings={dashboards} active={dashboard.id === activeDashboardId} editMode={editMode} draggable={editMode} pending={pending} pinPending={pinMutation.isPending && pinMutation.variables?.dashboard.id === dashboard.id} onNavigate={onNavigate} onMove={onMove} onTogglePin={() => pinMutation.mutate({ dashboard, pinned: !dashboard.pinned })} />) : <p className="px-3 py-2 text-xs text-muted-foreground">{empty}</p>}</DropZone></DashboardSection>;
 }
 
 /** Reusable create transaction for the sidebar and first-dashboard empty state. */
@@ -208,19 +220,19 @@ function NameDialog({ open, onOpenChange, trigger, title, description, label, in
   return <Dialog open={open} onOpenChange={onOpenChange}>{trigger ? <DialogTrigger asChild>{trigger}</DialogTrigger> : null}<DialogContent><DialogHeader><DialogTitle>{title}</DialogTitle><DialogDescription>{description}</DialogDescription></DialogHeader><form className="flex flex-col gap-4" onSubmit={(event) => { event.preventDefault(); if (value.trim()) onSubmit(); }}><div className="flex flex-col gap-2"><Label htmlFor={inputId}>{label}</Label><Input id={inputId} autoFocus value={value} onChange={(event) => onChange(event.target.value)} placeholder={placeholder} /></div>{error ? <MutationError error={error} /> : null}<DialogFooter><Button type="button" variant="outline" onClick={() => onOpenChange(false)}>Cancel</Button><Button type="submit" disabled={!value.trim() || pending}>{pending ? "Saving…" : action}</Button></DialogFooter></form></DialogContent></Dialog>;
 }
 
-function FolderSection({ folder, count, movePending, canMoveUp, canMoveDown, onMove, children }: { folder: DashboardFolder; count: number; movePending: boolean; canMoveUp: boolean; canMoveDown: boolean; onMove: (offset: -1 | 1) => void; children: React.ReactNode }) {
+function FolderSection({ folder, count, editMode, movePending, canMoveUp, canMoveDown, onMove, children }: { folder: DashboardFolder; count: number; editMode: boolean; movePending: boolean; canMoveUp: boolean; canMoveDown: boolean; onMove: (offset: -1 | 1) => void; children: React.ReactNode }) {
   const api = useApiClient();
   const queryClient = useQueryClient();
   const [open, setOpen] = React.useState(true);
   const [renameOpen, setRenameOpen] = React.useState(false);
   const [confirmDelete, setConfirmDelete] = React.useState(false);
-  const sortable = useSortable({ id: folderDragId(folder.id), data: { type: "folder", folderId: folder.id, container: `folder:${folder.id}` } });
+  const sortable = useSortable({ id: folderDragId(folder.id), disabled: !editMode, data: { type: "folder", folderId: folder.id, container: `folder:${folder.id}` } });
   const deletion = useMutation({ mutationFn: () => api.deleteDashboardFolder(folder.id), onSuccess: async () => { setConfirmDelete(false); await Promise.all([queryClient.invalidateQueries({ queryKey: dashboardFoldersQueryKey }), queryClient.invalidateQueries({ queryKey: dashboardsQueryKey })]); } });
-  return <section ref={sortable.setNodeRef} style={sortableStyle(sortable.transform, sortable.transition, sortable.isDragging)}><div className="flex items-center"><DragHandle label={`Reorder ${folder.name} folder`} attributes={sortable.attributes} listeners={sortable.listeners} /><Button type="button" variant="ghost" size="sm" className="min-w-0 flex-1 justify-start px-1 text-muted-foreground" aria-expanded={open} onClick={() => setOpen((current) => !current)}><ChevronDown aria-hidden="true" className={cn("shrink-0 transition-transform [transition-duration:var(--motion-fast)]", !open && "-rotate-90")} /><Folder aria-hidden="true" className="shrink-0" /><span className="truncate">{folder.name}</span><span className="ml-auto text-xs tabular-nums">{count}</span></Button><DropdownMenu><DropdownMenuTrigger asChild><Button type="button" variant="ghost" size="icon" className="shrink-0" aria-label={`Folder actions for ${folder.name}`}><MoreHorizontal aria-hidden="true" /></Button></DropdownMenuTrigger><DropdownMenuContent align="end"><DropdownMenuItem onSelect={() => setRenameOpen(true)}>Rename</DropdownMenuItem><DropdownMenuItem disabled={!canMoveUp || movePending} onSelect={() => onMove(-1)}>Move up</DropdownMenuItem><DropdownMenuItem disabled={!canMoveDown || movePending} onSelect={() => onMove(1)}>Move down</DropdownMenuItem><DropdownMenuSeparator /><DropdownMenuItem className="text-destructive focus:text-destructive" onSelect={() => setConfirmDelete(true)}>Delete</DropdownMenuItem></DropdownMenuContent></DropdownMenu></div><div className="motion-collapse-grid" data-state={open ? "open" : "closed"}><div className="min-h-0 overflow-hidden"><div className="mt-1 flex flex-col gap-1">{children}</div></div></div><DashboardFolderDialog mode="rename" folder={folder} open={renameOpen} onOpenChange={setRenameOpen} /><AlertDialog open={confirmDelete} onOpenChange={setConfirmDelete}><AlertDialogContent><AlertDialogHeader><AlertDialogTitle>Delete “{folder.name}”?</AlertDialogTitle><AlertDialogDescription>The {count === 1 ? "dashboard" : `${count} dashboards`} in this folder will become ungrouped. No dashboards will be deleted.</AlertDialogDescription></AlertDialogHeader>{deletion.error ? <MutationError error={deletion.error} /> : null}<AlertDialogFooter><AlertDialogCancel disabled={deletion.isPending}>Cancel</AlertDialogCancel><AlertDialogAction className="bg-destructive text-destructive-foreground hover:bg-destructive/90" disabled={deletion.isPending} onClick={(event) => { event.preventDefault(); deletion.mutate(); }}>{deletion.isPending ? "Deleting…" : "Delete folder"}</AlertDialogAction></AlertDialogFooter></AlertDialogContent></AlertDialog></section>;
+  return <section ref={sortable.setNodeRef} style={sortableStyle(sortable.transform, sortable.transition, sortable.isDragging)}><div className="flex items-center gap-1 px-1">{editMode ? <DragHandle label={`Reorder ${folder.name} folder`} attributes={sortable.attributes} listeners={sortable.listeners} /> : null}<Button type="button" variant="ghost" size="sm" className="min-w-0 flex-1 justify-start gap-2 px-2 text-muted-foreground" aria-expanded={open} onClick={() => setOpen((current) => !current)}><ChevronDown aria-hidden="true" className={cn("shrink-0 transition-transform [transition-duration:var(--motion-fast)]", !open && "-rotate-90")} /><Folder aria-hidden="true" className="shrink-0" /><span className="truncate">{folder.name}</span><span className="ml-auto text-xs tabular-nums">{count}</span></Button>{editMode ? <DropdownMenu><DropdownMenuTrigger asChild><Button type="button" variant="ghost" size="icon" className="shrink-0" aria-label={`Folder actions for ${folder.name}`}><MoreHorizontal aria-hidden="true" /></Button></DropdownMenuTrigger><DropdownMenuContent align="end"><DropdownMenuGroup><DropdownMenuItem onSelect={() => setRenameOpen(true)}>Rename</DropdownMenuItem><DropdownMenuItem disabled={!canMoveUp || movePending} onSelect={() => onMove(-1)}>Move up</DropdownMenuItem><DropdownMenuItem disabled={!canMoveDown || movePending} onSelect={() => onMove(1)}>Move down</DropdownMenuItem></DropdownMenuGroup><DropdownMenuSeparator /><DropdownMenuGroup><DropdownMenuItem className="text-destructive focus:text-destructive" onSelect={() => setConfirmDelete(true)}>Delete</DropdownMenuItem></DropdownMenuGroup></DropdownMenuContent></DropdownMenu> : null}</div><div className="motion-collapse-grid" data-state={open ? "open" : "closed"}><div className="min-h-0 overflow-hidden"><div className="mt-1 flex flex-col gap-2 px-1">{children}</div></div></div><DashboardFolderDialog mode="rename" folder={folder} open={renameOpen} onOpenChange={setRenameOpen} /><AlertDialog open={confirmDelete} onOpenChange={setConfirmDelete}><AlertDialogContent><AlertDialogHeader><AlertDialogTitle>Delete “{folder.name}”?</AlertDialogTitle><AlertDialogDescription>The {count === 1 ? "dashboard" : `${count} dashboards`} in this folder will become ungrouped. No dashboards will be deleted.</AlertDialogDescription></AlertDialogHeader>{deletion.error ? <MutationError error={deletion.error} /> : null}<AlertDialogFooter><AlertDialogCancel disabled={deletion.isPending}>Cancel</AlertDialogCancel><AlertDialogAction className="bg-destructive text-destructive-foreground hover:bg-destructive/90" disabled={deletion.isPending} onClick={(event) => { event.preventDefault(); deletion.mutate(); }}>{deletion.isPending ? "Deleting…" : "Delete folder"}</AlertDialogAction></AlertDialogFooter></AlertDialogContent></AlertDialog></section>;
 }
 
-function DropZone({ container, dashboards, children }: { container: ContainerKey; dashboards: DashboardSummary[]; children: React.ReactNode }) {
-  const drop = useDroppable({ id: `dashboard-container:${container}`, data: { type: "container", container } });
+function DropZone({ container, dashboards, enabled, children }: { container: ContainerKey; dashboards: DashboardSummary[]; enabled: boolean; children: React.ReactNode }) {
+  const drop = useDroppable({ id: `dashboard-container:${container}`, disabled: !enabled, data: { type: "container", container } });
   return <SortableContext items={dashboards.map((dashboard) => dashboardDragId(dashboard.id))} strategy={verticalListSortingStrategy}><div ref={drop.setNodeRef} className={cn("min-h-2 rounded-md", drop.isOver && "bg-accent/40")}>{children}</div></SortableContext>;
 }
 
@@ -229,10 +241,82 @@ function DashboardSection({ title, children }: { title: string; children: React.
   return <section><Button type="button" variant="ghost" size="sm" className="w-full justify-between px-2 text-muted-foreground" aria-expanded={open} onClick={() => setOpen((current) => !current)}>{title}<ChevronDown aria-hidden="true" className={cn("transition-transform [transition-duration:var(--motion-fast)]", !open && "-rotate-90")} /></Button><div className="motion-collapse-grid" data-state={open ? "open" : "closed"}><div className="min-h-0 overflow-hidden"><div className="mt-1 flex flex-col gap-1">{children}</div></div></div></section>;
 }
 
-function SidebarItem({ dashboard, container, folders, siblings, active, draggable, pending, pinPending, onNavigate, onMove, onTogglePin }: { dashboard: DashboardSummary; container: ContainerKey; folders: DashboardFolder[]; siblings: DashboardSummary[]; active: boolean; draggable: boolean; pending: boolean; pinPending: boolean; onNavigate: (id: string) => void; onMove: (id: string, target: ContainerKey, index?: number) => void; onTogglePin: () => void }) {
+function SidebarItem({ dashboard, container, folders, siblings, active, editMode, draggable, pending, pinPending, onNavigate, onMove, onTogglePin }: { dashboard: DashboardSummary; container: ContainerKey; folders: DashboardFolder[]; siblings: DashboardSummary[]; active: boolean; editMode: boolean; draggable: boolean; pending: boolean; pinPending: boolean; onNavigate: (id: string) => void; onMove: (id: string, target: ContainerKey, index?: number) => void; onTogglePin: () => void }) {
   const sortable = useSortable({ id: draggable ? dashboardDragId(dashboard.id) : `pinned-dashboard:${dashboard.id}`, disabled: !draggable, data: { type: "dashboard", dashboardId: dashboard.id, container } });
   const index = siblings.findIndex((item) => item.id === dashboard.id);
-  return <div ref={sortable.setNodeRef} style={sortableStyle(sortable.transform, sortable.transition, sortable.isDragging)} className={cn("group flex min-w-0 items-center rounded-md", active && "bg-muted text-foreground")}>{draggable ? <DragHandle label={`Reorder ${dashboard.name}`} attributes={sortable.attributes} listeners={sortable.listeners} /> : null}<Button type="button" variant="ghost" size="sm" className="min-w-0 flex-1 justify-start px-2" aria-current={active ? "page" : undefined} onClick={() => onNavigate(dashboard.id)}><span className="truncate">{dashboard.name}</span>{dashboard.role !== "owner" ? <Badge variant="outline" className="ml-auto px-1.5 py-0 text-[0.625rem]">{dashboard.role === "editor" ? "Editor" : "Viewer"}</Badge> : null}</Button><Button type="button" variant="ghost" size="icon" className="shrink-0" disabled={pinPending} aria-label={`${dashboard.pinned ? "Unpin" : "Pin"} ${dashboard.name}`} onClick={onTogglePin}>{dashboard.pinned ? <PinOff aria-hidden="true" /> : <Pin aria-hidden="true" />}</Button><DropdownMenu><DropdownMenuTrigger asChild><Button type="button" variant="ghost" size="icon" className="shrink-0" aria-label={`Organize ${dashboard.name}`}><MoreHorizontal aria-hidden="true" /></Button></DropdownMenuTrigger><DropdownMenuContent align="end"><DropdownMenuLabel>Organize dashboard</DropdownMenuLabel><DropdownMenuSub><DropdownMenuSubTrigger>Move to folder</DropdownMenuSubTrigger><DropdownMenuSubContent><DropdownMenuItem disabled={dashboard.sidebarFolderId === null || pending} onSelect={() => onMove(dashboard.id, dashboard.role === "owner" ? "ungrouped:owner" : "ungrouped:shared")}>Ungrouped</DropdownMenuItem><DropdownMenuSeparator />{folders.map((folder) => <DropdownMenuItem key={folder.id} disabled={dashboard.sidebarFolderId === folder.id || pending} onSelect={() => onMove(dashboard.id, `folder:${folder.id}`)}>{folder.name}</DropdownMenuItem>)}</DropdownMenuSubContent></DropdownMenuSub><DropdownMenuItem disabled={index <= 0 || pending} onSelect={() => onMove(dashboard.id, container, index - 1)}>Move up</DropdownMenuItem><DropdownMenuItem disabled={index < 0 || index >= siblings.length - 1 || pending} onSelect={() => onMove(dashboard.id, container, index + 1)}>Move down</DropdownMenuItem></DropdownMenuContent></DropdownMenu></div>;
+  return <div ref={sortable.setNodeRef} style={sortableStyle(sortable.transform, sortable.transition, sortable.isDragging)} className={cn("group flex min-w-0 items-center gap-2 rounded-md px-1 py-1", active && "bg-muted text-foreground")}>{draggable ? <DragHandle label={`Reorder ${dashboard.name}`} attributes={sortable.attributes} listeners={sortable.listeners} /> : null}<DashboardNavigationButton dashboard={dashboard} active={active} onNavigate={onNavigate} /><DropdownMenu><DropdownMenuTrigger asChild><Button type="button" variant="ghost" size="icon" className="ml-1 shrink-0" aria-label={`Dashboard actions for ${dashboard.name}`}><MoreHorizontal aria-hidden="true" /></Button></DropdownMenuTrigger><DropdownMenuContent align="end"><DropdownMenuLabel>{editMode ? "Organize dashboard" : "Dashboard"}</DropdownMenuLabel><DropdownMenuGroup><DropdownMenuItem disabled={pinPending} onSelect={onTogglePin}>{dashboard.pinned ? <PinOff data-icon="inline-start" aria-hidden="true" /> : <Pin data-icon="inline-start" aria-hidden="true" />}{dashboard.pinned ? "Unpin" : "Pin"}</DropdownMenuItem></DropdownMenuGroup>{editMode ? <><DropdownMenuSeparator /><DropdownMenuGroup><DropdownMenuSub><DropdownMenuSubTrigger>Move to folder</DropdownMenuSubTrigger><DropdownMenuSubContent><DropdownMenuGroup><DropdownMenuItem disabled={dashboard.sidebarFolderId === null || pending} onSelect={() => onMove(dashboard.id, dashboard.role === "owner" ? "ungrouped:owner" : "ungrouped:shared")}>Ungrouped</DropdownMenuItem>{folders.map((folder) => <DropdownMenuItem key={folder.id} disabled={dashboard.sidebarFolderId === folder.id || pending} onSelect={() => onMove(dashboard.id, `folder:${folder.id}`)}>{folder.name}</DropdownMenuItem>)}</DropdownMenuGroup></DropdownMenuSubContent></DropdownMenuSub><DropdownMenuItem disabled={index <= 0 || pending} onSelect={() => onMove(dashboard.id, container, index - 1)}>Move up</DropdownMenuItem><DropdownMenuItem disabled={index < 0 || index >= siblings.length - 1 || pending} onSelect={() => onMove(dashboard.id, container, index + 1)}>Move down</DropdownMenuItem></DropdownMenuGroup></> : null}</DropdownMenuContent></DropdownMenu></div>;
+}
+
+function DashboardNavigationButton({ dashboard, active, onNavigate }: { dashboard: DashboardSummary; active: boolean; onNavigate: (id: string) => void }) {
+  const nameRef = React.useRef<HTMLSpanElement>(null);
+  const longPressTimer = React.useRef<ReturnType<typeof setTimeout> | null>(null);
+  const longPressed = React.useRef(false);
+  const [truncated, setTruncated] = React.useState(false);
+  const [tooltipOpen, setTooltipOpen] = React.useState(false);
+
+  React.useLayoutEffect(() => {
+    const name = nameRef.current;
+    if (!name) return;
+    const measure = () => setTruncated(name.scrollWidth > name.clientWidth);
+    measure();
+    if (typeof ResizeObserver === "undefined") return;
+    const observer = new ResizeObserver(measure);
+    observer.observe(name);
+    return () => observer.disconnect();
+  }, [dashboard.name]);
+
+  React.useEffect(() => () => {
+    if (longPressTimer.current) clearTimeout(longPressTimer.current);
+  }, []);
+
+  const clearLongPress = () => {
+    if (longPressTimer.current) clearTimeout(longPressTimer.current);
+    longPressTimer.current = null;
+  };
+  const finishLongPress = () => {
+    clearLongPress();
+    if (longPressed.current) setTimeout(() => setTooltipOpen(false), 1400);
+  };
+
+  return (
+    <Tooltip open={truncated && tooltipOpen} onOpenChange={(open) => setTooltipOpen(truncated && open)}>
+      <TooltipTrigger asChild>
+        <Button
+          type="button"
+          variant="ghost"
+          className="h-auto min-h-[var(--touch-target-size)] min-w-0 flex-1 justify-start gap-3 px-3 py-2.5"
+          aria-current={active ? "page" : undefined}
+          onPointerDown={(event) => {
+            if (event.pointerType !== "touch" || !truncated) return;
+            clearLongPress();
+            longPressed.current = false;
+            longPressTimer.current = setTimeout(() => {
+              longPressed.current = true;
+              setTooltipOpen(true);
+            }, 600);
+          }}
+          onPointerUp={finishLongPress}
+          onPointerCancel={finishLongPress}
+          onPointerLeave={finishLongPress}
+          onContextMenu={(event) => {
+            if (truncated) event.preventDefault();
+          }}
+          onClick={(event) => {
+            if (longPressed.current) {
+              event.preventDefault();
+              longPressed.current = false;
+              return;
+            }
+            onNavigate(dashboard.id);
+          }}
+        >
+          <span ref={nameRef} className="min-w-0 flex-1 truncate text-left">{dashboard.name}</span>
+          {dashboard.role !== "owner" ? <Badge variant="outline" className="shrink-0 px-1.5 py-0 text-[0.625rem]">{dashboard.role === "editor" ? "Editor" : "Viewer"}</Badge> : null}
+        </Button>
+      </TooltipTrigger>
+      {truncated ? <TooltipContent side="right">{dashboard.name}</TooltipContent> : null}
+    </Tooltip>
+  );
 }
 
 function DragHandle({ label, attributes, listeners }: { label: string; attributes: ReturnType<typeof useSortable>["attributes"]; listeners: ReturnType<typeof useSortable>["listeners"] }) {
