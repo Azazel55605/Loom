@@ -4780,6 +4780,216 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn personal_dashboard_folders_are_isolated_lazy_and_viewer_writable() {
+        let app = test_app().await;
+        let (owner, _) = setup_and_login(&app.router).await;
+        let viewer =
+            user_with_grants(&app.router, &owner, "folder-viewer", serde_json::json!([])).await;
+        let viewer_id = current_user_id(&app.router, &viewer).await;
+        let other =
+            user_with_grants(&app.router, &owner, "folder-other", serde_json::json!([])).await;
+
+        let beta_id = create_dashboard(&app.router, &owner, "Beta dashboard").await;
+        let alpha_id = create_dashboard(&app.router, &owner, "Alpha dashboard").await;
+        for dashboard_id in [&beta_id, &alpha_id] {
+            share_dashboard_with(&app.router, &owner, dashboard_id, &viewer_id, "view").await;
+        }
+
+        // No placement rows are backfilled merely because access exists. The
+        // list still publishes stable alphabetical fallback positions.
+        let placement_count: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM dashboard_sidebar_placements")
+                .fetch_one(&app.pool)
+                .await
+                .expect("sidebar placement count");
+        assert_eq!(placement_count, 0);
+        let (status, initial) =
+            send(&app.router, get_with_auth("/dashboards", &bearer(&viewer))).await;
+        assert_eq!(status, StatusCode::OK, "{initial:#}");
+        let initial = initial.as_array().expect("dashboard list");
+        let alpha = initial
+            .iter()
+            .find(|row| row["id"] == alpha_id)
+            .expect("alpha dashboard");
+        let beta = initial
+            .iter()
+            .find(|row| row["id"] == beta_id)
+            .expect("beta dashboard");
+        assert_eq!(alpha["sidebarFolderId"], serde_json::Value::Null);
+        assert_eq!(alpha["sidebarSortOrder"], 0);
+        assert_eq!(beta["sidebarSortOrder"], 1);
+
+        let create_folder = |name: &str| {
+            post_json_auth(
+                "/dashboard-folders",
+                &viewer,
+                serde_json::json!({ "name": name }),
+            )
+        };
+        let (status, first_folder) = send(&app.router, create_folder("Infrastructure")).await;
+        assert_eq!(status, StatusCode::CREATED, "{first_folder:#}");
+        let first_folder_id = first_folder["id"].as_str().expect("folder id").to_owned();
+        let (status, second_folder) = send(&app.router, create_folder("Services")).await;
+        assert_eq!(status, StatusCode::CREATED, "{second_folder:#}");
+        let second_folder_id = second_folder["id"].as_str().expect("folder id").to_owned();
+
+        // Folder order changes in one transaction and lists in that order.
+        let (status, body) = send(
+            &app.router,
+            patch_json_auth(
+                "/dashboard-folders/reorder",
+                &viewer,
+                serde_json::json!({
+                    "orderedFolderIds": [&second_folder_id, &first_folder_id],
+                }),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::NO_CONTENT, "{body:#}");
+        let (status, folders) = send(
+            &app.router,
+            get_with_auth("/dashboard-folders", &bearer(&viewer)),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{folders:#}");
+        assert_eq!(folders[0]["id"], second_folder_id);
+        assert_eq!(folders[0]["sortOrder"], 0);
+        assert_eq!(folders[1]["id"], first_folder_id);
+        assert_eq!(folders[1]["sortOrder"], 1);
+
+        // A different user sees no folders and gets the same not-found answer
+        // for reading another person's id through either mutation path.
+        let (status, other_folders) = send(
+            &app.router,
+            get_with_auth("/dashboard-folders", &bearer(&other)),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(other_folders, serde_json::json!([]));
+        let (status, _) = send(
+            &app.router,
+            patch_json_auth(
+                &format!("/dashboard-folders/{first_folder_id}"),
+                &other,
+                serde_json::json!({ "name": "Not mine" }),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        let (status, _) = send(
+            &app.router,
+            delete_auth(&format!("/dashboard-folders/{first_folder_id}"), &other),
+        )
+        .await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+
+        // Viewer access is enough: organizing shared content is personal
+        // metadata and does not mutate the owner's dashboard.
+        for (dashboard_id, sort_order) in [(&alpha_id, 8), (&beta_id, 9)] {
+            let (status, body) = send(
+                &app.router,
+                patch_json_auth(
+                    &format!("/dashboards/{dashboard_id}/sidebar-placement"),
+                    &viewer,
+                    serde_json::json!({
+                        "folderId": first_folder_id,
+                        "sortOrder": sort_order,
+                    }),
+                ),
+            )
+            .await;
+            assert_eq!(status, StatusCode::NO_CONTENT, "{body:#}");
+        }
+        let (status, body) = send(
+            &app.router,
+            patch_json_auth(
+                "/dashboards/sidebar-placement/reorder",
+                &viewer,
+                serde_json::json!({
+                    "folderId": first_folder_id,
+                    "orderedDashboardIds": [&beta_id, &alpha_id],
+                }),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::NO_CONTENT, "{body:#}");
+
+        let (_, viewer_dashboards) =
+            send(&app.router, get_with_auth("/dashboards", &bearer(&viewer))).await;
+        for (dashboard_id, expected_order) in [(&beta_id, 0), (&alpha_id, 1)] {
+            let row = viewer_dashboards
+                .as_array()
+                .expect("viewer dashboards")
+                .iter()
+                .find(|row| row["id"] == *dashboard_id)
+                .expect("shared dashboard");
+            assert_eq!(row["sidebarFolderId"], first_folder_id);
+            assert_eq!(row["sidebarSortOrder"], expected_order);
+        }
+        let (_, owner_dashboards) =
+            send(&app.router, get_with_auth("/dashboards", &bearer(&owner))).await;
+        for dashboard_id in [&beta_id, &alpha_id] {
+            let row = owner_dashboards
+                .as_array()
+                .expect("owner dashboards")
+                .iter()
+                .find(|row| row["id"] == *dashboard_id)
+                .expect("owned dashboard");
+            assert_eq!(row["sidebarFolderId"], serde_json::Value::Null);
+        }
+
+        // Deleting the folder sets folder_id to NULL but deliberately retains
+        // both personal placement rows and both dashboards.
+        let (status, body) = send(
+            &app.router,
+            delete_auth(&format!("/dashboard-folders/{first_folder_id}"), &viewer),
+        )
+        .await;
+        assert_eq!(status, StatusCode::NO_CONTENT, "{body:#}");
+        let retained_rows: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM dashboard_sidebar_placements \
+             WHERE user_id = ? AND folder_id IS NULL",
+        )
+        .bind(&viewer_id)
+        .fetch_one(&app.pool)
+        .await
+        .expect("ungrouped placement count");
+        assert_eq!(retained_rows, 2);
+        let retained_dashboards: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM dashboards WHERE id IN (?, ?)")
+                .bind(&alpha_id)
+                .bind(&beta_id)
+                .fetch_one(&app.pool)
+                .await
+                .expect("retained dashboard count");
+        assert_eq!(retained_dashboards, 2);
+
+        // The retained ungrouped rows can themselves be batch-reordered.
+        let (status, body) = send(
+            &app.router,
+            patch_json_auth(
+                "/dashboards/sidebar-placement/reorder",
+                &viewer,
+                serde_json::json!({
+                    "folderId": null,
+                    "orderedDashboardIds": [&alpha_id, &beta_id],
+                }),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::NO_CONTENT, "{body:#}");
+        let orders: Vec<(String, i64)> = sqlx::query_as(
+            "SELECT dashboard_id, sort_order FROM dashboard_sidebar_placements \
+             WHERE user_id = ? ORDER BY sort_order",
+        )
+        .bind(viewer_id)
+        .fetch_all(&app.pool)
+        .await
+        .expect("sidebar placement order");
+        assert_eq!(orders, vec![(alpha_id, 0), (beta_id, 1)]);
+    }
+
+    #[tokio::test]
     async fn dashboard_administration_ignores_local_acl_and_can_reassign_and_delete() {
         let app = test_app().await;
         let (admin, _) = setup_and_login(&app.router).await;

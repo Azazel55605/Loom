@@ -2769,7 +2769,7 @@ use dashboard detail paths to enumerate private dashboard ids.
 
 Role ordering is `owner > editor > viewer`:
 
-| Role | View | Pin for self | Add/edit/remove placements and groups | Rename/delete/share |
+| Role | View | Pin/organize for self | Add/edit/remove placements and groups | Rename/delete/share |
 | --- | --- | --- | --- | --- |
 | owner | yes | yes | yes | yes |
 | editor | yes | yes | yes | no |
@@ -2790,7 +2790,9 @@ group membership. Pinned dashboards sort first, then by name.
     "name": "Operations",
     "role": "editor",
     "pinned": true,
-    "hidden": false
+    "hidden": false,
+    "sidebarFolderId": "de314fb5-737c-43a0-b619-30a29b65cdb7",
+    "sidebarSortOrder": 2
   }
 ]
 ```
@@ -2805,6 +2807,102 @@ stay fully reachable by id — it is typically the destination of a `navigate`
 placement — and because the only screen that can unhide one has to be able to
 find it.
 
+`sidebarFolderId` and `sidebarSortOrder` describe only the authenticated
+caller's personal sidebar. `sidebarFolderId: null` means ungrouped. A dashboard
+with no persisted sidebar-placement row is also ungrouped and receives a stable
+alphabetical fallback position after explicitly positioned ungrouped entries;
+the read does not create a row. Neither field is a property of the dashboard or
+visible to another viewer of the same shared dashboard.
+
+### Personal dashboard folders
+
+Folders are private sidebar organization for the authenticated caller. They do
+not participate in the dashboard owner/editor/viewer ACL, cannot be shared, and
+never grant access to a dashboard.
+
+#### `GET /dashboard-folders`
+
+Returns the caller's folders ordered by `sortOrder`, then name and id for stable
+ties.
+
+```json
+[
+  {
+    "id": "de314fb5-737c-43a0-b619-30a29b65cdb7",
+    "name": "Infrastructure",
+    "sortOrder": 0
+  }
+]
+```
+
+#### `POST /dashboard-folders`
+
+Creates a folder at the end of the caller's folder order.
+
+```json
+{ "name": "Infrastructure" }
+```
+
+Returns 201 with the folder. An empty or whitespace-only name returns 400.
+
+#### `PATCH /dashboard-folders/{id}`
+
+Renames and/or repositions one of the caller's folders.
+
+```json
+{ "name": "Core services", "sortOrder": 1 }
+```
+
+Both fields are optional. A folder belonging to another user is deliberately
+indistinguishable from a nonexistent folder and returns 404.
+
+#### `DELETE /dashboard-folders/{id}`
+
+Deletes one of the caller's folders and returns 204. Existing sidebar placement
+rows in that folder remain, with `folderId` changed to null; no dashboard is
+deleted or made inaccessible. A missing or foreign folder returns 404.
+
+#### `PATCH /dashboard-folders/reorder`
+
+Atomically assigns sequential `sortOrder` values, beginning at zero, to every
+listed folder. Every id must belong to the caller and may occur only once.
+
+```json
+{ "orderedFolderIds": ["de314fb5-737c-43a0-b619-30a29b65cdb7", "…"] }
+```
+
+Returns 204. Invalid, foreign, or duplicate ids return 400 without changing any
+folder.
+
+#### `PATCH /dashboards/{id}/sidebar-placement`
+
+Requires Viewer or better because this changes only the caller's organization,
+not dashboard content. Creates or replaces the caller's lazy placement row.
+
+```json
+{ "folderId": "de314fb5-737c-43a0-b619-30a29b65cdb7", "sortOrder": 2 }
+```
+
+`folderId` is required but may be null for the ungrouped section. A non-null id
+must identify the caller's own folder. Returns 204; an invalid folder returns
+400 and missing dashboard access returns 403.
+
+#### `PATCH /dashboards/sidebar-placement/reorder`
+
+Atomically assigns sequential positions, beginning at zero, to the listed
+dashboards in one folder or in the ungrouped section.
+
+```json
+{
+  "folderId": null,
+  "orderedDashboardIds": ["be676fe1-a863-48d0-b8e9-86d83a671d6a", "…"]
+}
+```
+
+Every dashboard id must be unique, accessible to the caller at Viewer or better,
+and already in the requested folder context. An absent lazy row counts as
+ungrouped. Returns 204; validation failure changes no rows.
+
 ### `POST /dashboards`
 
 Creates a dashboard owned by the caller.
@@ -2814,7 +2912,9 @@ Creates a dashboard owned by the caller.
 ```
 
 **Response 201** is the dashboard summary with `role: "owner"`,
-`pinned: false`, and `hidden: false`.
+`pinned: false`, `hidden: false`, `sidebarFolderId: null`, and an initial
+`sidebarSortOrder` value. No sidebar-placement row is created until the caller
+organizes the dashboard.
 
 | Status | Meaning |
 | --- | --- |

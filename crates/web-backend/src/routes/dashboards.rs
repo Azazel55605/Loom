@@ -197,6 +197,37 @@ struct DashboardSummary {
     /// other and stays fully reachable by id; leaving it out of a sidebar is
     /// the client's decision to make from this flag.
     hidden: bool,
+    /// Personal sidebar organization for the authenticated caller. `None`
+    /// means the ungrouped section, never that the dashboard lacks metadata.
+    sidebar_folder_id: Option<String>,
+    /// Manual position within `sidebar_folder_id`. Dashboards without a
+    /// persisted placement receive a stable, name-ordered fallback value.
+    sidebar_sort_order: i64,
+}
+
+#[derive(Debug, sqlx::FromRow)]
+struct DashboardFolderRow {
+    id: String,
+    name: String,
+    sort_order: i64,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct DashboardFolderResponse {
+    id: String,
+    name: String,
+    sort_order: i64,
+}
+
+impl From<DashboardFolderRow> for DashboardFolderResponse {
+    fn from(row: DashboardFolderRow) -> Self {
+        Self {
+            id: row.id,
+            name: row.name,
+            sort_order: row.sort_order,
+        }
+    }
 }
 
 #[derive(Debug, Serialize)]
@@ -302,6 +333,41 @@ pub(super) struct UpdateDashboardRequest {
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub(super) struct CreateDashboardFolderRequest {
+    name: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(super) struct UpdateDashboardFolderRequest {
+    name: Option<String>,
+    sort_order: Option<i64>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(super) struct ReorderDashboardFoldersRequest {
+    ordered_folder_ids: Vec<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(super) struct UpdateSidebarPlacementRequest {
+    #[serde(default, deserialize_with = "present_option")]
+    folder_id: Option<Option<String>>,
+    sort_order: i64,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(super) struct ReorderSidebarPlacementsRequest {
+    #[serde(default, deserialize_with = "present_option")]
+    folder_id: Option<Option<String>>,
+    ordered_dashboard_ids: Vec<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub(super) struct CreateShareRequest {
     target_type: String,
     target_id: String,
@@ -395,23 +461,315 @@ pub(super) struct UpdatePlacementRequest {
     icon: Option<Option<String>>,
 }
 
+/// `GET /dashboard-folders` — the caller's private sidebar folders.
+pub(super) async fn list_dashboard_folders(
+    caller: AuthenticatedUser,
+    State(state): State<AppState>,
+) -> Response {
+    match sqlx::query_as::<_, DashboardFolderRow>(
+        "SELECT id, name, sort_order \
+         FROM dashboard_folders \
+         WHERE user_id = ? \
+         ORDER BY sort_order, name COLLATE NOCASE, id",
+    )
+    .bind(caller.id())
+    .fetch_all(&state.pool)
+    .await
+    {
+        Ok(rows) => Json(
+            rows.into_iter()
+                .map(DashboardFolderResponse::from)
+                .collect::<Vec<_>>(),
+        )
+        .into_response(),
+        Err(error) => internal_error("listing dashboard folders", error),
+    }
+}
+
+/// `POST /dashboard-folders` — append a private folder for the caller.
+pub(super) async fn create_dashboard_folder(
+    caller: AuthenticatedUser,
+    State(state): State<AppState>,
+    Json(request): Json<CreateDashboardFolderRequest>,
+) -> Response {
+    let name = request.name.trim();
+    if name.is_empty() {
+        return bad_request("name must not be empty");
+    }
+
+    let sort_order = match sqlx::query_scalar::<_, Option<i64>>(
+        "SELECT MAX(sort_order) FROM dashboard_folders WHERE user_id = ?",
+    )
+    .bind(caller.id())
+    .fetch_one(&state.pool)
+    .await
+    {
+        Ok(maximum) => maximum.unwrap_or(-1).saturating_add(1),
+        Err(error) => return internal_error("finding the last dashboard folder", error),
+    };
+
+    let folder = DashboardFolderResponse {
+        id: Uuid::new_v4().to_string(),
+        name: name.to_owned(),
+        sort_order,
+    };
+    if let Err(error) = sqlx::query(
+        "INSERT INTO dashboard_folders (id, user_id, name, sort_order, created_at) \
+         VALUES (?, ?, ?, ?, ?)",
+    )
+    .bind(&folder.id)
+    .bind(caller.id())
+    .bind(&folder.name)
+    .bind(folder.sort_order)
+    .bind(Utc::now().to_rfc3339())
+    .execute(&state.pool)
+    .await
+    {
+        return internal_error("creating a dashboard folder", error);
+    }
+
+    (StatusCode::CREATED, Json(folder)).into_response()
+}
+
+/// `PATCH /dashboard-folders/{id}` — update only a folder owned by the caller.
+pub(super) async fn update_dashboard_folder(
+    caller: AuthenticatedUser,
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Json(request): Json<UpdateDashboardFolderRequest>,
+) -> Response {
+    let Some(mut folder) = (match load_dashboard_folder(&state.pool, caller.id(), &id).await {
+        Ok(folder) => folder,
+        Err(error) => return internal_error("loading a dashboard folder", error),
+    }) else {
+        return dashboard_folder_not_found();
+    };
+
+    if let Some(name) = request.name.as_deref().map(str::trim) {
+        if name.is_empty() {
+            return bad_request("name must not be empty");
+        }
+        folder.name = name.to_owned();
+    }
+    if let Some(sort_order) = request.sort_order {
+        folder.sort_order = sort_order;
+    }
+
+    if let Err(error) = sqlx::query(
+        "UPDATE dashboard_folders SET name = ?, sort_order = ? \
+         WHERE id = ? AND user_id = ?",
+    )
+    .bind(&folder.name)
+    .bind(folder.sort_order)
+    .bind(&folder.id)
+    .bind(caller.id())
+    .execute(&state.pool)
+    .await
+    {
+        return internal_error("updating a dashboard folder", error);
+    }
+
+    Json(DashboardFolderResponse::from(folder)).into_response()
+}
+
+/// `DELETE /dashboard-folders/{id}` — deleting a folder only ungroups rows.
+pub(super) async fn delete_dashboard_folder(
+    caller: AuthenticatedUser,
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Response {
+    match sqlx::query("DELETE FROM dashboard_folders WHERE id = ? AND user_id = ?")
+        .bind(id)
+        .bind(caller.id())
+        .execute(&state.pool)
+        .await
+    {
+        Ok(result) if result.rows_affected() == 1 => StatusCode::NO_CONTENT.into_response(),
+        Ok(_) => dashboard_folder_not_found(),
+        Err(error) => internal_error("deleting a dashboard folder", error),
+    }
+}
+
+/// `PATCH /dashboard-folders/reorder` — one atomic personal folder reorder.
+pub(super) async fn reorder_dashboard_folders(
+    caller: AuthenticatedUser,
+    State(state): State<AppState>,
+    Json(request): Json<ReorderDashboardFoldersRequest>,
+) -> Response {
+    if has_duplicates(&request.ordered_folder_ids) {
+        return bad_request("orderedFolderIds must not contain duplicates");
+    }
+
+    for folder_id in &request.ordered_folder_ids {
+        match dashboard_folder_belongs_to(&state.pool, caller.id(), folder_id).await {
+            Ok(true) => {}
+            Ok(false) => {
+                return bad_request("orderedFolderIds contains a folder not owned by the caller");
+            }
+            Err(error) => return internal_error("validating dashboard folder ownership", error),
+        }
+    }
+
+    let mut transaction = match state.pool.begin().await {
+        Ok(transaction) => transaction,
+        Err(error) => return internal_error("starting dashboard folder reorder", error),
+    };
+    for (sort_order, folder_id) in request.ordered_folder_ids.iter().enumerate() {
+        if let Err(error) =
+            sqlx::query("UPDATE dashboard_folders SET sort_order = ? WHERE id = ? AND user_id = ?")
+                .bind(sort_order as i64)
+                .bind(folder_id)
+                .bind(caller.id())
+                .execute(&mut *transaction)
+                .await
+        {
+            return internal_error("reordering dashboard folders", error);
+        }
+    }
+    if let Err(error) = transaction.commit().await {
+        return internal_error("committing dashboard folder reorder", error);
+    }
+
+    StatusCode::NO_CONTENT.into_response()
+}
+
+/// `PATCH /dashboards/{id}/sidebar-placement` — personal organization only.
+pub(super) async fn update_sidebar_placement(
+    caller: AuthenticatedUser,
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Json(request): Json<UpdateSidebarPlacementRequest>,
+) -> Response {
+    if let Err(response) = require_role(&state.pool, caller.id(), &id, DashboardRole::Viewer).await
+    {
+        return *response;
+    }
+    let Some(folder_id) = request.folder_id else {
+        return bad_request("folderId is required and may be null");
+    };
+    if let Some(folder_id) = folder_id.as_deref() {
+        match dashboard_folder_belongs_to(&state.pool, caller.id(), folder_id).await {
+            Ok(true) => {}
+            Ok(false) => return bad_request("folderId must identify one of the caller's folders"),
+            Err(error) => return internal_error("validating dashboard folder ownership", error),
+        }
+    }
+
+    if let Err(error) = upsert_sidebar_placement(
+        &state.pool,
+        caller.id(),
+        &id,
+        folder_id.as_deref(),
+        request.sort_order,
+    )
+    .await
+    {
+        return internal_error("organizing a dashboard in the sidebar", error);
+    }
+
+    StatusCode::NO_CONTENT.into_response()
+}
+
+/// `PATCH /dashboards/sidebar-placement/reorder` — atomically reorder one section.
+pub(super) async fn reorder_sidebar_placements(
+    caller: AuthenticatedUser,
+    State(state): State<AppState>,
+    Json(request): Json<ReorderSidebarPlacementsRequest>,
+) -> Response {
+    let Some(folder_id) = request.folder_id else {
+        return bad_request("folderId is required and may be null");
+    };
+    if has_duplicates(&request.ordered_dashboard_ids) {
+        return bad_request("orderedDashboardIds must not contain duplicates");
+    }
+    if let Some(folder_id) = folder_id.as_deref() {
+        match dashboard_folder_belongs_to(&state.pool, caller.id(), folder_id).await {
+            Ok(true) => {}
+            Ok(false) => return bad_request("folderId must identify one of the caller's folders"),
+            Err(error) => return internal_error("validating dashboard folder ownership", error),
+        }
+    }
+
+    for dashboard_id in &request.ordered_dashboard_ids {
+        if let Err(response) = require_role(
+            &state.pool,
+            caller.id(),
+            dashboard_id,
+            DashboardRole::Viewer,
+        )
+        .await
+        {
+            return *response;
+        }
+
+        let current_folder =
+            match sidebar_placement_folder(&state.pool, caller.id(), dashboard_id).await {
+                Ok(current_folder) => current_folder,
+                Err(error) => return internal_error("reading sidebar placement context", error),
+            };
+        let in_requested_context = match (&folder_id, current_folder) {
+            (None, None | Some(None)) => true,
+            (Some(requested), Some(Some(current))) => requested == &current,
+            _ => false,
+        };
+        if !in_requested_context {
+            return bad_request(
+                "orderedDashboardIds contains a dashboard outside the requested folder",
+            );
+        }
+    }
+
+    let mut transaction = match state.pool.begin().await {
+        Ok(transaction) => transaction,
+        Err(error) => return internal_error("starting dashboard sidebar reorder", error),
+    };
+    for (sort_order, dashboard_id) in request.ordered_dashboard_ids.iter().enumerate() {
+        if let Err(error) = sqlx::query(
+            "INSERT INTO dashboard_sidebar_placements \
+               (user_id, dashboard_id, folder_id, sort_order) \
+             VALUES (?, ?, ?, ?) \
+             ON CONFLICT (user_id, dashboard_id) DO UPDATE SET \
+               folder_id = excluded.folder_id, sort_order = excluded.sort_order",
+        )
+        .bind(caller.id())
+        .bind(dashboard_id)
+        .bind(folder_id.as_deref())
+        .bind(sort_order as i64)
+        .execute(&mut *transaction)
+        .await
+        {
+            return internal_error("reordering dashboards in the sidebar", error);
+        }
+    }
+    if let Err(error) = transaction.commit().await {
+        return internal_error("committing dashboard sidebar reorder", error);
+    }
+
+    StatusCode::NO_CONTENT.into_response()
+}
+
 /// `GET /dashboards` — every dashboard the authenticated caller can access.
 pub(super) async fn list_dashboards(
     caller: AuthenticatedUser,
     State(state): State<AppState>,
 ) -> Response {
-    let rows = sqlx::query_as::<_, (String, String, bool)>(
-        "SELECT DISTINCT d.id, d.name, d.hidden \
+    let rows = sqlx::query_as::<_, (String, String, bool, Option<String>, Option<i64>)>(
+        "SELECT DISTINCT d.id, d.name, d.hidden, dsp.folder_id, dsp.sort_order \
          FROM dashboards d \
          LEFT JOIN dashboard_shares ds ON ds.dashboard_id = d.id \
          LEFT JOIN user_groups ug \
            ON ds.target_type = 'group' \
           AND ds.target_id = ug.group_id \
           AND ug.user_id = ? \
+         LEFT JOIN dashboard_sidebar_placements dsp \
+           ON dsp.dashboard_id = d.id \
+          AND dsp.user_id = ? \
          WHERE d.owner_user_id = ? \
             OR (ds.target_type = 'user' AND ds.target_id = ?) \
-            OR (ds.target_type = 'group' AND ug.user_id IS NOT NULL)",
+            OR (ds.target_type = 'group' AND ug.user_id IS NOT NULL) \
+         ORDER BY d.name COLLATE NOCASE, d.id",
     )
+    .bind(caller.id())
     .bind(caller.id())
     .bind(caller.id())
     .bind(caller.id())
@@ -423,8 +781,20 @@ pub(super) async fn list_dashboards(
         Err(error) => return internal_error("listing accessible dashboards", error),
     };
 
+    // Lazy placement rows are intentional. Put never-organized dashboards
+    // after explicitly positioned ungrouped dashboards, preserving the SQL's
+    // stable case-insensitive name order among those fallback entries.
+    let mut next_fallback_order = rows
+        .iter()
+        .filter_map(|(_, _, _, folder_id, sort_order)| {
+            (folder_id.is_none()).then_some(*sort_order).flatten()
+        })
+        .max()
+        .unwrap_or(-1)
+        .saturating_add(1);
+
     let mut dashboards = Vec::with_capacity(rows.len());
-    for (id, name, hidden) in rows {
+    for (id, name, hidden, sidebar_folder_id, stored_sort_order) in rows {
         let role = match get_dashboard_role(&state.pool, caller.id(), &id).await {
             Ok(Some(role)) => role,
             Ok(None) => continue,
@@ -443,6 +813,12 @@ pub(super) async fn list_dashboards(
             role,
             pinned,
             hidden,
+            sidebar_folder_id,
+            sidebar_sort_order: stored_sort_order.unwrap_or_else(|| {
+                let fallback = next_fallback_order;
+                next_fallback_order = next_fallback_order.saturating_add(1);
+                fallback
+            }),
         });
     }
 
@@ -489,6 +865,8 @@ pub(super) async fn create_dashboard(
             role: DashboardRole::Owner,
             pinned: false,
             hidden: false,
+            sidebar_folder_id: None,
+            sidebar_sort_order: 0,
         }),
     )
         .into_response()
@@ -2377,6 +2755,85 @@ async fn is_pinned(
     .bind(dashboard_id)
     .fetch_one(pool)
     .await
+}
+
+async fn load_dashboard_folder(
+    pool: &SqlitePool,
+    user_id: &str,
+    folder_id: &str,
+) -> Result<Option<DashboardFolderRow>, sqlx::Error> {
+    sqlx::query_as(
+        "SELECT id, name, sort_order \
+         FROM dashboard_folders WHERE id = ? AND user_id = ?",
+    )
+    .bind(folder_id)
+    .bind(user_id)
+    .fetch_optional(pool)
+    .await
+}
+
+async fn dashboard_folder_belongs_to(
+    pool: &SqlitePool,
+    user_id: &str,
+    folder_id: &str,
+) -> Result<bool, sqlx::Error> {
+    sqlx::query_scalar(
+        "SELECT EXISTS(SELECT 1 FROM dashboard_folders WHERE id = ? AND user_id = ?)",
+    )
+    .bind(folder_id)
+    .bind(user_id)
+    .fetch_one(pool)
+    .await
+}
+
+async fn upsert_sidebar_placement(
+    pool: &SqlitePool,
+    user_id: &str,
+    dashboard_id: &str,
+    folder_id: Option<&str>,
+    sort_order: i64,
+) -> Result<(), sqlx::Error> {
+    sqlx::query(
+        "INSERT INTO dashboard_sidebar_placements \
+           (user_id, dashboard_id, folder_id, sort_order) \
+         VALUES (?, ?, ?, ?) \
+         ON CONFLICT (user_id, dashboard_id) DO UPDATE SET \
+           folder_id = excluded.folder_id, sort_order = excluded.sort_order",
+    )
+    .bind(user_id)
+    .bind(dashboard_id)
+    .bind(folder_id)
+    .bind(sort_order)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+/// `None` means no lazy placement row; `Some(None)` means an explicitly
+/// ungrouped placement; `Some(Some(id))` means a folder placement.
+async fn sidebar_placement_folder(
+    pool: &SqlitePool,
+    user_id: &str,
+    dashboard_id: &str,
+) -> Result<Option<Option<String>>, sqlx::Error> {
+    sqlx::query_scalar(
+        "SELECT folder_id FROM dashboard_sidebar_placements \
+         WHERE user_id = ? AND dashboard_id = ?",
+    )
+    .bind(user_id)
+    .bind(dashboard_id)
+    .fetch_optional(pool)
+    .await
+}
+
+fn has_duplicates(values: &[String]) -> bool {
+    let mut seen = HashSet::with_capacity(values.len());
+    values.iter().any(|value| !seen.insert(value))
+}
+
+fn dashboard_folder_not_found() -> Response {
+    // Deliberately identical for a missing folder and another user's folder.
+    ErrorBody::message(StatusCode::NOT_FOUND, "dashboard folder not found")
 }
 
 async fn resolve_share_target(

@@ -129,8 +129,24 @@ pub fn routes() -> Router<AppState> {
         )
         .route("/ws", get(connector_socket::connector_status_socket))
         .route(
+            "/dashboard-folders",
+            get(dashboards::list_dashboard_folders).post(dashboards::create_dashboard_folder),
+        )
+        .route(
+            "/dashboard-folders/reorder",
+            patch(dashboards::reorder_dashboard_folders),
+        )
+        .route(
+            "/dashboard-folders/{id}",
+            patch(dashboards::update_dashboard_folder).delete(dashboards::delete_dashboard_folder),
+        )
+        .route(
             "/dashboards",
             get(dashboards::list_dashboards).post(dashboards::create_dashboard),
+        )
+        .route(
+            "/dashboards/sidebar-placement/reorder",
+            patch(dashboards::reorder_sidebar_placements),
         )
         .route(
             "/dashboards/{id}",
@@ -141,6 +157,10 @@ pub fn routes() -> Router<AppState> {
         .route(
             "/dashboards/{id}/pin",
             post(dashboards::pin_dashboard).delete(dashboards::unpin_dashboard),
+        )
+        .route(
+            "/dashboards/{id}/sidebar-placement",
+            patch(dashboards::update_sidebar_placement),
         )
         .route(
             "/dashboards/{id}/shares",
