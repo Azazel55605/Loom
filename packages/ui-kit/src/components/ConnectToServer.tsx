@@ -14,6 +14,7 @@ import { Input } from "@loom/ui-kit/components/ui/input";
 import { Label } from "@loom/ui-kit/components/ui/label";
 import { Switch } from "@loom/ui-kit/components/ui/switch";
 import type { HttpTransport } from "@loom/ui-kit/lib/api";
+import { serverProfileLabel } from "@loom/ui-kit/lib/server-profile";
 
 type Health = { status: string; core_version: string };
 
@@ -77,6 +78,11 @@ export function ConnectToServer({
   invalidCertificateNote,
   getHttpTransport,
   onConnected,
+  labelInput = false,
+  initialLabel = "",
+  title = "Connect to Loom",
+  description = "Enter the address of the Loom server this app should manage.",
+  submitLabel,
 }: {
   initialUrl?: string;
   initialAllowInvalidCertificates?: boolean;
@@ -85,9 +91,15 @@ export function ConnectToServer({
   /** Platform-specific limits of the certificate exception, shown beside it. */
   invalidCertificateNote?: string;
   getHttpTransport?: (allowInvalidCertificates: boolean) => HttpTransport;
-  onConnected: (connection: ServerConnection) => void | Promise<void>;
+  onConnected: (connection: ServerConnection, label?: string) => void | Promise<void>;
+  labelInput?: boolean;
+  initialLabel?: string;
+  title?: string;
+  description?: string;
+  submitLabel?: string;
 }) {
   const [draft, setDraft] = React.useState(initialUrl);
+  const [label, setLabel] = React.useState(initialLabel);
   const [allowInvalidCertificates, setAllowInvalidCertificates] = React.useState(
     initialAllowInvalidCertificates,
   );
@@ -95,6 +107,7 @@ export function ConnectToServer({
   const [isConnecting, setIsConnecting] = React.useState(false);
 
   React.useEffect(() => setDraft(initialUrl), [initialUrl]);
+  React.useEffect(() => setLabel(initialLabel), [initialLabel]);
   React.useEffect(
     () => setAllowInvalidCertificates(initialAllowInvalidCertificates),
     [initialAllowInvalidCertificates],
@@ -146,7 +159,10 @@ export function ConnectToServer({
           if (health.status !== "ok" || typeof health.core_version !== "string") {
             throw new Error("The address did not return a Loom health response.");
           }
-          await onConnected(connection);
+          await onConnected(
+            connection,
+            labelInput ? label.trim() || serverProfileLabel(baseUrl) : undefined,
+          );
         } catch (connectionError) {
           setError(
             connectionErrorMessage(
@@ -162,6 +178,21 @@ export function ConnectToServer({
         }
       }}
     >
+      {labelInput ? (
+        <div className="flex flex-col gap-1.5">
+          <Label htmlFor={embedded ? "add-server-label" : "first-server-label"}>
+            Label <span className="font-normal text-muted-foreground">(optional)</span>
+          </Label>
+          <Input
+            id={embedded ? "add-server-label" : "first-server-label"}
+            autoComplete="off"
+            placeholder="Derived from the hostname when left blank"
+            value={label}
+            onChange={(event) => setLabel(event.target.value)}
+          />
+        </div>
+      ) : null}
+
       <div className="flex flex-col gap-1.5">
         <Label htmlFor={embedded ? "settings-server-url" : "server-url"}>
           Server URL
@@ -243,7 +274,9 @@ export function ConnectToServer({
       ) : null}
 
       <Button type="submit" disabled={isConnecting || draft.trim() === ""}>
-        {isConnecting ? "Connecting…" : embedded ? "Change server" : "Connect"}
+        {isConnecting
+          ? "Connecting…"
+          : submitLabel ?? (embedded ? "Change server" : "Connect")}
       </Button>
     </form>
   );
@@ -254,13 +287,36 @@ export function ConnectToServer({
     <main className="flex min-h-screen items-center justify-center p-6">
       <Card className="surface-elevated w-full max-w-md">
         <CardHeader>
-          <CardTitle>Connect to Loom</CardTitle>
-          <CardDescription>
-            Enter the address of the Loom server this app should manage.
-          </CardDescription>
+          <CardTitle>{title}</CardTitle>
+          <CardDescription>{description}</CardDescription>
         </CardHeader>
         <CardContent>{form}</CardContent>
       </Card>
     </main>
+  );
+}
+
+/** First-run and additional-server setup share one reachability-checked form. */
+export function AddServerFlow({
+  firstServer = false,
+  ...props
+}: Omit<
+  React.ComponentProps<typeof ConnectToServer>,
+  "labelInput" | "title" | "description" | "submitLabel"
+> & {
+  firstServer?: boolean;
+}) {
+  return (
+    <ConnectToServer
+      {...props}
+      labelInput
+      title={firstServer ? "Add your first Loom server" : "Add Loom server"}
+      description={
+        firstServer
+          ? "Enter the server this app should manage. You can add more servers later."
+          : "Enter another Loom server. Its session stays separate on this device."
+      }
+      submitLabel={firstServer ? "Connect" : "Add server"}
+    />
   );
 }

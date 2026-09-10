@@ -11,6 +11,7 @@ import {
 } from "react-router-dom";
 
 import { mobileBaseUrlProvider } from "@/adapters/mobileBaseUrlProvider";
+import { mobileServerProfileManager } from "@/adapters/mobileServerProfileManager";
 import {
   createMobileHttpTransport,
   mobileInvalidCertificateWebSocketNote,
@@ -34,10 +35,11 @@ import {
 } from "@/pages/DashboardsPage";
 import { LoginPage } from "@/pages/LoginPage";
 import { SetupPage } from "@/pages/SetupPage";
+import { AddServerFlow, type ServerConnection } from "@loom/ui-kit/components/ConnectToServer";
 import {
-  ConnectToServer,
-  type ServerConnection,
-} from "@loom/ui-kit/components/ConnectToServer";
+  ServerSwitcherProvider,
+  useServerSwitcher,
+} from "@loom/ui-kit/components/ServerSwitcher";
 import { Alert, AlertDescription, AlertTitle } from "@loom/ui-kit/components/ui/alert";
 import { BootScreen } from "@loom/ui-kit/components/BootScreen";
 import { Button } from "@loom/ui-kit/components/ui/button";
@@ -68,16 +70,29 @@ const DashboardsPanel = React.lazy(async () => ({
 type ServerState =
   | { kind: "loading" }
   | { kind: "error"; message: string }
-  | { kind: "ready"; connection: ServerConnection };
+  | { kind: "ready"; connection: ServerConnection; profileId: string | null };
 
 export default function App({ queryClient }: { queryClient: QueryClient }) {
+  return (
+    <HashRouter>
+      <MobileApplication queryClient={queryClient} />
+    </HashRouter>
+  );
+}
+
+function MobileApplication({ queryClient }: { queryClient: QueryClient }) {
   const [server, setServer] = React.useState<ServerState>({ kind: "loading" });
+  const navigate = useNavigate();
 
   const loadServer = React.useCallback(() => {
     setServer({ kind: "loading" });
-    void mobileBaseUrlProvider
-      .getConnection()
-      .then((connection) => setServer({ kind: "ready", connection }))
+    void Promise.all([
+      mobileBaseUrlProvider.getConnection(),
+      mobileServerProfileManager.getActiveProfileId(),
+    ])
+      .then(([connection, profileId]) =>
+        setServer({ kind: "ready", connection, profileId }),
+      )
       .catch((error: unknown) =>
         setServer({
           kind: "error",
@@ -90,6 +105,70 @@ export default function App({ queryClient }: { queryClient: QueryClient }) {
   }, []);
 
   React.useEffect(loadServer, [loadServer]);
+
+  const activateCurrentProfile = React.useCallback(
+    async (connection?: ServerConnection) => {
+      if (connection !== undefined) {
+        await mobileBaseUrlProvider.setConnection(connection);
+      }
+      const [nextConnection, profileId] = await Promise.all([
+        mobileBaseUrlProvider.getConnection(),
+        mobileServerProfileManager.getActiveProfileId(),
+      ]);
+      queryClient.clear();
+      setServer({ kind: "ready", connection: nextConnection, profileId });
+      navigate("/dashboards", { replace: true });
+    },
+    [navigate, queryClient],
+  );
+
+  const addFirstServer = async (connection: ServerConnection, label?: string) => {
+    const profile = await mobileServerProfileManager.addProfile(
+      label ?? connection.baseUrl,
+      connection.baseUrl,
+    );
+    try {
+      await mobileServerProfileManager.setActiveProfileId(profile.id);
+      await activateCurrentProfile(connection);
+    } catch (error) {
+      await mobileServerProfileManager.removeProfile(profile.id).catch(() => undefined);
+      throw error;
+    }
+  };
+
+  const providerKey =
+    server.kind === "ready"
+      ? `${server.profileId ?? "none"}|${server.connection.baseUrl}`
+      : server.kind;
+
+  return (
+    <ServerSwitcherProvider
+      key={providerKey}
+      manager={mobileServerProfileManager}
+      supportsInvalidCertificates
+      invalidCertificateNote={mobileInvalidCertificateWebSocketNote}
+      getHttpTransport={createMobileHttpTransport}
+      onActiveProfileChanged={activateCurrentProfile}
+    >
+      <MobileRuntime
+        server={server}
+        loadServer={loadServer}
+        onAddFirstServer={addFirstServer}
+      />
+    </ServerSwitcherProvider>
+  );
+}
+
+function MobileRuntime({
+  server,
+  loadServer,
+  onAddFirstServer,
+}: {
+  server: ServerState;
+  loadServer: () => void;
+  onAddFirstServer: (connection: ServerConnection, label?: string) => Promise<void>;
+}) {
+  const { openSwitcher } = useServerSwitcher();
 
   if (server.kind === "loading") return <BootScreen baseUrl="" />;
 
@@ -112,82 +191,41 @@ export default function App({ queryClient }: { queryClient: QueryClient }) {
 
   if (server.connection.baseUrl === "") {
     return (
-      <ConnectToServer
+      <AddServerFlow
+        firstServer
         supportsInvalidCertificates
         invalidCertificateNote={mobileInvalidCertificateWebSocketNote}
         getHttpTransport={createMobileHttpTransport}
-        onConnected={async (connection) => {
-          await mobileBaseUrlProvider.setConnection(connection);
-          setServer({ kind: "ready", connection });
-        }}
+        onConnected={onAddFirstServer}
       />
     );
   }
 
-  const changeServer = async (connection: ServerConnection) => {
-    if (
-      connection.baseUrl === server.connection.baseUrl &&
-      connection.allowInvalidCertificates ===
-        server.connection.allowInvalidCertificates
-    ) {
-      return;
-    }
-    if (connection.baseUrl !== server.connection.baseUrl) {
-      await mobileTokenStorage.clearTokens();
-    }
-    await mobileBaseUrlProvider.setConnection(connection);
-    queryClient.clear();
-    setServer({ kind: "ready", connection });
-  };
-
-  const connectionKey = `${server.connection.baseUrl}|${server.connection.allowInvalidCertificates}`;
-  const chooseAnotherServer = async () => {
-    await mobileTokenStorage.clearTokens();
-    await mobileBaseUrlProvider.setConnection({
-      baseUrl: "",
-      allowInvalidCertificates: false,
-    });
-    queryClient.clear();
-    setServer({
-      kind: "ready",
-      connection: { baseUrl: "", allowInvalidCertificates: false },
-    });
-  };
+  const connectionKey = `${server.profileId}|${server.connection.baseUrl}|${server.connection.allowInvalidCertificates}`;
 
   return (
-    <HashRouter>
-      <AuthProvider
-        key={connectionKey}
-        baseUrlProvider={mobileBaseUrlProvider}
-        bootstrapBaseUrl={server.connection.baseUrl}
-        onChangeServer={chooseAnotherServer}
-        httpTransport={createMobileHttpTransport(
-          server.connection.allowInvalidCertificates,
-        )}
-        tokenStorage={mobileTokenStorage}
-        webSocketTransport={mobileWebSocketTransport}
-      >
-        <React.Suspense fallback={null}>
-          <MobileKioskModeProvider>
-            <MobileRoutes
-              connection={server.connection}
-              onServerChanged={changeServer}
-            />
-          </MobileKioskModeProvider>
-        </React.Suspense>
-        <Toaster />
-      </AuthProvider>
-    </HashRouter>
+    <AuthProvider
+      key={connectionKey}
+      baseUrlProvider={mobileBaseUrlProvider}
+      bootstrapBaseUrl={server.connection.baseUrl}
+      onChangeServer={openSwitcher}
+      httpTransport={createMobileHttpTransport(
+        server.connection.allowInvalidCertificates,
+      )}
+      tokenStorage={mobileTokenStorage}
+      webSocketTransport={mobileWebSocketTransport}
+    >
+      <React.Suspense fallback={null}>
+        <MobileKioskModeProvider>
+          <MobileRoutes />
+        </MobileKioskModeProvider>
+      </React.Suspense>
+      <Toaster />
+    </AuthProvider>
   );
 }
 
-function MobileRoutes({
-  connection,
-  onServerChanged,
-}: {
-  connection: ServerConnection;
-  onServerChanged: (connection: ServerConnection) => Promise<void>;
-}) {
+function MobileRoutes() {
   return (
     <MobileBackNavigation>
       <RequireSetup>
@@ -224,10 +262,7 @@ function MobileRoutes({
               path="/settings"
               element={
                 <RequireAuth>
-                  <MobileSettingsRoute
-                    connection={connection}
-                    onServerChanged={onServerChanged}
-                  />
+                  <MobileSettingsRoute />
                 </RequireAuth>
               }
             >

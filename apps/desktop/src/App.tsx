@@ -7,10 +7,12 @@ import {
   Route,
   Routes,
   useLocation,
+  useNavigate,
 } from "react-router-dom";
 
 import { desktopBaseUrlProvider } from "@/adapters/desktopBaseUrlProvider";
 import { createDesktopHttpTransport } from "@/adapters/desktopHttpTransport";
+import { desktopServerProfileManager } from "@/adapters/desktopServerProfileManager";
 import { desktopTokenStorage } from "@/adapters/desktopTokenStorage";
 import {
   desktopInvalidCertificateWebSocketNote,
@@ -31,10 +33,11 @@ import { SetupPage } from "@/pages/SetupPage";
 import { Alert, AlertDescription, AlertTitle } from "@loom/ui-kit/components/ui/alert";
 import { BootScreen } from "@loom/ui-kit/components/BootScreen";
 import { Button } from "@loom/ui-kit/components/ui/button";
+import { AddServerFlow, type ServerConnection } from "@loom/ui-kit/components/ConnectToServer";
 import {
-  ConnectToServer,
-  type ServerConnection,
-} from "@loom/ui-kit/components/ConnectToServer";
+  ServerSwitcherProvider,
+  useServerSwitcher,
+} from "@loom/ui-kit/components/ServerSwitcher";
 import { Toaster } from "@loom/ui-kit/components/ui/sonner";
 import { AuthProvider, useAuth } from "@loom/ui-kit/lib/auth-context";
 import { useSetupStatus } from "@loom/ui-kit/lib/use-setup-status";
@@ -64,16 +67,29 @@ const DesktopUpdatesPanel = React.lazy(async () => ({
 type ServerState =
   | { kind: "loading" }
   | { kind: "error"; message: string }
-  | { kind: "ready"; connection: ServerConnection };
+  | { kind: "ready"; connection: ServerConnection; profileId: string | null };
 
 export default function App({ queryClient }: { queryClient: QueryClient }) {
+  return (
+    <HashRouter>
+      <DesktopApplication queryClient={queryClient} />
+    </HashRouter>
+  );
+}
+
+function DesktopApplication({ queryClient }: { queryClient: QueryClient }) {
   const [server, setServer] = React.useState<ServerState>({ kind: "loading" });
+  const navigate = useNavigate();
 
   const loadServer = React.useCallback(() => {
     setServer({ kind: "loading" });
-    void desktopBaseUrlProvider
-      .getConnection()
-      .then((connection) => setServer({ kind: "ready", connection }))
+    void Promise.all([
+      desktopBaseUrlProvider.getConnection(),
+      desktopServerProfileManager.getActiveProfileId(),
+    ])
+      .then(([connection, profileId]) =>
+        setServer({ kind: "ready", connection, profileId }),
+      )
       .catch((error: unknown) =>
         setServer({
           kind: "error",
@@ -84,6 +100,70 @@ export default function App({ queryClient }: { queryClient: QueryClient }) {
   }, []);
 
   React.useEffect(loadServer, [loadServer]);
+
+  const activateCurrentProfile = React.useCallback(
+    async (connection?: ServerConnection) => {
+      if (connection !== undefined) {
+        await desktopBaseUrlProvider.setConnection(connection);
+      }
+      const [nextConnection, profileId] = await Promise.all([
+        desktopBaseUrlProvider.getConnection(),
+        desktopServerProfileManager.getActiveProfileId(),
+      ]);
+      queryClient.clear();
+      setServer({ kind: "ready", connection: nextConnection, profileId });
+      navigate("/dashboards", { replace: true });
+    },
+    [navigate, queryClient],
+  );
+
+  const addFirstServer = async (connection: ServerConnection, label?: string) => {
+    const profile = await desktopServerProfileManager.addProfile(
+      label ?? connection.baseUrl,
+      connection.baseUrl,
+    );
+    try {
+      await desktopServerProfileManager.setActiveProfileId(profile.id);
+      await activateCurrentProfile(connection);
+    } catch (error) {
+      await desktopServerProfileManager.removeProfile(profile.id).catch(() => undefined);
+      throw error;
+    }
+  };
+
+  const providerKey =
+    server.kind === "ready"
+      ? `${server.profileId ?? "none"}|${server.connection.baseUrl}`
+      : server.kind;
+
+  return (
+    <ServerSwitcherProvider
+      key={providerKey}
+      manager={desktopServerProfileManager}
+      supportsInvalidCertificates
+      invalidCertificateNote={desktopInvalidCertificateWebSocketNote}
+      getHttpTransport={createDesktopHttpTransport}
+      onActiveProfileChanged={activateCurrentProfile}
+    >
+      <DesktopRuntime
+        server={server}
+        loadServer={loadServer}
+        onAddFirstServer={addFirstServer}
+      />
+    </ServerSwitcherProvider>
+  );
+}
+
+function DesktopRuntime({
+  server,
+  loadServer,
+  onAddFirstServer,
+}: {
+  server: ServerState;
+  loadServer: () => void;
+  onAddFirstServer: (connection: ServerConnection, label?: string) => Promise<void>;
+}) {
+  const { openSwitcher } = useServerSwitcher();
 
   if (server.kind === "loading") return <BootScreen baseUrl="" />;
 
@@ -106,80 +186,39 @@ export default function App({ queryClient }: { queryClient: QueryClient }) {
 
   if (server.connection.baseUrl === "") {
     return (
-      <ConnectToServer
+      <AddServerFlow
+        firstServer
         supportsInvalidCertificates
         invalidCertificateNote={desktopInvalidCertificateWebSocketNote}
         getHttpTransport={createDesktopHttpTransport}
-        onConnected={async (connection) => {
-          await desktopBaseUrlProvider.setConnection(connection);
-          setServer({ kind: "ready", connection });
-        }}
+        onConnected={onAddFirstServer}
       />
     );
   }
 
-  const changeServer = async (connection: ServerConnection) => {
-    if (
-      connection.baseUrl === server.connection.baseUrl &&
-      connection.allowInvalidCertificates ===
-        server.connection.allowInvalidCertificates
-    ) {
-      return;
-    }
-    if (connection.baseUrl !== server.connection.baseUrl) {
-      await desktopTokenStorage.clearTokens();
-    }
-    await desktopBaseUrlProvider.setConnection(connection);
-    queryClient.clear();
-    setServer({ kind: "ready", connection });
-  };
-
-  const connectionKey = `${server.connection.baseUrl}|${server.connection.allowInvalidCertificates}`;
-  const chooseAnotherServer = async () => {
-    await desktopTokenStorage.clearTokens();
-    await desktopBaseUrlProvider.setConnection({
-      baseUrl: "",
-      allowInvalidCertificates: false,
-    });
-    queryClient.clear();
-    setServer({
-      kind: "ready",
-      connection: { baseUrl: "", allowInvalidCertificates: false },
-    });
-  };
+  const connectionKey = `${server.profileId}|${server.connection.baseUrl}|${server.connection.allowInvalidCertificates}`;
 
   return (
-    <HashRouter>
-      <AuthProvider
-        key={connectionKey}
-        baseUrlProvider={desktopBaseUrlProvider}
-        bootstrapBaseUrl={server.connection.baseUrl}
-        onChangeServer={chooseAnotherServer}
-        httpTransport={createDesktopHttpTransport(
-          server.connection.allowInvalidCertificates,
-        )}
-        tokenStorage={desktopTokenStorage}
-        webSocketTransport={desktopWebSocketTransport}
-      >
-        <React.Suspense fallback={null}>
-          <DesktopRoutes
-            connection={server.connection}
-            onServerChanged={changeServer}
-          />
-        </React.Suspense>
-        <Toaster />
-      </AuthProvider>
-    </HashRouter>
+    <AuthProvider
+      key={connectionKey}
+      baseUrlProvider={desktopBaseUrlProvider}
+      bootstrapBaseUrl={server.connection.baseUrl}
+      onChangeServer={openSwitcher}
+      httpTransport={createDesktopHttpTransport(
+        server.connection.allowInvalidCertificates,
+      )}
+      tokenStorage={desktopTokenStorage}
+      webSocketTransport={desktopWebSocketTransport}
+    >
+      <React.Suspense fallback={null}>
+        <DesktopRoutes />
+      </React.Suspense>
+      <Toaster />
+    </AuthProvider>
   );
 }
 
-function DesktopRoutes({
-  connection,
-  onServerChanged,
-}: {
-  connection: ServerConnection;
-  onServerChanged: (connection: ServerConnection) => Promise<void>;
-}) {
+function DesktopRoutes() {
   return (
     <RequireSetup>
       <Routes>
@@ -214,10 +253,7 @@ function DesktopRoutes({
           path="/settings"
           element={
             <RequireAuth>
-              <DesktopSettingsRoute
-                connection={connection}
-                onServerChanged={onServerChanged}
-              />
+              <DesktopSettingsRoute />
             </RequireAuth>
           }
         >

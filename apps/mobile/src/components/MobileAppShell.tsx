@@ -4,6 +4,7 @@ import { Link, useLocation, useNavigate } from "react-router-dom";
 
 import { AppShell } from "@loom/ui-kit/components/AppShell";
 import { DashboardSidebar } from "@loom/ui-kit/components/DashboardSidebar";
+import { ServerSwitcherTrigger } from "@loom/ui-kit/components/ServerSwitcher";
 import { Button, buttonVariants } from "@loom/ui-kit/components/ui/button";
 import { useAuth } from "@loom/ui-kit/lib/auth-context";
 
@@ -17,9 +18,12 @@ export function MobileAppShell({ children }: { children: React.ReactNode }) {
     <AppShell
       sidebarNavigationKey={location.pathname}
       homeControl={
-        <Link to="/dashboards" className="text-base font-semibold tracking-tight">
-          Loom
-        </Link>
+        <div className="flex min-w-0 items-center gap-1">
+          <Link to="/dashboards" className="shrink-0 text-base font-semibold tracking-tight">
+            Loom
+          </Link>
+          <ServerSwitcherTrigger compact />
+        </div>
       }
       settingsControl={
         <Link

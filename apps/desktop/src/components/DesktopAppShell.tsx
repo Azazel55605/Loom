@@ -4,6 +4,7 @@ import { Link, useLocation, useNavigate } from "react-router-dom";
 
 import { AppShell } from "@loom/ui-kit/components/AppShell";
 import { DashboardSidebar } from "@loom/ui-kit/components/DashboardSidebar";
+import { ServerSwitcherTrigger } from "@loom/ui-kit/components/ServerSwitcher";
 import { buttonVariants } from "@loom/ui-kit/components/ui/button";
 import { Badge } from "@loom/ui-kit/components/ui/badge";
 import { useDesktopUpdates } from "@/updater/desktop-update-context";
@@ -23,6 +24,7 @@ export function DesktopAppShell({ children }: { children: React.ReactNode }) {
             Loom
           </Link>
           <Badge variant="outline">desktop v{__APP_VERSION__}</Badge>
+          <ServerSwitcherTrigger />
           {update !== null ? (
             <Link to="/settings/updates" aria-label={`Update v${update.version} available`}>
               <Badge variant="secondary">Update available</Badge>

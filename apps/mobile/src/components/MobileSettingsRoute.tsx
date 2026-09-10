@@ -1,15 +1,8 @@
 import { Outlet, useLocation, useNavigate } from "react-router-dom";
 
-import {
-  createMobileHttpTransport,
-  mobileInvalidCertificateWebSocketNote,
-} from "@/adapters/mobileHttpTransport";
 import { MobileAppShell } from "@/components/MobileAppShell";
 import { MobileKioskSettingsCard } from "@/components/MobileKioskSettingsCard";
-import {
-  ConnectToServer,
-  type ServerConnection,
-} from "@loom/ui-kit/components/ConnectToServer";
+import { ServerSwitcherTrigger } from "@loom/ui-kit/components/ServerSwitcher";
 import { SettingsLayout } from "@loom/ui-kit/components/SettingsLayout";
 import {
   Card,
@@ -20,13 +13,7 @@ import {
 } from "@loom/ui-kit/components/ui/card";
 import { GeneralPanel } from "@loom/ui-kit/pages/settings/GeneralPanel";
 
-export function MobileSettingsRoute({
-  connection,
-  onServerChanged,
-}: {
-  connection: ServerConnection;
-  onServerChanged: (connection: ServerConnection) => Promise<void>;
-}) {
+export function MobileSettingsRoute() {
   const navigate = useNavigate();
   const location = useLocation();
   const section = location.pathname.split("/")[2] ?? "general";
@@ -45,22 +32,12 @@ export function MobileSettingsRoute({
             <CardHeader>
               <CardTitle className="text-lg">Server</CardTitle>
               <CardDescription>
-                Changing server signs this device out before connecting to the new
-                instance.
+                Add, rename, remove, or switch between this device&apos;s Loom servers.
+                Each profile keeps its own session.
               </CardDescription>
             </CardHeader>
             <CardContent>
-              <ConnectToServer
-                embedded
-                initialUrl={connection.baseUrl}
-                initialAllowInvalidCertificates={
-                  connection.allowInvalidCertificates
-                }
-                supportsInvalidCertificates
-                invalidCertificateNote={mobileInvalidCertificateWebSocketNote}
-                getHttpTransport={createMobileHttpTransport}
-                onConnected={onServerChanged}
-              />
+              <ServerSwitcherTrigger manageLabel />
             </CardContent>
           </Card>
         </div>
