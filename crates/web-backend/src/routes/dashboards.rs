@@ -209,6 +209,7 @@ struct DashboardSummary {
 struct DashboardFolderRow {
     id: String,
     name: String,
+    icon: Option<String>,
     sort_order: i64,
 }
 
@@ -217,6 +218,7 @@ struct DashboardFolderRow {
 struct DashboardFolderResponse {
     id: String,
     name: String,
+    icon: Option<String>,
     sort_order: i64,
 }
 
@@ -225,6 +227,7 @@ impl From<DashboardFolderRow> for DashboardFolderResponse {
         Self {
             id: row.id,
             name: row.name,
+            icon: row.icon,
             sort_order: row.sort_order,
         }
     }
@@ -335,12 +338,15 @@ pub(super) struct UpdateDashboardRequest {
 #[serde(rename_all = "camelCase")]
 pub(super) struct CreateDashboardFolderRequest {
     name: String,
+    icon: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub(super) struct UpdateDashboardFolderRequest {
     name: Option<String>,
+    #[serde(default, deserialize_with = "present_option")]
+    icon: Option<Option<String>>,
     sort_order: Option<i64>,
 }
 
@@ -467,7 +473,7 @@ pub(super) async fn list_dashboard_folders(
     State(state): State<AppState>,
 ) -> Response {
     match sqlx::query_as::<_, DashboardFolderRow>(
-        "SELECT id, name, sort_order \
+        "SELECT id, name, icon, sort_order \
          FROM dashboard_folders \
          WHERE user_id = ? \
          ORDER BY sort_order, name COLLATE NOCASE, id",
@@ -511,15 +517,17 @@ pub(super) async fn create_dashboard_folder(
     let folder = DashboardFolderResponse {
         id: Uuid::new_v4().to_string(),
         name: name.to_owned(),
+        icon: request.icon,
         sort_order,
     };
     if let Err(error) = sqlx::query(
-        "INSERT INTO dashboard_folders (id, user_id, name, sort_order, created_at) \
-         VALUES (?, ?, ?, ?, ?)",
+        "INSERT INTO dashboard_folders (id, user_id, name, icon, sort_order, created_at) \
+         VALUES (?, ?, ?, ?, ?, ?)",
     )
     .bind(&folder.id)
     .bind(caller.id())
     .bind(&folder.name)
+    .bind(&folder.icon)
     .bind(folder.sort_order)
     .bind(Utc::now().to_rfc3339())
     .execute(&state.pool)
@@ -551,15 +559,19 @@ pub(super) async fn update_dashboard_folder(
         }
         folder.name = name.to_owned();
     }
+    if let Some(icon) = request.icon {
+        folder.icon = icon;
+    }
     if let Some(sort_order) = request.sort_order {
         folder.sort_order = sort_order;
     }
 
     if let Err(error) = sqlx::query(
-        "UPDATE dashboard_folders SET name = ?, sort_order = ? \
+        "UPDATE dashboard_folders SET name = ?, icon = ?, sort_order = ? \
          WHERE id = ? AND user_id = ?",
     )
     .bind(&folder.name)
+    .bind(&folder.icon)
     .bind(folder.sort_order)
     .bind(&folder.id)
     .bind(caller.id())
@@ -2763,7 +2775,7 @@ async fn load_dashboard_folder(
     folder_id: &str,
 ) -> Result<Option<DashboardFolderRow>, sqlx::Error> {
     sqlx::query_as(
-        "SELECT id, name, sort_order \
+        "SELECT id, name, icon, sort_order \
          FROM dashboard_folders WHERE id = ? AND user_id = ?",
     )
     .bind(folder_id)

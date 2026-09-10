@@ -4828,10 +4828,25 @@ mod tests {
         };
         let (status, first_folder) = send(&app.router, create_folder("Infrastructure")).await;
         assert_eq!(status, StatusCode::CREATED, "{first_folder:#}");
+        assert_eq!(first_folder["icon"], serde_json::Value::Null);
         let first_folder_id = first_folder["id"].as_str().expect("folder id").to_owned();
         let (status, second_folder) = send(&app.router, create_folder("Services")).await;
         assert_eq!(status, StatusCode::CREATED, "{second_folder:#}");
         let second_folder_id = second_folder["id"].as_str().expect("folder id").to_owned();
+
+        // Presentation metadata uses the same update route as the folder name,
+        // remains private to this viewer, and can be cleared independently.
+        let (status, updated_folder) = send(
+            &app.router,
+            patch_json_auth(
+                &format!("/dashboard-folders/{first_folder_id}"),
+                &viewer,
+                serde_json::json!({ "icon": "lucide:hard-drive" }),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{updated_folder:#}");
+        assert_eq!(updated_folder["icon"], "lucide:hard-drive");
 
         // Folder order changes in one transaction and lists in that order.
         let (status, body) = send(
@@ -4856,6 +4871,7 @@ mod tests {
         assert_eq!(folders[0]["sortOrder"], 0);
         assert_eq!(folders[1]["id"], first_folder_id);
         assert_eq!(folders[1]["sortOrder"], 1);
+        assert_eq!(folders[1]["icon"], "lucide:hard-drive");
 
         // A different user sees no folders and gets the same not-found answer
         // for reading another person's id through either mutation path.

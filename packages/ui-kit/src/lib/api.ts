@@ -651,7 +651,15 @@ export type DashboardSummary = {
 export type DashboardFolder = {
   id: string;
   name: string;
+  /** Generic icon reference; null uses the standard folder glyph. */
+  icon: string | null;
   sortOrder: number;
+};
+
+export type UpdateDashboardFolderRequest = {
+  name?: string;
+  icon?: string | null;
+  sortOrder?: number;
 };
 
 export type DashboardSidebarPlacement = {
@@ -1785,13 +1793,28 @@ function getDashboardFolders(
 function createDashboardFolder(
   runtime: ApiRuntime,
   name: string,
+  icon: string | null = null,
   signal?: AbortSignal,
 ): Promise<DashboardFolder> {
   return authorizedRequest<DashboardFolder>(runtime, "/dashboard-folders", {
     method: "POST",
-    body: { name },
+    body: { name, icon },
     signal,
   });
+}
+
+/** `PATCH /dashboard-folders/{id}` — updates personal folder presentation. */
+function updateDashboardFolder(
+  runtime: ApiRuntime,
+  id: string,
+  data: UpdateDashboardFolderRequest,
+  signal?: AbortSignal,
+): Promise<DashboardFolder> {
+  return authorizedRequest<DashboardFolder>(
+    runtime,
+    `/dashboard-folders/${encodeURIComponent(id)}`,
+    { method: "PATCH", body: data, signal },
+  );
 }
 
 /** `PATCH /dashboard-folders/{id}` — renames a personal folder. */
@@ -1801,11 +1824,7 @@ function renameDashboardFolder(
   name: string,
   signal?: AbortSignal,
 ): Promise<DashboardFolder> {
-  return authorizedRequest<DashboardFolder>(
-    runtime,
-    `/dashboard-folders/${encodeURIComponent(id)}`,
-    { method: "PATCH", body: { name }, signal },
-  );
+  return updateDashboardFolder(runtime, id, { name }, signal);
 }
 
 /** `DELETE /dashboard-folders/{id}` — member dashboards become ungrouped. */
@@ -2653,8 +2672,16 @@ export function createApiClient(options: {
       getGlobalAuditLog(runtime, filters, signal),
     getDashboards: (signal?: AbortSignal) => getDashboards(runtime, signal),
     getDashboardFolders: (signal?: AbortSignal) => getDashboardFolders(runtime, signal),
-    createDashboardFolder: (name: string, signal?: AbortSignal) =>
-      createDashboardFolder(runtime, name, signal),
+    createDashboardFolder: (
+      name: string,
+      icon: string | null = null,
+      signal?: AbortSignal,
+    ) => createDashboardFolder(runtime, name, icon, signal),
+    updateDashboardFolder: (
+      id: string,
+      data: UpdateDashboardFolderRequest,
+      signal?: AbortSignal,
+    ) => updateDashboardFolder(runtime, id, data, signal),
     renameDashboardFolder: (id: string, name: string, signal?: AbortSignal) =>
       renameDashboardFolder(runtime, id, name, signal),
     deleteDashboardFolder: (id: string, signal?: AbortSignal) =>

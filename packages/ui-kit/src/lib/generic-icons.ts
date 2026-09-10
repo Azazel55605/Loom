@@ -8,6 +8,7 @@ import {
   Cpu,
   Database,
   EthernetPort,
+  Folder,
   Gauge,
   HardDrive,
   Home,
@@ -60,6 +61,7 @@ export type GenericIcon = {
 
 export const GENERIC_ICONS: readonly GenericIcon[] = [
   { name: "server", label: "Server", Component: Server },
+  { name: "folder", label: "Folder", Component: Folder },
   { name: "boxes", label: "Group", Component: Boxes },
   { name: "container", label: "Container", Component: Container },
   { name: "database", label: "Database", Component: Database },

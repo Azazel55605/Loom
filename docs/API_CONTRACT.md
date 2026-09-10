@@ -2830,6 +2830,7 @@ ties.
   {
     "id": "de314fb5-737c-43a0-b619-30a29b65cdb7",
     "name": "Infrastructure",
+    "icon": "lucide:hard-drive",
     "sortOrder": 0
   }
 ]
@@ -2840,21 +2841,25 @@ ties.
 Creates a folder at the end of the caller's folder order.
 
 ```json
-{ "name": "Infrastructure" }
+{ "name": "Infrastructure", "icon": "lucide:hard-drive" }
 ```
 
+`icon` is optional and uses the existing generic `lucide:<name>` reference
+convention. `null` (or omission) uses the client's standard folder glyph.
 Returns 201 with the folder. An empty or whitespace-only name returns 400.
 
 #### `PATCH /dashboard-folders/{id}`
 
-Renames and/or repositions one of the caller's folders.
+Changes the name, icon, and/or position of one of the caller's folders.
 
 ```json
-{ "name": "Core services", "sortOrder": 1 }
+{ "name": "Core services", "icon": "lucide:server", "sortOrder": 1 }
 ```
 
-Both fields are optional. A folder belonging to another user is deliberately
-indistinguishable from a nonexistent folder and returns 404.
+All fields are optional. `icon: null` restores the standard folder glyph; an
+omitted `icon` leaves the current choice unchanged. A folder belonging to
+another user is deliberately indistinguishable from a nonexistent folder and
+returns 404.
 
 #### `DELETE /dashboard-folders/{id}`
 
