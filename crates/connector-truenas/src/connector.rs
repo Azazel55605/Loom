@@ -909,6 +909,7 @@ fn host_resource_kinds() -> Vec<ResourceKindDescriptor> {
                 ColumnDescriptor::new("freeBytes", "Free", ColumnValueType::Bytes),
             ],
         )
+        .with_rows_mapped_to_sub_targets()
         .applicable_to(ApplicableTarget::HostOnly),
         ResourceKindDescriptor::new(
             RESOURCE_KIND_DATASETS,
@@ -922,6 +923,7 @@ fn host_resource_kinds() -> Vec<ResourceKindDescriptor> {
                 ColumnDescriptor::new("snapshotCount", "Snapshots", ColumnValueType::Number),
             ],
         )
+        .with_rows_mapped_to_sub_targets()
         .applicable_to(ApplicableTarget::HostOnly),
         alerts_kind(),
     ]
@@ -1234,8 +1236,7 @@ fn pool_resource_items(pools: Vec<PoolReadings>) -> Vec<ResourceItem> {
     pools
         .into_iter()
         .map(|pool| {
-            ResourceItem::new(pool.name.clone())
-                .with_field("targetId", pool_target_id(&pool.name))
+            ResourceItem::new(pool_target_id(&pool.name))
                 .with_field("name", pool.name)
                 .with_field("status", pool.status)
                 .with_field("usedBytes", pool.used_bytes)
@@ -1254,8 +1255,7 @@ fn dataset_resource_items(datasets: Vec<DatasetReadings>) -> Vec<ResourceItem> {
                 .next()
                 .unwrap_or_default()
                 .to_owned();
-            let mut item = ResourceItem::new(dataset.path.clone())
-                .with_field("targetId", dataset_target_id(&dataset.path))
+            let mut item = ResourceItem::new(dataset_target_id(&dataset.path))
                 .with_field("path", dataset.path)
                 .with_field("pool", pool)
                 .with_field("usedBytes", dataset.used_bytes)
@@ -1906,8 +1906,7 @@ mod tests {
         );
 
         assert_eq!(rows.len(), 1);
-        assert_eq!(rows[0].id, "tank");
-        assert_eq!(rows[0].fields.get("targetId"), Some(&json!("pool:tank")));
+        assert_eq!(rows[0].id, "pool:tank");
         assert_eq!(rows[0].fields.get("name"), Some(&json!("tank")));
         assert_eq!(rows[0].fields.get("status"), Some(&json!("ONLINE")));
         assert_eq!(rows[0].fields.get("usedBytes"), Some(&json!(400)));
@@ -1925,11 +1924,7 @@ mod tests {
         }]);
 
         assert_eq!(rows.len(), 1);
-        assert_eq!(rows[0].id, "tank/apps");
-        assert_eq!(
-            rows[0].fields.get("targetId"),
-            Some(&json!("dataset:tank/apps"))
-        );
+        assert_eq!(rows[0].id, "dataset:tank/apps");
         assert_eq!(rows[0].fields.get("pool"), Some(&json!("tank")));
         assert_eq!(rows[0].fields.get("usedBytes"), Some(&json!(4096)));
         assert_eq!(rows[0].fields.get("snapshotCount"), Some(&json!(3)));

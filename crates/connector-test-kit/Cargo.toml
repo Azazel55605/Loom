@@ -10,5 +10,7 @@ rust-version.workspace = true
 
 [dependencies]
 loom-core.workspace = true
+# Action-contract comparison normalizes the JSON Schema row-addressing field.
+serde_json.workspace = true
 # Connector contract checks await live async methods under each consumer's test runtime.
 tokio.workspace = true

@@ -37,26 +37,17 @@ import { formatByteReading } from "@loom/ui-kit/widgets/types";
 const RESOURCE_ID_PARAM = "resourceId";
 
 /**
- * Resource kinds whose rows are themselves connector sub-targets. Clicking
- * one opens that target's detail view through the caller-provided callback.
- *
- * A log line is not a table cell. Truncated to a column width in the body font
+ * A log line is not an ordinary table cell. Truncated to a column width in the body font
  * it is unreadable, and every other rendering this component does is
  * type-driven precisely so no connector needs frontend code. This is the
  * exception, and it is named here rather than spread through the render so that
  * "how many special cases are there?" has an answer you can grep for.
- *
- * This remains a narrow kind convention: all three row shapes publish the
- * platform-standard hidden `targetId`, and every destination is the existing
- * target detail modal. A future kind with a different destination should add
- * descriptor data instead of another convention here.
  */
 const LOGS_KIND = "logs";
-const TARGET_OPEN_KINDS = new Set([LOGS_KIND, "pools", "datasets"]);
 /** The column carrying the log text, within `LOGS_KIND`. */
 const LOG_LINE_COLUMN = "latestLogLine";
 
-/** The column key a row names its sub-target with, per the API contract. */
+/** The column key a row may use to scope an action independently of row opening. */
 const TARGET_ID_FIELD = "targetId";
 
 /**
@@ -97,8 +88,7 @@ export function ResourceKindBrowser({
    * somewhere to open it; omitted where there is nowhere to go, and the rows
    * are then simply not clickable rather than clickable and inert.
    *
-   * Used by resource kinds whose rows represent sub-targets — see
-   * `TARGET_OPEN_KINDS` below.
+   * Used when the descriptor declares `rowsMapToSubTargets`.
    */
   onOpenTarget?: (targetId: string) => void;
   className?: string;
@@ -154,8 +144,11 @@ export function ResourceKindBrowser({
 
   const columns = descriptor.columns;
   const hasRowActions = descriptor.rowActions.length > 0;
-  const opensTargets = TARGET_OPEN_KINDS.has(descriptor.kind);
-  const columnCount = columns.length + (hasRowActions ? 1 : 0) + (opensTargets ? 1 : 0);
+  const opensTargets = descriptor.rowsMapToSubTargets;
+  const canOpenTargets = opensTargets && onOpenTarget !== undefined;
+  // Actions and the open affordance share the trailing column; a target row
+  // with actions must not make a grouped header span one imaginary extra cell.
+  const columnCount = columns.length + (hasRowActions || canOpenTargets ? 1 : 0);
   const [query, setQuery] = React.useState("");
   // **Expanded** state, so every group starts closed. A kind is grouped because
   // its list is long — Docker's image table is hundreds of rows — and opening
@@ -176,16 +169,13 @@ export function ResourceKindBrowser({
   // is indistinguishable from no match at all.
   const searching = query.trim().length > 0;
 
-  // These rows are addressable sub-targets. Logs open a container; TrueNAS
-  // Pools and Datasets open the corresponding storage target. All three use
-  // the hidden `targetId` field and the same existing modal path.
+  // The descriptor guarantees that the row id is the target id. This keeps
+  // navigation generic and leaves `targetId` fields free to retain their
+  // separate purpose of scoping actions in non-target resource tables.
   const isLogs = descriptor.kind === LOGS_KIND;
   const openTarget =
-    opensTargets && onOpenTarget !== undefined
-      ? (item: ResourceItem) => {
-          const target = item.fields[TARGET_ID_FIELD];
-          if (typeof target === "string" && target.length > 0) onOpenTarget(target);
-        }
+    canOpenTargets
+      ? (item: ResourceItem) => onOpenTarget(item.id)
       : null;
 
   /** One row, identical whether it stands alone or under a group heading. */
@@ -208,6 +198,9 @@ export function ResourceKindBrowser({
           open === undefined || !groupOpen
             ? undefined
             : (event) => {
+                // A focused action button owns its keyboard event. Only the
+                // row's own tab stop opens the target.
+                if (event.target !== event.currentTarget) return;
                 if (event.key === "Enter" || event.key === " ") {
                   event.preventDefault();
                   open();
@@ -263,7 +256,7 @@ export function ResourceKindBrowser({
                   // applied here so no call site has to remember it and no
                   // user retypes a visible cell.
                   params: paramsFromRow(action, item),
-                  targetId: rowTarget(action, targetId, item),
+                  targetId: rowTarget(action, targetId, item, descriptor.rowsMapToSubTargets),
                 };
                 return (
                   <Button
@@ -273,7 +266,13 @@ export function ResourceKindBrowser({
                     size="sm"
                     disabled={disabled || run.isPending}
                     title={disabledReason ?? action.description ?? undefined}
-                    onClick={() => start(pending)}
+                    onClick={(event) => {
+                      // A target-mapped row is itself clickable. Its action
+                      // control must perform only the action, not also open the
+                      // detail modal through the row's bubbling click handler.
+                      event.stopPropagation();
+                      start(pending);
+                    }}
                   >
                     {runningId === pendingKey(pending) ? (
                       <Loader2 className="animate-spin" aria-hidden="true" />
@@ -493,8 +492,10 @@ function rowTarget(
   action: ConnectorAction,
   browsingTarget: string | null | undefined,
   item: ResourceItem,
+  rowMapsToSubTarget: boolean,
 ): string | null {
   if (browsingTarget !== undefined && browsingTarget !== null) return browsingTarget;
+  if (rowMapsToSubTarget) return item.id;
   const declared = item.fields[TARGET_ID_FIELD];
   if (typeof declared === "string" && declared.length > 0) return declared;
   return action.targetId;

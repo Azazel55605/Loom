@@ -64,6 +64,12 @@ pub const RESOURCE_KIND_UPDATES: &str = "updates";
 /// Recent log activity across every container on the host, as one table.
 pub const RESOURCE_KIND_LOGS: &str = "logs";
 
+/// Every container on the host, backed by the most recent status poll.
+pub const RESOURCE_KIND_CONTAINERS: &str = "containers";
+
+/// Every Compose project on the host, backed by the most recent status poll.
+pub const RESOURCE_KIND_STACKS: &str = "stacks";
+
 /// The containers making up one stack, as a table. Only ever published for a
 /// stack target — see [`DockerConnector::resource_kinds`].
 pub const RESOURCE_KIND_STACK_MEMBERS: &str = "stackMembers";
@@ -780,6 +786,70 @@ impl DockerConnector {
             .collect()
     }
 
+    /// One row per container from the status poll's existing cache.
+    ///
+    /// No Docker call happens here. `known_targets` and `member_readings` are
+    /// filled by the same host poll, so browsing this table cannot add daemon
+    /// or socket-proxy load.
+    fn list_container_rows(&self) -> Vec<ResourceItem> {
+        let readings = self
+            .member_readings
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let mut rows: Vec<ResourceItem> = self
+            .known_targets
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .iter()
+            .filter(|target| target.kind == SUB_TARGET_KIND_CONTAINER)
+            .map(|target| {
+                let reading = readings.get(&target.id).cloned().unwrap_or_default();
+                ResourceItem::new(target.id.clone())
+                    .with_field("name", target.id.clone())
+                    .with_field(
+                        "status",
+                        if reading.status.is_empty() {
+                            "unknown".to_owned()
+                        } else {
+                            reading.status
+                        },
+                    )
+                    .with_field("cpuPercent", reading.cpu_percent)
+                    .with_field("memoryUsageBytes", reading.memory_bytes)
+            })
+            .collect();
+        rows.sort_by(|left, right| left.id.cmp(&right.id));
+        rows
+    }
+
+    /// One row per Compose project from cached membership and readings.
+    ///
+    /// Like the stack dashboard values, these counts are a second view of the
+    /// poll already performed rather than a second measurement.
+    fn list_stack_rows(&self) -> Vec<ResourceItem> {
+        let readings = self
+            .member_readings
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        self.known_stacks()
+            .into_iter()
+            .map(|(project, members)| {
+                let running = members
+                    .iter()
+                    .filter_map(|name| readings.get(name))
+                    .filter(|reading| reading.is_running())
+                    .count();
+                let total = members.len();
+                ResourceItem::new(stack_target_id(&project))
+                    .with_field("name", project)
+                    .with_field("memberCount", total)
+                    .with_field("runningCount", running)
+                    .with_field("stoppedCount", total.saturating_sub(running))
+                    .with_field("overallStatus", overall_status(running, total))
+            })
+            .collect()
+    }
+
     /// Sums this poll's container readings into one set of details per stack.
     ///
     /// **No Docker call happens here.** Every number comes from `readings`,
@@ -1258,6 +1328,71 @@ fn stack_members_kind() -> ResourceKindDescriptor {
         ],
     )
     .applicable_to(ApplicableTarget::TargetOnly)
+}
+
+fn host_containers_kind() -> ResourceKindDescriptor {
+    ResourceKindDescriptor::new(
+        RESOURCE_KIND_CONTAINERS,
+        "Containers",
+        vec![
+            ColumnDescriptor::new("name", "Name", ColumnValueType::Text),
+            ColumnDescriptor::new("status", "Status", ColumnValueType::Text),
+            ColumnDescriptor::new("cpuPercent", "CPU %", ColumnValueType::Number),
+            ColumnDescriptor::new("memoryUsageBytes", "Memory", ColumnValueType::Bytes),
+        ],
+    )
+    .with_rows_mapped_to_sub_targets()
+    .applicable_to(ApplicableTarget::HostOnly)
+    .with_row_actions(resource_lifecycle_actions())
+}
+
+fn host_stacks_kind() -> ResourceKindDescriptor {
+    ResourceKindDescriptor::new(
+        RESOURCE_KIND_STACKS,
+        "Stacks",
+        vec![
+            ColumnDescriptor::new("name", "Name", ColumnValueType::Text),
+            ColumnDescriptor::new("memberCount", "Members", ColumnValueType::Number),
+            ColumnDescriptor::new("runningCount", "Running", ColumnValueType::Number),
+            ColumnDescriptor::new("stoppedCount", "Stopped", ColumnValueType::Number),
+            ColumnDescriptor::new("overallStatus", "Status", ColumnValueType::Text),
+        ],
+    )
+    .with_rows_mapped_to_sub_targets()
+    .applicable_to(ApplicableTarget::HostOnly)
+    .with_row_actions(resource_lifecycle_actions())
+}
+
+/// Lifecycle controls advertised on a host resource row.
+///
+/// Unlike a target-scoped action descriptor, the target is supplied through
+/// the row's standard `resourceId`. The frontend also sends that id as
+/// `targetId` so the ordinary target-scoped action log and pending-operation
+/// behavior remain identical.
+fn resource_lifecycle_actions() -> Vec<ConnectorAction> {
+    [
+        (ACTION_START, "Start", false),
+        (ACTION_STOP, "Stop", false),
+        (ACTION_RESTART, "Restart", true),
+    ]
+    .into_iter()
+    .map(|(id, label, disruptive)| ConnectorAction {
+        id: id.to_owned(),
+        target_id: None,
+        label: label.to_owned(),
+        description: Some(format!("{label} this container or stack.")),
+        params_schema: json!({
+            "type": "object",
+            "properties": {
+                "resourceId": { "type": "string", "minLength": 1 }
+            },
+            "required": ["resourceId"],
+            "additionalProperties": false
+        }),
+        is_disruptive: disruptive,
+        snapshot_data_point_ids: Vec::new(),
+    })
+    .collect()
 }
 
 /// Reads one container's poll output back into the fields a stack sums.
@@ -1842,6 +1977,12 @@ impl Connector for DockerConnector {
             .await;
         }
 
+        // Host resource rows carry their target through the resource-browser
+        // `resourceId` convention. The shared UI also sends `target_id`, but a
+        // direct API client should not need a second undocumented convention.
+        let row_target = params.get("resourceId").and_then(Value::as_str);
+        let target_id = target_id.or(row_target);
+
         // A stack answers the three lifecycle ids by running them across its
         // members. Everything else — `applyUpdate`, `pause`, `unpause` — is a
         // per-container operation with no defensible whole-stack meaning, and
@@ -1994,8 +2135,11 @@ impl Connector for DockerConnector {
                     ColumnDescriptor::new("lastLogTimestamp", "At", ColumnValueType::Timestamp),
                 ],
             )
+            .with_rows_mapped_to_sub_targets()
             .applicable_to(ApplicableTarget::HostOnly),
         );
+        kinds.push(host_containers_kind());
+        kinds.push(host_stacks_kind());
         kinds.extend(crate::resources::resource_kinds());
         kinds
     }
@@ -2036,6 +2180,14 @@ impl Connector for DockerConnector {
 
         if kind == RESOURCE_KIND_LOGS {
             return self.list_log_rows().await;
+        }
+
+        if kind == RESOURCE_KIND_CONTAINERS {
+            return Ok(self.list_container_rows());
+        }
+
+        if kind == RESOURCE_KIND_STACKS {
+            return Ok(self.list_stack_rows());
         }
 
         if kind != RESOURCE_KIND_UPDATES {
@@ -3209,6 +3361,8 @@ mod tests {
             // needs no new one, which is the answer this test exists to force
             // somebody to work out rather than skip.
             (RESOURCE_KIND_LOGS, CAPABILITY_READ_LOGS),
+            (RESOURCE_KIND_CONTAINERS, CAPABILITY_LIST_CONTAINERS),
+            (RESOURCE_KIND_STACKS, CAPABILITY_LIST_STACK_MEMBERS),
             (
                 crate::resources::RESOURCE_KIND_IMAGES,
                 CAPABILITY_LIST_IMAGES,
@@ -3887,6 +4041,117 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn host_container_and_stack_tables_reuse_poll_readings_and_map_rows_to_targets() {
+        let connector = detached_with_stacks(
+            "tcp://docker-proxy.example:2375",
+            &["shop-web-1", "shop-db-1", "standalone"],
+            BTreeMap::from([(
+                "shop".to_owned(),
+                vec!["shop-db-1".to_owned(), "shop-web-1".to_owned()],
+            )]),
+        );
+        *connector
+            .member_readings
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = HashMap::from([
+            (
+                "shop-web-1".to_owned(),
+                MemberReading {
+                    status: "running".to_owned(),
+                    cpu_percent: 12.5,
+                    memory_bytes: 1_024.0,
+                },
+            ),
+            (
+                "shop-db-1".to_owned(),
+                MemberReading {
+                    status: "exited".to_owned(),
+                    ..MemberReading::default()
+                },
+            ),
+            (
+                "standalone".to_owned(),
+                MemberReading {
+                    status: "paused".to_owned(),
+                    cpu_percent: 3.0,
+                    memory_bytes: 512.0,
+                },
+            ),
+        ]);
+
+        for kind_id in [
+            RESOURCE_KIND_CONTAINERS,
+            RESOURCE_KIND_STACKS,
+            RESOURCE_KIND_LOGS,
+        ] {
+            let kind = connector
+                .resource_kinds(None)
+                .into_iter()
+                .find(|kind| kind.kind == kind_id)
+                .expect("host target table descriptor");
+            assert_eq!(kind.applicable_target, ApplicableTarget::HostOnly);
+            assert!(kind.rows_map_to_sub_targets);
+        }
+
+        let containers = connector
+            .list_resource_items(RESOURCE_KIND_CONTAINERS, None)
+            .await
+            .unwrap();
+        assert_eq!(
+            containers
+                .iter()
+                .map(|row| row.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["shop-db-1", "shop-web-1", "standalone"]
+        );
+        assert_eq!(containers[1].fields["status"], json!("running"));
+        assert_eq!(containers[1].fields["cpuPercent"], json!(12.5));
+        assert_eq!(containers[1].fields["memoryUsageBytes"], json!(1_024.0));
+
+        let stacks = connector
+            .list_resource_items(RESOURCE_KIND_STACKS, None)
+            .await
+            .unwrap();
+        assert_eq!(stacks.len(), 1);
+        assert_eq!(stacks[0].id, "stack:shop");
+        assert_eq!(stacks[0].fields["name"], json!("shop"));
+        assert_eq!(stacks[0].fields["memberCount"], json!(2));
+        assert_eq!(stacks[0].fields["runningCount"], json!(1));
+        assert_eq!(stacks[0].fields["stoppedCount"], json!(1));
+        assert_eq!(stacks[0].fields["overallStatus"], json!("Partial"));
+
+        for kind_id in [RESOURCE_KIND_CONTAINERS, RESOURCE_KIND_STACKS] {
+            let kind = connector
+                .resource_kinds(None)
+                .into_iter()
+                .find(|kind| kind.kind == kind_id)
+                .unwrap();
+            assert_eq!(
+                kind.row_actions
+                    .iter()
+                    .map(|action| action.id.as_str())
+                    .collect::<Vec<_>>(),
+                vec![ACTION_START, ACTION_STOP, ACTION_RESTART]
+            );
+            assert!(kind
+                .row_actions
+                .iter()
+                .all(|action| action.params_schema["required"] == json!(["resourceId"])));
+        }
+
+        let result = connector
+            .execute_action(
+                ACTION_START,
+                None,
+                json!({ "resourceId": "stack:not-present" }),
+            )
+            .await
+            .expect("a resourceId alone addresses the stack resource row");
+        assert!(!result.success);
+        assert!(result.message.contains("not-present"));
+    }
+
+    #[tokio::test]
     async fn stack_aggregates_and_member_rows_come_from_the_polls_own_readings() {
         let connector = detached_with_stacks(
             "tcp://docker-proxy.example:2375",
@@ -4074,6 +4339,7 @@ mod tests {
         assert!(logs.row_actions.is_empty());
         assert!(logs.kind_actions.is_empty());
         assert_eq!(logs.group_by_key, None);
+        assert!(logs.rows_map_to_sub_targets);
     }
 
     #[tokio::test]
@@ -4081,7 +4347,7 @@ mod tests {
         let connector = detached("tcp://docker-proxy.example:2375", &["web", "db"]);
 
         let kinds = connector.resource_kinds(None);
-        // The updates table plus the three host-inventory tables.
+        // Updates, logs, the two cached target indexes, and daemon inventory.
         assert_eq!(
             kinds
                 .iter()
@@ -4090,6 +4356,8 @@ mod tests {
             vec![
                 RESOURCE_KIND_UPDATES,
                 RESOURCE_KIND_LOGS,
+                RESOURCE_KIND_CONTAINERS,
+                RESOURCE_KIND_STACKS,
                 crate::resources::RESOURCE_KIND_IMAGES,
                 crate::resources::RESOURCE_KIND_VOLUMES,
                 crate::resources::RESOURCE_KIND_NETWORKS,

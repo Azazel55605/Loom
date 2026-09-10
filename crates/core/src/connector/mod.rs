@@ -1168,7 +1168,9 @@ impl ColumnDescriptor {
 pub struct ResourceItem {
     /// Stable identifier for this row within its kind, passed back as
     /// `resourceId` when a row action is invoked — see
-    /// [`ResourceKindDescriptor::row_actions`].
+    /// [`ResourceKindDescriptor::row_actions`]. When the kind sets
+    /// [`ResourceKindDescriptor::rows_map_to_sub_targets`], this is also the
+    /// connector's valid sub-target id for opening the target detail view.
     pub id: String,
     /// The cell values, keyed by column.
     pub fields: HashMap<String, Value>,
@@ -1283,6 +1285,14 @@ pub struct ResourceKindDescriptor {
     /// both.
     #[serde(default)]
     pub applicable_target: ApplicableTarget,
+    /// Whether every row id is also a valid connector sub-target id.
+    ///
+    /// A client may use this to make the row open that target's detail view.
+    /// The opt-in is explicit because most resource rows (an image, voucher,
+    /// or audit entry) are not connector targets even when they happen to have
+    /// a string id.
+    #[serde(default)]
+    pub rows_map_to_sub_targets: bool,
     /// Extra values describing each **group** as a whole, shown on the group
     /// heading and never as a row cell. Ignored when
     /// [`group_by_key`](Self::group_by_key) is `None`.
@@ -1318,6 +1328,7 @@ impl ResourceKindDescriptor {
             kind_actions: Vec::new(),
             group_by_key: None,
             applicable_target: ApplicableTarget::Any,
+            rows_map_to_sub_targets: false,
             group_summary: Vec::new(),
         }
     }
@@ -1347,6 +1358,13 @@ impl ResourceKindDescriptor {
     #[must_use]
     pub fn applicable_to(mut self, target: ApplicableTarget) -> Self {
         self.applicable_target = target;
+        self
+    }
+
+    /// Declares that each [`ResourceItem::id`] names a connector sub-target.
+    #[must_use]
+    pub fn with_rows_mapped_to_sub_targets(mut self) -> Self {
+        self.rows_map_to_sub_targets = true;
         self
     }
 
@@ -1996,6 +2014,7 @@ mod tests {
         assert_eq!(value["kindActions"][0]["id"], "prune");
         assert_eq!(value["groupByKey"], "repository");
         assert_eq!(value["applicableTarget"], "hostOnly");
+        assert_eq!(value["rowsMapToSubTargets"], false);
         assert_eq!(value["groupSummary"][0]["key"], "totalSize");
         assert_eq!(
             serde_json::from_value::<ResourceKindDescriptor>(value).unwrap(),
@@ -2041,7 +2060,7 @@ mod tests {
         );
     }
 
-    /// The two hint fields are additive: a descriptor written before they
+    /// The presentation hint fields are additive: a descriptor written before they
     /// existed still deserializes, and keeps the behaviour it had.
     #[test]
     fn a_descriptor_without_the_hints_defaults_to_ungrouped_and_anywhere() {
@@ -2055,6 +2074,7 @@ mod tests {
         let kind: ResourceKindDescriptor = serde_json::from_value(value).unwrap();
         assert_eq!(kind.group_by_key, None);
         assert_eq!(kind.applicable_target, ApplicableTarget::Any);
+        assert!(!kind.rows_map_to_sub_targets);
         assert!(kind.group_summary.is_empty());
         assert_eq!(
             ResourceKindDescriptor::new("widgets", "Widgets", Vec::new()),

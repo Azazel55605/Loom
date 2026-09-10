@@ -1284,7 +1284,10 @@ does not mean the scrub has completed. Each dataset is an addressable
 `compressionRatio`, and `snapshotCount`. Dataset detail exposes snapshot
 browsing plus create, rollback, and delete actions; the host resource browser
 also lists pools, datasets, and active alerts, with alert dismissal where
-permitted. The connector deliberately
+permitted. The pool and dataset kinds set `rowsMapToSubTargets: true`, and each
+row id is its existing `pool:{name}` or `dataset:{path}` target id, so this
+descriptor-driven navigation remains available without a TrueNAS-specific UI
+branch. The connector deliberately
 does not mislabel `system.info.physmem` (installed RAM) or `loadavg` as memory
 or CPU utilization.
 
@@ -1824,12 +1827,15 @@ available". Fixing it is a decision about credential storage, not about HTTP.
 
 ## Docker host inventory
 
-Three further browsable tables, all `applicableTarget: "hostOnly"` — images,
-volumes and networks belong to the daemon, and "the images of one container" is
-not a smaller version of that question but a different one with no answer.
+Five further browsable tables, all `applicableTarget: "hostOnly"`. Containers
+and stacks are target indexes backed by the most recent host poll; images,
+volumes and networks are daemon inventory, and "the images of one container"
+is not a smaller version of that question but a different one with no answer.
 
 | Kind | `groupByKey` | Columns | Row actions | Kind action |
 | --- | --- | --- | --- | --- |
+| `containers` | — | `name`, `status`, `cpuPercent`, `memoryUsageBytes` (bytes) | `start`, `stop`, `restart` | — |
+| `stacks` | — | `name`, `memberCount`, `runningCount`, `stoppedCount`, `overallStatus` | `start`, `stop`, `restart` | — |
 | `images` | `repository` | `repository`, `tag`, `imageId`, `size` (bytes), `created`, `usedBy`, `usage` (status) | `deleteImage`, `checkImageUpdate` | `pullImage` (`{ "imageRef": string }`), `pruneImages` |
 | `volumes` | — | `name`, `driver`, `mountpoint`, `created`, `usedBy` | `deleteVolume` | `createVolume` (`{ "name": string, "driver"?: string }`, default `local`) |
 | `networks` | — | `name`, `driver`, `scope`, `subnet`, `created`, `usedBy` | `deleteNetwork` | `createNetwork` (`{ "name": string, "driver"?: string }`, default `bridge`) |
@@ -1838,6 +1844,14 @@ Row ids are what the corresponding action is given as `resourceId`: an image's
 `repository:tag` (or its content id, for an untagged image), a volume's name, a
 network's **id** — Docker accepts either a network's name or its id, and only
 the id is guaranteed unambiguous.
+
+`containers` and `stacks` additionally set `rowsMapToSubTargets: true`: their
+row ids are the existing container target id and `stack:{project}` target id,
+respectively. Clicking either row therefore opens the same target detail view
+used by a dashboard placement, while its lifecycle buttons dispatch through
+the ordinary action path. Their rows are built entirely from the cached
+container readings and Compose membership gathered by host polling; opening a
+table performs no additional Docker request.
 
 Image rows are one per **tag**, so an image carrying three tags is three rows —
 a tag is what a person pulls, checks and deletes; the shared image behind them
@@ -1959,7 +1973,8 @@ place to keep them working.
 
 ## Docker host log table
 
-One more host-scoped kind, `logs` (`applicableTarget: "hostOnly"`, ungrouped),
+One more host-scoped kind, `logs` (`applicableTarget: "hostOnly"`,
+`rowsMapToSubTargets: true`, ungrouped),
 answering a question no per-container view can: *what is everything on this host
 saying right now?*
 
@@ -2166,7 +2181,7 @@ columns, its per-row actions, and its whole-kind actions. Nothing here is
 Docker-specific: a client renders a table from the descriptors without knowing
 what the connector is. See
 [`adr/0021-connector-resource-browser.md`](adr/0021-connector-resource-browser.md)
-and, for the two presentation hints added once a second connector needed them,
+and, for the presentation hints added as more connectors needed them,
 [`adr/0024-resource-kind-presentation-hints.md`](adr/0024-resource-kind-presentation-hints.md).
 
 ### Column value types
@@ -2275,6 +2290,7 @@ container as one nothing publishes at all.
     ],
     "groupByKey": null,
     "applicableTarget": "any",
+    "rowsMapToSubTargets": false,
     "groupSummary": []
   }
 ]
@@ -2289,7 +2305,17 @@ container as one nothing publishes at all.
 | `kindActions` | array | `ConnectorAction`s addressing the kind as a whole. | Always present; **may be empty**. |
 | `groupByKey` | string | A `columns[].key` whose value rows should be gathered under. | **`null`** for a flat table. |
 | `applicableTarget` | string | Where this kind means anything: `hostOnly`, `targetOnly`, or `any`. | Always present; defaults to `any`. |
+| `rowsMapToSubTargets` | boolean | Whether every row's `id` is also a valid connector `targetId`, allowing a client to open that target's detail view from the row. | Always present; defaults to `false`. |
 | `groupSummary` | array | `ColumnDescriptor`s describing each **group** as a whole, shown on the group heading and never as a row cell. | Always present; empty unless `groupByKey` is set. |
+
+#### `rowsMapToSubTargets`
+
+An explicit navigation contract, not a kind-name convention. When `true`, each
+returned `ResourceItem.id` is guaranteed to be a valid sub-target id for that
+connector instance. A client may make the row keyboard/click/touch navigable to
+the existing target detail view. When `false`, an id only identifies the
+resource row and must never be guessed to be a target. A separate `targetId`
+field may still scope a row action without making the row itself navigable.
 
 #### `groupSummary`
 
@@ -2322,7 +2348,7 @@ fill tomorrow and one that never will. A client that does not recognise the
 value should *show* the kind — a newer backend inventing a fourth case must not
 make a table vanish from an older client with no explanation.
 
-Both fields are additive. A descriptor written before they existed keeps exactly
+All presentation fields are additive. A descriptor written before they existed keeps exactly
 the behaviour it had.
 
 | Status | Meaning |

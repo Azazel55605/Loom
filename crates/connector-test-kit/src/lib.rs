@@ -273,9 +273,56 @@ fn validate_action(action: &ConnectorAction, connector_id: &str, context: &str) 
 }
 
 fn same_action_meaning(left: &ConnectorAction, right: &ConnectorAction) -> bool {
-    left.params_schema == right.params_schema
+    params_without_resource_id(&left.params_schema)
+        == params_without_resource_id(&right.params_schema)
         && left.is_disruptive == right.is_disruptive
         && left.snapshot_data_point_ids == right.snapshot_data_point_ids
+}
+
+/// Removes the resource browser's row-addressing parameter before comparing
+/// the meaning of two actions sharing an id.
+///
+/// `resourceId` says which table row invoked an action; it is transport
+/// context, not an action-specific parameter. A target-scoped `restart` and a
+/// Containers-table `restart` therefore have the same meaning even though only
+/// the latter declares the row id in its schema.
+fn params_without_resource_id(schema: &serde_json::Value) -> serde_json::Value {
+    let mut schema = schema.clone();
+    let Some(object) = schema.as_object_mut() else {
+        return schema;
+    };
+
+    if let Some(properties) = object
+        .get_mut("properties")
+        .and_then(serde_json::Value::as_object_mut)
+    {
+        properties.remove("resourceId");
+        if properties.is_empty() {
+            object.remove("properties");
+        }
+    }
+    if let Some(required) = object
+        .get_mut("required")
+        .and_then(serde_json::Value::as_array_mut)
+    {
+        required.retain(|key| key.as_str() != Some("resourceId"));
+        if required.is_empty() {
+            object.remove("required");
+        }
+    }
+
+    if object
+        .keys()
+        .all(|key| key == "type" || key == "additionalProperties")
+        && object.get("type").and_then(serde_json::Value::as_str) == Some("object")
+        && object
+            .get("additionalProperties")
+            .and_then(serde_json::Value::as_bool)
+            == Some(false)
+    {
+        object.clear();
+    }
+    schema
 }
 
 fn record_action_meaning(
@@ -374,7 +421,10 @@ fn identifier_tokens(identifier: &str) -> HashSet<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::identifier_tokens;
+    use loom_core::connector::ConnectorAction;
+    use serde_json::json;
+
+    use super::{identifier_tokens, same_action_meaning};
 
     #[test]
     fn capability_tokens_normalize_case_and_plural_words() {
@@ -383,5 +433,23 @@ mod tests {
             ["pull".to_owned(), "image".to_owned()].into()
         );
         assert!(identifier_tokens("read-status").contains("status"));
+    }
+
+    #[test]
+    fn resource_id_does_not_change_an_actions_semantic_contract() {
+        let target_action = ConnectorAction::simple("restart", "Restart").disruptive();
+        let mut row_action = target_action.clone();
+        row_action.params_schema = json!({
+            "type": "object",
+            "properties": {
+                "resourceId": { "type": "string", "minLength": 1 }
+            },
+            "required": ["resourceId"],
+            "additionalProperties": false
+        });
+        assert!(same_action_meaning(&target_action, &row_action));
+
+        row_action.params_schema["properties"]["force"] = json!({ "type": "boolean" });
+        assert!(!same_action_meaning(&target_action, &row_action));
     }
 }

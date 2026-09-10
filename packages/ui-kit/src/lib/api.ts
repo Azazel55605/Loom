@@ -318,6 +318,8 @@ export type ResourceKindDescriptor = {
   /** Whether this kind means anything at the host, at one sub-target, or
    *  both. */
   applicableTarget: ApplicableTarget;
+  /** Every row id names a connector sub-target and may open its detail view. */
+  rowsMapToSubTargets: boolean;
   /**
    * Values describing each **group** as a whole, shown on the group heading and
    * never as a row cell. Empty unless `groupByKey` is set.
