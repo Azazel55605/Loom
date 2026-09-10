@@ -641,6 +641,22 @@ export type DashboardSummary = {
    * only screen that can unhide one has to be able to find it.
    */
   hidden: boolean;
+  /** Personal folder for the current viewer; null means ungrouped. */
+  sidebarFolderId: string | null;
+  /** Personal position within the folder/ungrouped context. */
+  sidebarSortOrder: number;
+};
+
+/** One private dashboard folder belonging to the current viewer. */
+export type DashboardFolder = {
+  id: string;
+  name: string;
+  sortOrder: number;
+};
+
+export type DashboardSidebarPlacement = {
+  folderId: string | null;
+  sortOrder: number;
 };
 
 /** One instance-wide dashboard-administration row. */
@@ -1757,6 +1773,94 @@ function getDashboards(
   return authorizedRequest<DashboardSummary[]>(runtime, "/dashboards", { signal });
 }
 
+/** `GET /dashboard-folders` — the current viewer's private folders. */
+function getDashboardFolders(
+  runtime: ApiRuntime,
+  signal?: AbortSignal,
+): Promise<DashboardFolder[]> {
+  return authorizedRequest<DashboardFolder[]>(runtime, "/dashboard-folders", { signal });
+}
+
+/** `POST /dashboard-folders` — appends a personal folder. */
+function createDashboardFolder(
+  runtime: ApiRuntime,
+  name: string,
+  signal?: AbortSignal,
+): Promise<DashboardFolder> {
+  return authorizedRequest<DashboardFolder>(runtime, "/dashboard-folders", {
+    method: "POST",
+    body: { name },
+    signal,
+  });
+}
+
+/** `PATCH /dashboard-folders/{id}` — renames a personal folder. */
+function renameDashboardFolder(
+  runtime: ApiRuntime,
+  id: string,
+  name: string,
+  signal?: AbortSignal,
+): Promise<DashboardFolder> {
+  return authorizedRequest<DashboardFolder>(
+    runtime,
+    `/dashboard-folders/${encodeURIComponent(id)}`,
+    { method: "PATCH", body: { name }, signal },
+  );
+}
+
+/** `DELETE /dashboard-folders/{id}` — member dashboards become ungrouped. */
+function deleteDashboardFolder(
+  runtime: ApiRuntime,
+  id: string,
+  signal?: AbortSignal,
+): Promise<void> {
+  return authorizedRequest<void>(runtime, `/dashboard-folders/${encodeURIComponent(id)}`, {
+    method: "DELETE",
+    signal,
+  });
+}
+
+/** `PATCH /dashboard-folders/reorder` — atomically reorders listed folders. */
+function reorderDashboardFolders(
+  runtime: ApiRuntime,
+  orderedFolderIds: string[],
+  signal?: AbortSignal,
+): Promise<void> {
+  return authorizedRequest<void>(runtime, "/dashboard-folders/reorder", {
+    method: "PATCH",
+    body: { orderedFolderIds },
+    signal,
+  });
+}
+
+/** `PATCH /dashboards/{id}/sidebar-placement` — moves one personal entry. */
+function updateDashboardSidebarPlacement(
+  runtime: ApiRuntime,
+  dashboardId: string,
+  placement: DashboardSidebarPlacement,
+  signal?: AbortSignal,
+): Promise<void> {
+  return authorizedRequest<void>(
+    runtime,
+    `/dashboards/${encodeURIComponent(dashboardId)}/sidebar-placement`,
+    { method: "PATCH", body: placement, signal },
+  );
+}
+
+/** `PATCH /dashboards/sidebar-placement/reorder` — reorders one context. */
+function reorderDashboardsInContext(
+  runtime: ApiRuntime,
+  folderId: string | null,
+  orderedDashboardIds: string[],
+  signal?: AbortSignal,
+): Promise<void> {
+  return authorizedRequest<void>(runtime, "/dashboards/sidebar-placement/reorder", {
+    method: "PATCH",
+    body: { folderId, orderedDashboardIds },
+    signal,
+  });
+}
+
 /** `POST /dashboards` — creates a dashboard owned by the current user. */
 function createDashboard(
   runtime: ApiRuntime,
@@ -2548,6 +2652,25 @@ export function createApiClient(options: {
     getGlobalAuditLog: (filters?: AuditLogFilters, signal?: AbortSignal) =>
       getGlobalAuditLog(runtime, filters, signal),
     getDashboards: (signal?: AbortSignal) => getDashboards(runtime, signal),
+    getDashboardFolders: (signal?: AbortSignal) => getDashboardFolders(runtime, signal),
+    createDashboardFolder: (name: string, signal?: AbortSignal) =>
+      createDashboardFolder(runtime, name, signal),
+    renameDashboardFolder: (id: string, name: string, signal?: AbortSignal) =>
+      renameDashboardFolder(runtime, id, name, signal),
+    deleteDashboardFolder: (id: string, signal?: AbortSignal) =>
+      deleteDashboardFolder(runtime, id, signal),
+    reorderDashboardFolders: (orderedFolderIds: string[], signal?: AbortSignal) =>
+      reorderDashboardFolders(runtime, orderedFolderIds, signal),
+    updateDashboardSidebarPlacement: (
+      dashboardId: string,
+      placement: DashboardSidebarPlacement,
+      signal?: AbortSignal,
+    ) => updateDashboardSidebarPlacement(runtime, dashboardId, placement, signal),
+    reorderDashboardsInContext: (
+      folderId: string | null,
+      orderedDashboardIds: string[],
+      signal?: AbortSignal,
+    ) => reorderDashboardsInContext(runtime, folderId, orderedDashboardIds, signal),
     createDashboard: (name: string, signal?: AbortSignal) =>
       createDashboard(runtime, name, signal),
     getDashboard: (id: string, signal?: AbortSignal) => getDashboard(runtime, id, signal),
