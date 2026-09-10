@@ -887,17 +887,21 @@ pub struct ConnectorMetadata {
     /// against their own icon sets, so core never ships assets or assumes a
     /// renderer.
     ///
-    /// The string, when present, takes one of exactly two forms:
+    /// The string, when present, takes one of exactly four forms:
     ///
     /// | Form | Resolves to | Example |
     /// | --- | --- | --- |
-    /// | `"brand:<key>"` | A vendored brand SVG, `<key>` matching the vendored file's name without its extension. | `"brand:docker"` |
     /// | `"lucide:<name>"` | One icon from the client's curated generic set, `<name>` matching a `lucide-react` component in **kebab-case**. | `"lucide:hard-drive"` |
+    /// | `"brand:<key>"` | A vendored `dashboard-icons` brand SVG, `<key>` matching the vendored file's name without its extension. | `"brand:docker"` |
+    /// | `"tabler:<name>"` | One icon from the client's curated Tabler Icons subset, `<name>` in Tabler's own **kebab-case** catalog naming. | `"tabler:server-2"` |
+    /// | `"simple-icons:<slug>"` | A vendored Simple Icons SVG, `<slug>` matching the vendored file's name (Simple Icons' slug) without its extension. | `"simple-icons:jellyfin"` |
     ///
-    /// Kebab-case for the `lucide:` form because that is the name lucide's own
-    /// catalog and its `dynamicIconImports` map use; PascalCase is a detail of
-    /// one binding's component export, and a wire format should not encode
-    /// that.
+    /// Kebab-case for the `lucide:` and `tabler:` forms because that is the
+    /// name each library's own catalog uses; PascalCase is a detail of one
+    /// binding's component export, and a wire format should not encode that.
+    /// A connector type should prefer `brand:` for its own product's mark and
+    /// `lucide:` otherwise, since those are the sets vendored for connectors;
+    /// all four are valid and resolve the same way.
     ///
     /// `None` means "no icon declared" and the client picks its own fallback.
     /// This is not a validated field: an unresolvable reference is a rendering

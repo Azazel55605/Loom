@@ -23,7 +23,7 @@ import {
   SelectValue,
 } from "@loom/ui-kit/components/ui/select";
 import { ConnectorIcon } from "@loom/ui-kit/components/ConnectorIcon";
-import { ConnectorIconPicker } from "@loom/ui-kit/components/ConnectorIconPicker";
+import { IconPicker } from "@loom/ui-kit/components/IconPicker";
 import { SetupGuidePanel } from "@loom/ui-kit/components/SetupGuidePanel";
 import { TagChipEditor } from "@loom/ui-kit/components/TagChipEditor";
 import {
@@ -98,7 +98,7 @@ export function ConnectorInstanceDialog({
   const [name, setName] = React.useState<string>(instance?.name ?? "");
   const [config, setConfig] = React.useState<Record<string, unknown>>({});
   // `null` is "no override", which is a real value here rather than "unset" —
-  // see `ConnectorIconPicker`.
+  // see `IconPicker`.
   const [iconOverride, setIconOverride] = React.useState<string | null>(
     instance?.iconOverride ?? null,
   );
@@ -332,16 +332,18 @@ export function ConnectorInstanceDialog({
           {isEditing && !isLoading && (
             <div className="space-y-2 border-t border-border pt-4">
               {/* Visual heading only — no `htmlFor`, because the control it
-                  labels is a radio group of sixteen tiles rather than one
-                  focusable input. The group carries its own `aria-label`. */}
+                  labels is a searchable radio group of icon tiles rather
+                  than one focusable input. The group carries its own `aria-label`. */}
               <p className="text-sm font-medium">Icon</p>
               <p className="text-xs text-muted-foreground">
                 Overrides the icon this connector type ships with — useful when
                 you run more than one of the same thing.
               </p>
-              <ConnectorIconPicker
+              <IconPicker
+                label="Connector icon"
                 value={iconOverride}
-                typeIcon={instance.metadata.icon}
+                defaultIcon={instance.metadata.icon}
+                defaultLabel="Use connector default"
                 onChange={setIconOverride}
                 disabled={isSubmitting}
               />

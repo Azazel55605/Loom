@@ -47,9 +47,12 @@ import {
  * hand rather than derived, so a rename upstream is a compile error here
  * instead of an icon that silently stops resolving.
  *
- * Both the resolver (`components/ConnectorIcon.tsx`) and the picker
- * (`components/ConnectorInstanceDialog.tsx`) read this array, so adding an icon
- * is one line in one place.
+ * This is the `lucide:` source — the "Default" section — of the four-source
+ * icon system. `lib/icon-catalog.ts` builds its catalog from this array, and
+ * both the resolver (`components/AppIcon.tsx`) and the picker
+ * (`components/IconPicker.tsx`) read that catalog, so adding an icon is one
+ * line in one place. The broader, searchable generic set is the curated
+ * `tabler:` subset in the same catalog.
  */
 export type GenericIcon = {
   /** Kebab-case wire name, the part after `lucide:`. */

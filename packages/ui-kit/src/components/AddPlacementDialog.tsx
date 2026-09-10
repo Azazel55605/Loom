@@ -22,7 +22,7 @@ import {
   SelectValue,
 } from "@loom/ui-kit/components/ui/select";
 import { Skeleton } from "@loom/ui-kit/components/ui/skeleton";
-import { GenericIconPicker } from "@loom/ui-kit/components/GenericIconPicker";
+import { IconPicker } from "@loom/ui-kit/components/IconPicker";
 import { PlacementBindingEditor } from "@loom/ui-kit/components/PlacementBindingEditor";
 import {
   isPlacementActionComplete,
@@ -342,7 +342,7 @@ export function AddPlacementDialog({
 
               <div className="flex flex-col gap-2">
                 <Label>Icon</Label>
-                <GenericIconPicker
+                <IconPicker
                   value={buttonIcon}
                   defaultIcon={null}
                   label="Button tile icon"

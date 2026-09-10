@@ -327,27 +327,42 @@ mandatory in step (c).
 
 ## Icons
 
-Two sources, and the distinction is not cosmetic:
+Four sources, each named by a reference prefix. The distinction between the
+two kinds is not cosmetic:
 
-- **Generic icons** come from `lucide-react`, through the curated
-  `GENERIC_ICONS` set in `packages/ui-kit/src/lib/generic-icons.ts`. They are
-  line drawings that inherit `currentColor`, so they follow the accent and the
-  theme like everything else. Use these unless you are identifying a specific
-  product.
-- **Brand icons** are SVGs vendored per connector type under
-  `packages/ui-kit/src/assets/icons/brand/`. They are **not tinted** — a logo
-  rendered in the user's accent colour is no longer that logo. The accent
-  colours our surfaces; it does not recolour someone else's mark.
+| Prefix | Source | Kind | Where it lives |
+| --- | --- | --- | --- |
+| `lucide:` | Curated `GENERIC_ICONS` from `lucide-react` (ISC) | Generic line icon | `packages/ui-kit/src/lib/generic-icons.ts` |
+| `tabler:` | Curated ~90-icon subset of `@tabler/icons-react` (MIT) | Generic line icon | `packages/ui-kit/src/lib/icon-catalog.ts` + `tabler-icon-components.ts` |
+| `brand:` | Vendored `homarr-labs/dashboard-icons` SVGs (Apache-2.0) | Brand mark, full colour | `packages/ui-kit/src/assets/icons/brand/` |
+| `simple-icons:` | Vendored Simple Icons SVGs (CC0-1.0) | Brand mark, monochrome | `packages/ui-kit/src/assets/icons/simple-icons/` |
 
-Both are reached through one component, `ConnectorIcon`, which resolves the
-`brand:<key>` / `lucide:<name>` reference convention and falls back rather than
-failing. Never import a brand SVG directly, and never add one without reading
-[`THIRD_PARTY_ICONS.md`](./THIRD_PARTY_ICONS.md) first — the vendored set is
-Apache-2.0 and carries attribution obligations that a casual copy-paste breaks.
+- **Generic icons** (`lucide:`, `tabler:`) are line drawings that inherit
+  `currentColor`, so they follow the theme like everything else. Use these
+  unless you are identifying a specific product. `lucide:` stays the small set
+  a connector author writes against; `tabler:` is the broader set users search
+  in the picker.
+- **Brand marks** (`brand:`, `simple-icons:`) are **not tinted with the
+  accent** — a logo in the user's accent colour is no longer that logo. They
+  sit on a neutral plate: dashboard-icons logos keep their own colours, and
+  Simple Icons (shipped upstream as a single uncoloured path) are filled with
+  the foreground colour. The accent colours our surfaces, not someone else's
+  mark.
 
-Do not add icons to `GENERIC_ICONS` casually either. It is small on purpose: it
-is the set a connector author can rely on and the set the icon picker offers,
-and a catalog with a thousand members is a set with no contract.
+Everything is drawn through one component, `AppIcon`, which resolves the
+reference, lazy-loads everything but `lucide:`, and falls back to the next
+candidate and finally `lucide:server` rather than failing. (`ConnectorIcon` is a
+thin wrapper for connector call sites.) Everything is *chosen* through one
+component, `IconPicker` — a searchable, sectioned picker over all four sources —
+currently used for connector instance overrides, button tiles, placement
+groups, and sidebar folders. Never import an icon file or a Tabler component
+directly.
+
+Never vendor an icon without reading [`THIRD_PARTY_ICONS.md`](./THIRD_PARTY_ICONS.md)
+first — the sets carry different licenses (Apache-2.0 attribution obligations
+in particular), and some individual Simple Icons are *not* CC0. Do not grow the
+curated sets casually either: a reference outside them falls back rather than
+resolving, and that only means something while each set is a deliberate list.
 
 ## Keeping the registry current
 

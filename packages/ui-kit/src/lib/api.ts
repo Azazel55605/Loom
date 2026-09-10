@@ -173,11 +173,11 @@ export type ConnectorMetadata = {
    * Icon *reference*, not a URL or image data. `null` when the connector
    * declares none.
    *
-   * One of two prefixed forms: `"brand:<key>"`, resolving to an SVG vendored
-   * under `packages/ui-kit/src/assets/icons/brand` (see
-   * `docs/THIRD_PARTY_ICONS.md`), or `"lucide:<name>"`, resolving to a
-   * kebab-case member of `GENERIC_ICONS`. Resolution and fallback are entirely
-   * client-side and live in `ConnectorIcon` — the backend never validates this
+   * One of four prefixed forms — `"lucide:<name>"`, `"brand:<key>"`,
+   * `"tabler:<name>"`, `"simple-icons:<slug>"` — each resolving against a
+   * curated or vendored set listed in `lib/icon-catalog.ts` (see
+   * `docs/THIRD_PARTY_ICONS.md`). Resolution and fallback are entirely
+   * client-side and live in `AppIcon` — the backend never validates this
    * string, because only a client knows which icons it has.
    */
   icon: string | null;

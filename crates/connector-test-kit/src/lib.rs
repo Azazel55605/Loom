@@ -39,8 +39,10 @@ pub async fn assert_connector_contract(
     assert_nonempty(&metadata.name, "metadata.name", connector_id);
     if let Some(icon) = metadata.icon.as_deref() {
         assert!(
-            icon.starts_with("brand:") || icon.starts_with("lucide:"),
-            "connector `{connector_id}` metadata.icon `{icon}` must start with `brand:` or `lucide:`"
+            ["lucide:", "brand:", "tabler:", "simple-icons:"]
+                .iter()
+                .any(|prefix| icon.starts_with(prefix)),
+            "connector `{connector_id}` metadata.icon `{icon}` must start with `lucide:`, `brand:`, `tabler:`, or `simple-icons:`"
         );
     }
     assert!(

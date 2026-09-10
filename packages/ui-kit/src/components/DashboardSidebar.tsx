@@ -9,8 +9,8 @@ import { Alert, AlertDescription } from "@loom/ui-kit/components/ui/alert";
 import { AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent, AlertDialogDescription, AlertDialogFooter, AlertDialogHeader, AlertDialogTitle } from "@loom/ui-kit/components/ui/alert-dialog";
 import { Badge } from "@loom/ui-kit/components/ui/badge";
 import { Button } from "@loom/ui-kit/components/ui/button";
-import { ConnectorIcon } from "@loom/ui-kit/components/ConnectorIcon";
-import { GenericIconPicker } from "@loom/ui-kit/components/GenericIconPicker";
+import { AppIcon } from "@loom/ui-kit/components/AppIcon";
+import { IconPicker } from "@loom/ui-kit/components/IconPicker";
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle, DialogTrigger } from "@loom/ui-kit/components/ui/dialog";
 import { DropdownMenu, DropdownMenuContent, DropdownMenuGroup, DropdownMenuItem, DropdownMenuLabel, DropdownMenuSeparator, DropdownMenuSub, DropdownMenuSubContent, DropdownMenuSubTrigger, DropdownMenuTrigger } from "@loom/ui-kit/components/ui/dropdown-menu";
 import { Input } from "@loom/ui-kit/components/ui/input";
@@ -216,7 +216,7 @@ function DashboardFolderDialog({ mode, folder, trigger, open: controlledOpen, on
   const [name, setName] = React.useState(folder?.name ?? "");
   const [icon, setIcon] = React.useState<string | null>(folder?.icon ?? null);
   const mutation = useMutation({ mutationFn: () => mode === "create" ? api.createDashboardFolder(name.trim(), icon) : api.updateDashboardFolder(folder!.id, { name: name.trim(), icon }), onSuccess: async () => { await queryClient.invalidateQueries({ queryKey: dashboardFoldersQueryKey }); setOpen(false); if (mode === "create") { setName(""); setIcon(null); } } });
-  return <NameDialog open={open} onOpenChange={(next) => { setOpen(next); if (next) { setName(folder?.name ?? ""); setIcon(folder?.icon ?? null); } else mutation.reset(); }} trigger={trigger} title={mode === "create" ? "New folder" : "Edit folder"} description="Folders organize only your personal dashboard sidebar." label="Name" inputId={`${mode}-folder-name-${folder?.id ?? "new"}`} value={name} placeholder="Infrastructure" pending={mutation.isPending} error={mutation.error} action={mode === "create" ? "Create folder" : "Save folder"} onChange={setName} onSubmit={() => mutation.mutate()} afterInput={<div className="flex flex-col gap-2"><Label>Icon</Label><GenericIconPicker value={icon} defaultIcon="lucide:folder" label="Folder icon" defaultLabel="Folder" onChange={setIcon} disabled={mutation.isPending} /></div>} />;
+  return <NameDialog open={open} onOpenChange={(next) => { setOpen(next); if (next) { setName(folder?.name ?? ""); setIcon(folder?.icon ?? null); } else mutation.reset(); }} trigger={trigger} title={mode === "create" ? "New folder" : "Edit folder"} description="Folders organize only your personal dashboard sidebar." label="Name" inputId={`${mode}-folder-name-${folder?.id ?? "new"}`} value={name} placeholder="Infrastructure" pending={mutation.isPending} error={mutation.error} action={mode === "create" ? "Create folder" : "Save folder"} onChange={setName} onSubmit={() => mutation.mutate()} afterInput={<div className="flex flex-col gap-2"><Label>Icon</Label><IconPicker value={icon} defaultIcon="lucide:folder" label="Folder icon" defaultLabel="Folder" onChange={setIcon} disabled={mutation.isPending} /></div>} />;
 }
 
 function NameDialog({ open, onOpenChange, trigger, title, description, label, inputId, value, placeholder, pending, error, action, onChange, onSubmit, afterInput }: { open: boolean; onOpenChange: (open: boolean) => void; trigger?: React.ReactNode; title: string; description: string; label: string; inputId: string; value: string; placeholder: string; pending: boolean; error: unknown; action: string; onChange: (value: string) => void; onSubmit: () => void; afterInput?: React.ReactNode }) {
@@ -240,7 +240,7 @@ function BuiltInFolderSection({ title, count, children }: { title: string; count
 }
 
 function FolderDisclosure({ name, icon, count, open, onToggle }: { name: string; icon: string | null; count: number; open: boolean; onToggle: () => void }) {
-  return <Button type="button" variant="ghost" size="sm" className="min-w-0 flex-1 justify-start gap-2 px-2 text-muted-foreground" aria-expanded={open} onClick={onToggle}><ChevronDown aria-hidden="true" className={cn("shrink-0 transition-transform [transition-duration:var(--motion-fast)]", !open && "-rotate-90")} /><ConnectorIcon typeIcon="lucide:folder" iconOverride={icon} size={18} /><span className="truncate">{name}</span><span className="ml-auto text-xs tabular-nums">{count}</span></Button>;
+  return <Button type="button" variant="ghost" size="sm" className="min-w-0 flex-1 justify-start gap-2 px-2 text-muted-foreground" aria-expanded={open} onClick={onToggle}><ChevronDown aria-hidden="true" className={cn("shrink-0 transition-transform [transition-duration:var(--motion-fast)]", !open && "-rotate-90")} /><AppIcon icon={icon} fallback="lucide:folder" size={18} /><span className="truncate">{name}</span><span className="ml-auto text-xs tabular-nums">{count}</span></Button>;
 }
 
 function FolderContents({ open, children }: { open: boolean; children: React.ReactNode }) {

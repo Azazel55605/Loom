@@ -50,7 +50,8 @@ pub struct ConnectorTypeRegistration {
     /// Human-facing name for the type picker.
     pub display_name: &'static str,
     /// The type's icon reference, in the `ConnectorMetadata::icon` convention
-    /// (`"brand:<key>"` or `"lucide:<name>"`).
+    /// (`"lucide:<name>"`, `"brand:<key>"`, `"tabler:<name>"`, or
+    /// `"simple-icons:<slug>"`).
     ///
     /// Snapshotted from the same default instance as the schema and other type
     /// descriptors, because the type picker draws an icon before a configured

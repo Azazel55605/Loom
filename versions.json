@@ -5,8 +5,8 @@
   "connector-tasmota": "0.1.0",
   "connector-truenas": "0.2.5",
   "connector-unifi-network": "0.9.1",
-  "web-backend": "0.3.8",
-  "web-frontend": "0.3.8",
+  "web-backend": "0.4.0",
+  "web-frontend": "0.4.0",
   "desktop": "0.3.6",
   "mobile": "0.4.6",
   "mobile-android-version-code": "046"

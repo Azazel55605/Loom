@@ -1,10 +1,23 @@
 # Third-party icons
 
-Loom vendors a small number of brand icons so a connector can be recognised at a
-glance. This document records where they come from, what their license requires,
-and exactly which files are covered.
+Loom's icon system has four sources, each named by a reference prefix. This
+document records where each comes from, what its license requires, and exactly
+which files or icons are covered.
+
+| Prefix | Source | License | How it reaches the build |
+| --- | --- | --- | --- |
+| `lucide:` | [lucide-react](https://lucide.dev) | ISC | npm dependency, curated list — [below](#the-generic-set) |
+| `brand:` | [homarr-labs/dashboard-icons](https://github.com/homarr-labs/dashboard-icons) | Apache-2.0 | Vendored SVGs — [below](#source) |
+| `tabler:` | [Tabler Icons](https://tabler.io/icons) (`@tabler/icons-react`) | MIT | npm dependency, curated list — [below](#tabler-icons) |
+| `simple-icons:` | [Simple Icons](https://simpleicons.org) | CC0-1.0 (collection; see caveat) | Vendored SVGs — [below](#simple-icons) |
+
+The names every source offers are listed in
+`packages/ui-kit/src/lib/icon-catalog.ts`; `icon-catalog.test.ts` fails if a
+vendored file, a loader, or a Tabler component drifts from that list.
 
 ## Source
+
+The `brand:` set.
 
 | | |
 | --- | --- |
@@ -47,11 +60,15 @@ well:
 > their respective owners. Icons are used for identification purposes only and
 > do not imply endorsement.
 
+The same statement applies to every brand mark Loom ships, from both the
+`brand:` and `simple-icons:` sources.
+
 A collection license does not waive third-party trademark, patent, or
-brand-guideline restrictions. That is one more reason a brand icon is attached
-to a connector *type* — the thing that genuinely integrates with that product —
-and is not offered in the per-instance icon picker, where anyone could label
-anything with anyone's mark. See `ConnectorIconPicker`.
+brand-guideline restrictions. Brand marks are offered in `IconPicker` so a
+user can label their own tile, connector, group, or folder with the product it
+represents — identification, which is what the disclaimer covers. Loom never
+uses a mark to suggest a product endorses, is affiliated with, or is part of
+Loom.
 
 ## Vendored icons
 
@@ -75,17 +92,101 @@ product and has no logo to claim.
 1. Fetch the SVG from `https://raw.githubusercontent.com/homarr-labs/dashboard-icons/main/svg/<name>.svg`.
    Verify it exists rather than assuming the path; upstream has reorganised
    before. Save it unmodified as `packages/ui-kit/src/assets/icons/brand/<key>.svg`.
-2. Add a line to `BRAND_ICONS` in `packages/ui-kit/src/components/ConnectorIcon.tsx`,
-   keyed by that filename stem. The map is written out by hand so the set is
+2. Add a line to `BRAND_ICON_LOADERS` in `packages/ui-kit/src/lib/icon-loaders.ts`
+   and to `BRAND_ICONS` in `packages/ui-kit/src/lib/icon-catalog.ts`, keyed by
+   that filename stem. The maps are written out by hand so the set is
    greppable and so each icon lands in its own lazily-loaded chunk.
 3. Add a row to the table above.
 4. Reference it from the connector's `ConnectorMetadata::icon` as `"brand:<key>"`.
 
+## Tabler Icons
+
+| | |
+| --- | --- |
+| Project | [tabler/tabler-icons](https://github.com/tabler/tabler-icons), npm package [`@tabler/icons-react`](https://www.npmjs.com/package/@tabler/icons-react) |
+| License | **MIT** — [`LICENSE`](https://github.com/tabler/tabler-icons/blob/main/LICENSE) |
+| Copyright | Copyright (c) 2020-2026 Paweł Kuna |
+| Version | `3.46.0`, pinned exactly in `packages/ui-kit/package.json` |
+| Used from | `packages/ui-kit/src/lib/tabler-icon-components.ts` |
+
+Nothing is vendored: the icons are ordinary named imports from the npm
+package, which carries its own `LICENSE` and an `@license` header in every
+module, satisfying MIT's notice requirement. The package is `sideEffects: false`
+with one ES module per icon, so the bundle contains only the ~90 icons named in
+`tabler-icon-components.ts` (in one lazily-loaded chunk), not the ~6000-icon
+library. The curated names, grouped by category (network, storage, hardware,
+security, media, home, monitoring, development, communication), are
+`TABLER_CATEGORIES` in `icon-catalog.ts`.
+
+To add one: find its kebab-case name on [tabler.io/icons](https://tabler.io/icons),
+add it to a category in `TABLER_CATEGORIES`, and add the matching `Icon…`
+import to `TABLER_COMPONENTS` — the map is typed against the catalog, so
+forgetting either half is a compile error.
+
+## Simple Icons
+
+| | |
+| --- | --- |
+| Project | [simple-icons/simple-icons](https://github.com/simple-icons/simple-icons) |
+| License | **CC0-1.0** for the collection — [`LICENSE.md`](https://github.com/simple-icons/simple-icons/blob/develop/LICENSE.md) |
+| Vendored from | The `simple-icons@16.30.0` npm package, `icons/<slug>.svg` (identical to the upstream repository's `icons/` directory at that release) |
+| Vendored into | `packages/ui-kit/src/assets/icons/simple-icons/` |
+| License copy | `packages/ui-kit/src/assets/icons/simple-icons/LICENSE.md`, verbatim from upstream |
+
+The files are **not** an npm dependency — only the SVGs are copied, the same
+pattern as the `brand:` set. CC0 imposes no attribution or notice obligation;
+the license copy and this record are kept anyway so provenance is auditable.
+The same rule applies: **do not reformat, minify, or re-optimise** a vendored
+SVG. Upstream ships each mark as a single uncoloured path; Loom colours it at
+render time with CSS (`fill: currentColor`), not by editing the file.
+
+> **Not every Simple Icon is CC0.** Upstream's
+> [`DISCLAIMER.md`](https://github.com/simple-icons/simple-icons/blob/develop/DISCLAIMER.md)
+> is explicit that the CC0 collection license does not imply every icon is
+> CC0: individual icons may carry their own license, recorded in the `license`
+> field of the package's `data/simple-icons.json`. **Every icon below was
+> checked against that file at `16.30.0` and has no `license` entry.** Icons
+> that did — Deluge (GPL-3.0-only), Authelia (Apache-2.0), Keycloak (custom
+> trademark terms), Forgejo (CC-BY-SA-4.0), Jenkins (CC-BY-SA-3.0), Debian
+> (CC-BY-SA-3.0) — were deliberately left out. Re-check the field for any icon
+> you add or refresh; upstream notes the data can change.
+
+Upstream also asks users to respect each brand's own guidelines; where
+Simple Icons records a guidelines link it is marked **G** below. Loom renders
+these marks unaltered in shape, monochrome, at icon size, for identification
+only — see the [disclaimer](#disclaimer), which applies to these marks too.
+
+Brands already vendored under `brand:` (Docker, Pi-hole, TrueNAS, and UniFi —
+Simple Icons' `ubiquiti`) are deliberately **not** duplicated here, so one
+product never has two competing marks.
+
+| Category | Icons (filename stem = slug) |
+| --- | --- |
+| Media | `jellyfin` (G), `plex` (G), `emby`, `kodi`, `sonarr`, `radarr`, `audiobookshelf` |
+| Downloads | `qbittorrent`, `transmission` |
+| Files & storage | `nextcloud` (G), `syncthing`, `immich`, `paperlessngx`, `minio` (G), `synology` (G), `unraid`, `openmediavault` |
+| Home automation | `homeassistant` (G), `nodered`, `mqtt`, `zigbee2mqtt`, `esphome`, `frigate`, `octoprint` |
+| Monitoring | `grafana`, `prometheus`, `influxdb` (G), `uptimekuma`, `netdata` |
+| Containers & virtualisation | `portainer`, `proxmox` (G), `kubernetes`, `podman` |
+| Proxy & web | `traefikproxy`, `nginx` (G), `nginxproxymanager`, `caddy`, `cloudflare` (G) |
+| Network & VPN | `tailscale`, `wireguard` (G), `openvpn` (G), `zerotier` (G), `adguard`, `pfsense`, `opnsense`, `openwrt` (G), `mikrotik` |
+| Security | `vaultwarden`, `bitwarden` (G) |
+| Development | `gitea`, `gitlab` (G) |
+| Databases | `postgresql` (G), `mariadb` (G), `redis` (G) |
+| Hardware | `raspberrypi` (G) |
+
+To add one: confirm the slug exists and has **no** `license` field in
+`data/simple-icons.json` for the version you copy from, copy
+`icons/<slug>.svg` unmodified into the directory above, add it to
+`SIMPLE_ICON_LOADERS` (`icon-loaders.ts`) and `SIMPLE_ICONS`
+(`icon-catalog.ts`), and add it to the table above.
+
 ## The generic set
 
-The other half of the icon system is `GENERIC_ICONS` in
-`packages/ui-kit/src/lib/generic-icons.ts` — a curated sixteen from
+The `lucide:` source is `GENERIC_ICONS` in
+`packages/ui-kit/src/lib/generic-icons.ts` — a curated twenty from
 [lucide-react](https://lucide.dev), which is ISC-licensed and already a direct
 dependency of the ui-kit. Nothing is vendored for those; they are ordinary
-component imports. They are what a `"lucide:<name>"` reference resolves against
-and what the per-instance icon picker offers.
+component imports. They are what a `"lucide:<name>"` reference resolves against,
+the set connector authors write against, and the "Default" section of
+`IconPicker`.

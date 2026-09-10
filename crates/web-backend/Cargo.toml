@@ -3,7 +3,7 @@ name = "loom-web-backend"
 description = "The Loom server: the one running daemon, and the only thing clients talk to."
 edition.workspace = true
 license.workspace = true
-version = "0.3.8"
+version = "0.4.0"
 repository.workspace = true
 rust-version.workspace = true
 

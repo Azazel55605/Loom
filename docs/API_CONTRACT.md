@@ -4329,17 +4329,23 @@ revised without a platform bump.
 
 #### Icon references
 
-An icon string, wherever one appears in this document, takes exactly one of two
+An icon string, wherever one appears in this document, takes exactly one of four
 prefixed forms:
 
 | Form | Resolves to | Example |
 | --- | --- | --- |
-| `brand:<key>` | An SVG vendored by the client, `<key>` matching the vendored file's name without its extension. See [`THIRD_PARTY_ICONS.md`](./THIRD_PARTY_ICONS.md) for what the web client has vendored and under which license. | `"brand:docker"` |
 | `lucide:<name>` | One member of the client's curated generic icon set, `<name>` in **kebab-case**. | `"lucide:hard-drive"` |
+| `brand:<key>` | A `dashboard-icons` SVG vendored by the client, `<key>` matching the vendored file's name without its extension. | `"brand:docker"` |
+| `tabler:<name>` | One member of the client's curated Tabler Icons subset, `<name>` in Tabler's own **kebab-case** naming. | `"tabler:server-2"` |
+| `simple-icons:<slug>` | A Simple Icons SVG vendored by the client, `<slug>` matching the vendored file's name without its extension. | `"simple-icons:jellyfin"` |
 
-Kebab-case because that is what lucide's own catalog uses; PascalCase is a
-detail of one client library's component exports, and a wire format does not get
-to depend on it.
+See [`THIRD_PARTY_ICONS.md`](./THIRD_PARTY_ICONS.md) for what the web client has
+vendored and under which license. Every user-settable icon field (`iconOverride`,
+placement and group `icon`, dashboard folder `icon`) accepts all four forms.
+
+Kebab-case because that is what lucide's and Tabler's own catalogs use;
+PascalCase is a detail of one client library's component exports, and a wire
+format does not get to depend on it.
 
 **The backend never validates an icon reference.** It stores and returns the
 string. Resolution *and fallback* are entirely client-side, because only a

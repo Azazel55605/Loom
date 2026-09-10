@@ -9,11 +9,12 @@
  * declare two module patterns we can spell out in eight lines.
  *
  * All three consuming apps are Vite-based, so `?raw` and `?url` resolve
- * identically in each. See `components/ConnectorIcon.tsx` for the only use.
+ * identically in each. See `lib/icon-loaders.ts` for the only use.
  */
 
-/** The file's text, inlined at build time. Used for brand SVGs, which are
- *  rendered inline so they can be sized by their container. */
+/** The file's text, inlined at build time. Used for the vendored brand and
+ *  Simple Icons SVGs, which are rendered inline so they can be sized by
+ *  their container. */
 declare module "*.svg?raw" {
   const content: string;
   export default content;

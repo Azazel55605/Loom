@@ -26,7 +26,7 @@ import {
 import { Input } from "@loom/ui-kit/components/ui/input";
 import { Label } from "@loom/ui-kit/components/ui/label";
 import { ConnectorIcon } from "@loom/ui-kit/components/ConnectorIcon";
-import { GenericIconPicker } from "@loom/ui-kit/components/GenericIconPicker";
+import { IconPicker } from "@loom/ui-kit/components/IconPicker";
 import {
   DRAG_HANDLE_CLASS,
   PlacementTile,
@@ -272,7 +272,7 @@ export function GroupTile({
             </div>
             <div className="space-y-2">
               <Label>Icon</Label>
-              <GenericIconPicker
+              <IconPicker
                 label="Group icon"
                 value={icon}
                 defaultIcon="lucide:boxes"
