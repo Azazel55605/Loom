@@ -2,10 +2,8 @@ import { appDataDir, join } from "@tauri-apps/api/path";
 import { Stronghold, type Store as StrongholdStore } from "@tauri-apps/plugin-stronghold";
 
 import { mobileSettingsStore } from "@/adapters/mobileSettings";
-import type {
-  StoredTokens,
-  TokenStorageAdapter,
-} from "@loom/ui-kit/lib/token-store";
+import { mobileServerProfileManager } from "@/adapters/mobileServerProfileManager";
+import { ProfileTokenStorage } from "@loom/ui-kit/lib/profile-token-storage";
 
 const VAULT_KEY_SETTING = "strongholdVaultKey";
 const SNAPSHOT_FILENAME = "loom-mobile.hold";
@@ -60,48 +58,27 @@ async function vaultRuntime(): Promise<VaultRuntime> {
   return vaultPromise;
 }
 
-function parseStoredTokens(value: Uint8Array | null): StoredTokens | null {
-  if (value === null) return null;
-
-  try {
-    const parsed = JSON.parse(new TextDecoder().decode(value)) as Partial<StoredTokens>;
-    if (
-      typeof parsed.accessToken === "string" &&
-      typeof parsed.refreshToken === "string" &&
-      typeof parsed.expiresAt === "string"
-    ) {
-      return parsed as StoredTokens;
-    }
-  } catch {
-    // A corrupt vault record is treated as signed out and removed below.
-  }
-
-  return null;
-}
-
-/** Auth tokens are encrypted in a Stronghold snapshot, never Tauri Store. */
-export const mobileTokenStorage: TokenStorageAdapter = {
-  async getTokens() {
-    const runtime = await vaultRuntime();
-    const value = await runtime.store.get(TOKEN_RECORD);
-    const tokens = parseStoredTokens(value);
-    if (value !== null && tokens === null) {
-      await runtime.store.remove(TOKEN_RECORD);
+/** Auth tokens remain encrypted in Stronghold and are isolated by profile id. */
+export const mobileTokenStorage = new ProfileTokenStorage(
+  mobileServerProfileManager,
+  {
+    async get(key) {
+      const value = await (await vaultRuntime()).store.get(key);
+      return value === null ? null : new TextDecoder().decode(value);
+    },
+    async set(key, value) {
+      const runtime = await vaultRuntime();
+      const encoded = new TextEncoder().encode(value);
+      await runtime.store.insert(key, Array.from(encoded));
       await runtime.stronghold.save();
-    }
-    return tokens;
+    },
+    async remove(key) {
+      const runtime = await vaultRuntime();
+      await runtime.store.remove(key);
+      await runtime.stronghold.save();
+    },
   },
+  TOKEN_RECORD,
+);
 
-  async setTokens(tokens) {
-    const runtime = await vaultRuntime();
-    const encoded = new TextEncoder().encode(JSON.stringify(tokens));
-    await runtime.store.insert(TOKEN_RECORD, Array.from(encoded));
-    await runtime.stronghold.save();
-  },
-
-  async clearTokens() {
-    const runtime = await vaultRuntime();
-    await runtime.store.remove(TOKEN_RECORD);
-    await runtime.stronghold.save();
-  },
-};
+mobileServerProfileManager.setTokenCleaner(mobileTokenStorage);
