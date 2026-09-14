@@ -15,6 +15,7 @@ import {
 import { Skeleton } from "@loom/ui-kit/components/ui/skeleton";
 import type {
   DataPointDescriptor,
+  DataPointValueType,
   ScreensaverDataPoint,
 } from "@loom/ui-kit/lib/api";
 import { useApiClient } from "@loom/ui-kit/lib/api-context";
@@ -42,6 +43,7 @@ export function DataPointPicker({
   onChange,
   fixedContext,
   disabled,
+  allowedValueTypes,
   idPrefix = "data-point",
   className,
 }: {
@@ -49,6 +51,8 @@ export function DataPointPicker({
   onChange: (value: ScreensaverDataPoint | null) => void;
   fixedContext?: FixedDataPointContext;
   disabled?: boolean;
+  /** Optional descriptor-type filter for focused uses such as Boolean state. */
+  allowedValueTypes?: readonly DataPointValueType[];
   idPrefix?: string;
   className?: string;
 }) {
@@ -91,7 +95,11 @@ export function DataPointPicker({
       detail.data?.supportsSubTargets === true,
   });
 
-  const dataPoints = fixedContext?.dataPoints ?? detail.data?.dataPoints ?? [];
+  const allDataPoints = fixedContext?.dataPoints ?? detail.data?.dataPoints ?? [];
+  const dataPoints =
+    allowedValueTypes === undefined
+      ? allDataPoints
+      : allDataPoints.filter((point) => allowedValueTypes.includes(point.valueType));
   const availableDataPoints = dataPoints.filter((point) => matchesTarget(point, draftTargetId));
   const selectedDataPointId =
     value !== null &&

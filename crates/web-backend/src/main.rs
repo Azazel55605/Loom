@@ -1524,7 +1524,7 @@ mod tests {
             tasmota["configSchema"]["required"],
             serde_json::json!(["host"])
         );
-        assert_eq!(tasmota["setupGuide"], serde_json::Value::Null);
+        assert_eq!(tasmota["setupGuide"]["variants"][0]["id"], "device-address");
         assert_eq!(tasmota["discoverableType"], serde_json::Value::Null);
 
         let unifi = by_id("unifi-network");

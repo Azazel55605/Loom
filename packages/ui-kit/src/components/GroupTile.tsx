@@ -218,6 +218,11 @@ export function GroupTile({
                 live={
                   member.connector === null ? undefined : live[member.connector.id]
                 }
+                actionLive={
+                  member.placementAction?.type === "connectorAction"
+                    ? live[member.placementAction.connectorInstanceId]
+                    : undefined
+                }
                 editing={editing}
                 onEditBindings={onEditBindings}
                 onNavigateDashboard={onNavigateDashboard}

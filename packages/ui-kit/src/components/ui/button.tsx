@@ -14,6 +14,13 @@ const buttonVariants = cva(
         outline:
           "border border-input bg-transparent shadow-sm hover:bg-muted hover:text-foreground",
         secondary: "bg-muted text-muted-foreground shadow-sm hover:bg-muted/80",
+        success:
+          "bg-status-healthy text-status-foreground shadow-sm hover:bg-status-healthy/90",
+        warning:
+          "bg-status-degraded text-status-foreground shadow-sm hover:bg-status-degraded/90",
+        error: "bg-status-down text-status-foreground shadow-sm hover:bg-status-down/90",
+        neutral:
+          "bg-status-unknown text-status-foreground shadow-sm hover:bg-status-unknown/90",
         ghost: "hover:bg-muted hover:text-foreground",
         link: "text-primary underline-offset-4 hover:underline",
       },

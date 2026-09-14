@@ -19,8 +19,16 @@ import { Alert, AlertDescription } from "@loom/ui-kit/components/ui/alert";
 import { ConnectorDetailModal } from "@loom/ui-kit/components/ConnectorDetailModal";
 import { ConnectorReconnectButton } from "@loom/ui-kit/components/ConnectorReconnectButton";
 import { Button } from "@loom/ui-kit/components/ui/button";
+import { Badge } from "@loom/ui-kit/components/ui/badge";
 import { Card, CardContent, CardHeader } from "@loom/ui-kit/components/ui/card";
 import { Checkbox } from "@loom/ui-kit/components/ui/checkbox";
+import { Switch } from "@loom/ui-kit/components/ui/switch";
+import {
+  Tooltip,
+  TooltipContent,
+  TooltipProvider,
+  TooltipTrigger,
+} from "@loom/ui-kit/components/ui/tooltip";
 import { Skeleton } from "@loom/ui-kit/components/ui/skeleton";
 import {
   ApiError,
@@ -30,6 +38,7 @@ import {
   type ConnectorStatus,
   type DashboardPlacement,
   type PendingOperation,
+  type StateButtonColor,
 } from "@loom/ui-kit/lib/api";
 import { PlacementClickSurface, usePlacementClick } from "@loom/ui-kit/components/PlacementClick";
 import { connectorAvailability } from "@loom/ui-kit/lib/connector-availability";
@@ -48,6 +57,7 @@ import { hasPermission, PERMISSION_KEYS } from "@loom/ui-kit/lib/permissions";
 import { useRetainedStatusDetails } from "@loom/ui-kit/lib/use-retained-status-details";
 import { renderWidget } from "@loom/ui-kit/widgets/renderWidget";
 import { UpdatesSummary, UPDATES_KIND } from "@loom/ui-kit/components/UpdatesSummary";
+import { AppIcon } from "@loom/ui-kit/components/AppIcon";
 
 /** The live reading for one instance, as pushed over the status socket. */
 export type LiveStatus = {
@@ -90,6 +100,7 @@ export function PlacementTile({
   dashboardId,
   placement,
   live,
+  actionLive,
   editing,
   onEditBindings,
   onDelete,
@@ -106,6 +117,8 @@ export function PlacementTile({
   /** The latest pushed reading, or `undefined` before the first frame — in
    *  which case the placement's own snapshot is used. */
   live?: LiveStatus;
+  /** The pushed reading for the connector invoked by a state-aware action. */
+  actionLive?: LiveStatus;
   /** Whether the dashboard is in layout-edit mode. Owner/Editor only. */
   editing: boolean;
   onEditBindings: (placement: DashboardPlacement) => void;
@@ -139,6 +152,7 @@ export function PlacementTile({
     dashboardId,
     placement,
     live,
+    actionLive,
     editing,
     onEditBindings,
     onDelete,
@@ -171,6 +185,9 @@ type PlacementTileProps = {
   dashboardId: string;
   placement: DashboardPlacement;
   live?: LiveStatus;
+  /** Live reading for the connector named by `placementAction`, which can be
+   * different from the connector whose widgets this tile displays. */
+  actionLive?: LiveStatus;
   editing: boolean;
   onEditBindings: (placement: DashboardPlacement) => void;
   onDelete?: (placement: DashboardPlacement) => void;
@@ -201,6 +218,7 @@ function ConnectorPlacementTile({
   placement,
   connector: instance,
   live,
+  actionLive,
   editing,
   onEditBindings,
   onDelete,
@@ -359,10 +377,11 @@ function ConnectorPlacementTile({
       : undefined;
 
   const click = usePlacementClick({ dashboardId, placement, onNavigateDashboard });
+  const stateAwareAction = isStateAwareConnectorAction(placement);
   // Never while rearranging, for the same reason every action widget goes dead
   // there: a press meant to grab a card must not change the page underneath a
   // drag. Grouping-selection mode owns the click too.
-  const clickable = click.clickable && !editing && !grouping;
+  const clickable = click.clickable && !stateAwareAction && !editing && !grouping;
 
   // A tile whose only binding is a resource kind *is* that table. Wrapping it
   // in the auto-fit widget grid would put a scrollable table inside a
@@ -594,6 +613,15 @@ function ConnectorPlacementTile({
           />
         )}
 
+        {stateAwareAction ? (
+          <StateAwarePlacementControl
+            dashboardId={dashboardId}
+            placement={placement}
+            live={actionLive}
+            disabled={editing || grouping}
+          />
+        ) : null}
+
         {detail.isError ? (
           <Alert variant="destructive">
             <AlertCircle aria-hidden="true" />
@@ -682,6 +710,7 @@ function ConnectorPlacementTile({
 function StaticPlacementTile({
   dashboardId,
   placement,
+  actionLive,
   editing,
   onEditBindings,
   onDelete,
@@ -693,7 +722,8 @@ function StaticPlacementTile({
   groupMember,
 }: PlacementTileProps) {
   const click = usePlacementClick({ dashboardId, placement, onNavigateDashboard });
-  const clickable = click.clickable && !editing && !grouping;
+  const stateAwareAction = isStateAwareConnectorAction(placement);
+  const clickable = click.clickable && !stateAwareAction && !editing && !grouping;
   const label = placement.label ?? describePlacementAction(placement);
 
   return (
@@ -810,7 +840,14 @@ function StaticPlacementTile({
         ) : null}
 
         <CardContent className="flex min-h-0 flex-1 flex-col items-center justify-center gap-2 p-3 text-center">
-          {click.pending ? (
+          {stateAwareAction ? (
+            <StateAwarePlacementControl
+              dashboardId={dashboardId}
+              placement={placement}
+              live={actionLive}
+              disabled={editing || grouping}
+            />
+          ) : click.pending ? (
             <Loader2 className="h-6 w-6 animate-spin text-muted-foreground" aria-hidden="true" />
           ) : (
             <ConnectorIcon
@@ -829,6 +866,150 @@ function StaticPlacementTile({
         </CardContent>
       </Card>
     </PlacementClickSurface>
+  );
+}
+
+function isStateAwareConnectorAction(placement: DashboardPlacement): boolean {
+  return (
+    placement.placementAction?.type === "connectorAction" &&
+    placement.placementAction.stateDataPointId != null
+  );
+}
+
+const STATE_BUTTON_VARIANT: Record<
+  StateButtonColor,
+  "success" | "warning" | "error" | "neutral"
+> = {
+  success: "success",
+  warning: "warning",
+  error: "error",
+  neutral: "neutral",
+};
+
+/**
+ * A state-aware placement reads the connector named by the action rather than
+ * assuming it is the connector drawn by the tile. DashboardView subscribes to
+ * both sets of ids through its one reference-counted socket; the detail query
+ * provides an initial snapshot while the first pushed reading is in flight.
+ */
+function StateAwarePlacementControl({
+  dashboardId,
+  placement,
+  live,
+  disabled,
+}: {
+  dashboardId: string;
+  placement: DashboardPlacement;
+  live?: LiveStatus;
+  disabled: boolean;
+}) {
+  const api = useApiClient();
+  const { user } = useAuth();
+  const action = placement.placementAction;
+  const click = usePlacementClick({ dashboardId, placement });
+  const instanceId = action?.type === "connectorAction" ? action.connectorInstanceId : "";
+  const detail = useQuery({
+    queryKey: ["connector-instance", instanceId],
+    queryFn: ({ signal }) => api.getConnectorInstance(instanceId, signal),
+    enabled: instanceId !== "",
+    staleTime: 30_000,
+  });
+
+  if (action?.type !== "connectorAction" || action.stateDataPointId == null) return null;
+
+  const status = live === undefined ? (detail.data?.status ?? null) : live.status;
+  const pendingOperation =
+    live === undefined ? (detail.data?.pendingOperation ?? null) : (live.pendingOperation ?? null);
+  const details = statusDetailsForTarget(status?.details, action.stateTargetId ?? null);
+  const rawState = details[action.stateDataPointId];
+  const currentState = typeof rawState === "boolean" ? rawState : null;
+  const canControl = hasPermission(
+    user?.permissions ?? [],
+    PERMISSION_KEYS.connectorsControl,
+  );
+  const unavailableReason =
+    (!canControl
+      ? "You do not have permission to control this connector."
+      : detail.isError
+        ? describeConnectorError(detail.error)
+        : detail.isPending || status === null
+      ? "Waiting for the connector's current state."
+      : currentState === null
+        ? "The connector's current state is unavailable."
+        : null);
+  const controlDisabled = disabled || unavailableReason !== null || click.pending;
+
+  const control =
+    action.renderStyle === "stateButton" && action.stateButtonDisplay != null ? (
+      <Button
+        type="button"
+        variant={
+          currentState === null
+            ? "neutral"
+            : STATE_BUTTON_VARIANT[
+                (currentState
+                  ? action.stateButtonDisplay.whenTrue.color
+                  : action.stateButtonDisplay.whenFalse.color) ?? "neutral"
+              ]
+        }
+        disabled={controlDisabled}
+        aria-busy={click.pending || undefined}
+        onClick={() => click.run()}
+      >
+        {click.pending ? (
+          <Loader2 className="animate-spin" aria-hidden="true" />
+        ) : (
+          <AppIcon
+            icon={
+              currentState === null
+                ? "lucide:power"
+                : currentState
+                  ? action.stateButtonDisplay.whenTrue.icon
+                  : action.stateButtonDisplay.whenFalse.icon
+            }
+            size={16}
+            className="!text-status-foreground"
+          />
+        )}
+        {currentState === null
+          ? "State unavailable"
+          : currentState
+            ? action.stateButtonDisplay.whenTrue.label
+            : action.stateButtonDisplay.whenFalse.label}
+      </Button>
+    ) : (
+      <div className="flex min-h-[var(--touch-target-size)] items-center gap-3">
+        <Switch
+          checked={currentState ?? false}
+          disabled={controlDisabled}
+          aria-label={placement.label ?? "Toggle state"}
+          aria-busy={click.pending || undefined}
+          onCheckedChange={() => click.run()}
+        />
+        <span className="text-sm font-medium">
+          {currentState === null ? "State unavailable" : currentState ? "On" : "Off"}
+        </span>
+      </div>
+    );
+
+  return (
+    <div className="loom-grid-control flex flex-col items-center gap-2" onClick={(event) => event.stopPropagation()}>
+      {pendingOperation === null ? null : (
+        <Badge variant="pending">Performing: {pendingOperation.actionLabel}</Badge>
+      )}
+      {unavailableReason === null ? (
+        control
+      ) : (
+        <TooltipProvider>
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <span className="inline-flex" tabIndex={0}>{control}</span>
+            </TooltipTrigger>
+            <TooltipContent>{unavailableReason}</TooltipContent>
+          </Tooltip>
+        </TooltipProvider>
+      )}
+    </div>
   );
 }
 

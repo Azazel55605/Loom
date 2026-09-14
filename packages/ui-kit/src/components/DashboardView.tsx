@@ -376,9 +376,13 @@ export function DashboardView({
   const instanceIds = React.useMemo(
     () => [
       ...new Set(
-        allPlacements.flatMap((placement) =>
-          placement.connector === null ? [] : [placement.connector.id],
-        ),
+        allPlacements.flatMap((placement) => {
+          const ids = placement.connector === null ? [] : [placement.connector.id];
+          if (placement.placementAction?.type === "connectorAction") {
+            ids.push(placement.placementAction.connectorInstanceId);
+          }
+          return ids;
+        }),
       ),
     ],
     [allPlacements],
@@ -905,6 +909,11 @@ export function DashboardView({
                       placement.connector === null
                         ? undefined
                         : live[placement.connector.id]
+                    }
+                    actionLive={
+                      placement.placementAction?.type === "connectorAction"
+                        ? live[placement.placementAction.connectorInstanceId]
+                        : undefined
                     }
                     editing={editingLayout}
                     onEditBindings={setBindingsFor}

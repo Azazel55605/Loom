@@ -1275,7 +1275,7 @@ dependencies = [
 
 [[package]]
 name = "loom-connector-tasmota"
-version = "0.1.0"
+version = "0.1.5"
 dependencies = [
  "async-trait",
  "loom-connector-test-kit",

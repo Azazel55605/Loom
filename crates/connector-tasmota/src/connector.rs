@@ -1,8 +1,9 @@
 use async_trait::async_trait;
 use loom_core::connector::{
-    details::set_detail, ActionResult, ActionWidgetType, ConnectorAction, ConnectorError,
-    ConnectorMetadata, ConnectorStatus, DataPointDescriptor, DataPointValueType, DisplayField,
-    DisplayWidgetType, HealthState, NetworkTarget, WidgetBinding, WidgetLayout,
+    details::set_detail, ActionResult, ActionWidgetType, CapabilityStatus, ConnectionTestResult,
+    ConnectorAction, ConnectorError, ConnectorMetadata, ConnectorStatus, DataPointDescriptor,
+    DataPointValueType, DisplayField, DisplayWidgetType, HealthState, NetworkTarget, SetupGuide,
+    SetupGuideVariant, WidgetBinding, WidgetLayout,
 };
 use serde_json::{json, Map, Value};
 
@@ -21,6 +22,29 @@ pub const DATA_POINT_VOLTAGE_VOLTS: &str = "voltageVolts";
 pub const DATA_POINT_CURRENT_AMPS: &str = "currentAmps";
 pub const DATA_POINT_ENERGY_TODAY_KWH: &str = "energyTodayKwh";
 pub const ACTION_SET_POWER: &str = "setPower";
+
+pub const CAPABILITY_READ_POWER_STATE: &str = "readPowerState";
+pub const CAPABILITY_READ_WIFI_SIGNAL: &str = "readWifiSignal";
+pub const CAPABILITY_READ_UPTIME: &str = "readUptime";
+pub const CAPABILITY_READ_ENERGY: &str = "readEnergy";
+pub const CAPABILITY_SET_POWER: &str = ACTION_SET_POWER;
+
+/// Setup instructions published with the connector type catalog.
+pub fn setup_guide() -> SetupGuide {
+    SetupGuide {
+        variants: vec![SetupGuideVariant {
+            id: "device-address".to_owned(),
+            label: "Connect to your Tasmota device".to_owned(),
+            description: "Find the device's IP address in your router's client list, or on the device's own display or status screen when it has one, and enter that address in Loom's Host field. If you configured an admin password in the Tasmota web interface under Configuration > Configure Other, enter it in the Password field; otherwise leave Password blank. Keep Loom and the device on a trusted local network because Tasmota's command API uses HTTP."
+                .to_owned(),
+            // Device discovery and password configuration are instruction-only
+            // steps, so the shared guide UI omits an empty template surface.
+            template: String::new(),
+            toggles: Vec::new(),
+            capability_requirements: Vec::new(),
+        }],
+    }
+}
 
 /// One configured Tasmota smart plug.
 pub struct TasmotaConnector {
@@ -44,6 +68,21 @@ impl TasmotaConnector {
             config,
             client,
             supports_energy: initial.energy.is_some(),
+        })
+    }
+
+    /// Builds a candidate for Test Connection without doing network I/O.
+    pub fn from_config_value_for_connection_test(value: Value) -> Result<Self, ConnectorError> {
+        let config = TasmotaConnectorConfig::from_value(value)?;
+        let username = config.password.as_ref().map(|_| "admin");
+        let client = TasmotaClient::connect(&config.host, username, config.password.as_deref())
+            .map_err(connector_error)?;
+        Ok(Self {
+            config,
+            client,
+            // The real Status 0 response decides this inside test_connection;
+            // this placeholder is never inserted into the runtime map.
+            supports_energy: false,
         })
     }
 
@@ -82,6 +121,19 @@ impl loom_core::connector::Connector for TasmotaConnector {
                 Ok(ConnectorStatus::new(HealthState::Down, details)
                     .with_target_health(String::new(), HealthState::Down))
             }
+        }
+    }
+
+    async fn test_connection(&self) -> ConnectionTestResult {
+        match self.client.status().await {
+            Ok(status) => connection_test_from_status(&status),
+            Err(error) => ConnectionTestResult {
+                reachable: false,
+                capabilities: Vec::new(),
+                // TasmotaError preserves authentication failures separately
+                // from transport failures, so setup receives the real cause.
+                message: Some(error.to_string()),
+            },
         }
     }
 
@@ -136,6 +188,10 @@ impl loom_core::connector::Connector for TasmotaConnector {
 
     fn config_schema(&self) -> Value {
         crate::config_schema()
+    }
+
+    fn setup_guide(&self) -> Option<SetupGuide> {
+        Some(setup_guide())
     }
 
     fn metadata(&self) -> ConnectorMetadata {
@@ -221,6 +277,42 @@ impl loom_core::connector::Connector for TasmotaConnector {
 
     fn network_target(&self) -> Option<NetworkTarget> {
         self.config.network_target()
+    }
+}
+
+fn connection_test_from_status(status: &crate::TasmotaStatus) -> ConnectionTestResult {
+    let mut capabilities = vec![
+        available_capability(CAPABILITY_READ_POWER_STATE, "Read power state"),
+        available_capability(CAPABILITY_READ_WIFI_SIGNAL, "Read Wi-Fi signal"),
+        available_capability(CAPABILITY_READ_UPTIME, "Read uptime"),
+    ];
+    if status.energy.is_some() {
+        capabilities.push(available_capability(
+            CAPABILITY_READ_ENERGY,
+            "Read energy monitoring",
+        ));
+    }
+    capabilities.push(available_capability(CAPABILITY_SET_POWER, "Control power"));
+
+    ConnectionTestResult {
+        reachable: true,
+        capabilities,
+        message: Some(if status.energy.is_some() {
+            "Connected successfully and verified power state, Wi-Fi signal, uptime, and energy monitoring. Power control is available with this authenticated session."
+                .to_owned()
+        } else {
+            "Connected successfully and verified power state, Wi-Fi signal, and uptime. This device did not report energy monitoring; power control is available with this authenticated session."
+                .to_owned()
+        }),
+    }
+}
+
+fn available_capability(key: &str, label: &str) -> CapabilityStatus {
+    CapabilityStatus {
+        key: key.to_owned(),
+        label: label.to_owned(),
+        available: true,
+        note: None,
     }
 }
 
@@ -311,5 +403,57 @@ mod tests {
                 WidgetBinding::Action { action_id, .. } => action_id == ACTION_SET_POWER,
                 WidgetBinding::ResourceKindDisplay { .. } => false,
             }));
+    }
+
+    #[test]
+    fn setup_guide_explains_address_and_optional_password_without_a_template() {
+        let guide = setup_guide();
+        assert_eq!(guide.variants.len(), 1);
+        let variant = &guide.variants[0];
+        assert_eq!(variant.label, "Connect to your Tasmota device");
+        assert!(variant.description.contains("router's client list"));
+        assert!(variant
+            .description
+            .contains("Configuration > Configure Other"));
+        assert!(variant.description.contains("leave Password blank"));
+        assert!(variant.template.is_empty());
+        assert!(variant.toggles.is_empty());
+        assert!(variant.capability_requirements.is_empty());
+    }
+
+    #[test]
+    fn connection_test_reports_energy_only_when_the_device_does() {
+        let without_energy = crate::TasmotaStatus {
+            power_state: true,
+            wifi_signal_percent: 72.0,
+            uptime: "1T02:03:04".to_owned(),
+            firmware_version: "fixture".to_owned(),
+            energy: None,
+        };
+        let without = connection_test_from_status(&without_energy);
+        assert!(without.reachable);
+        assert!(!without
+            .capabilities
+            .iter()
+            .any(|capability| capability.key == CAPABILITY_READ_ENERGY));
+
+        let with = connection_test_from_status(&crate::TasmotaStatus {
+            energy: Some(EnergyReading {
+                power_watts: Some(3.5),
+                voltage_volts: Some(230.0),
+                current_amps: Some(0.02),
+                today_kwh: Some(0.1),
+                total_kwh: Some(4.2),
+            }),
+            ..without_energy
+        });
+        assert!(with
+            .capabilities
+            .iter()
+            .any(|capability| capability.key == CAPABILITY_READ_ENERGY));
+        assert!(with
+            .capabilities
+            .iter()
+            .any(|capability| capability.key == CAPABILITY_SET_POWER));
     }
 }

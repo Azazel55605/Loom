@@ -6,8 +6,9 @@
 //! it changes a real relay briefly, then makes a best-effort restoration.
 
 use loom_connector_tasmota::{
-    TasmotaConnector, ACTION_SET_POWER, DATA_POINT_FIRMWARE_VERSION, DATA_POINT_POWER_STATE,
-    DATA_POINT_UPTIME, DATA_POINT_WIFI_SIGNAL_PERCENT,
+    TasmotaConnector, ACTION_SET_POWER, CAPABILITY_READ_POWER_STATE, CAPABILITY_READ_UPTIME,
+    CAPABILITY_READ_WIFI_SIGNAL, CAPABILITY_SET_POWER, DATA_POINT_FIRMWARE_VERSION,
+    DATA_POINT_POWER_STATE, DATA_POINT_UPTIME, DATA_POINT_WIFI_SIGNAL_PERCENT,
 };
 use loom_core::connector::{Connector, HealthState};
 use serde_json::{json, Value};
@@ -38,6 +39,23 @@ async fn a_real_tasmota_reports_status_and_obeys_the_contract() {
         .data_point_value(DATA_POINT_FIRMWARE_VERSION)
         .and_then(Value::as_str)
         .is_some_and(|value| !value.is_empty()));
+
+    let connection = connector.test_connection().await;
+    assert!(connection.reachable, "{connection:#?}");
+    for expected in [
+        CAPABILITY_READ_POWER_STATE,
+        CAPABILITY_READ_WIFI_SIGNAL,
+        CAPABILITY_READ_UPTIME,
+        CAPABILITY_SET_POWER,
+    ] {
+        assert!(
+            connection
+                .capabilities
+                .iter()
+                .any(|capability| capability.key == expected && capability.available),
+            "missing live capability {expected}: {connection:#?}"
+        );
+    }
 
     loom_connector_test_kit::assert_connector_contract(&connector, &[None]).await;
     eprintln!("{test_name}: {:#}", status.details);

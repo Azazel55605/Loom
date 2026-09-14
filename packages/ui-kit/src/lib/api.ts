@@ -733,7 +733,37 @@ export type PlacementAction =
       /** The action's parameters, chosen when the tile was configured rather
        *  than prompted for at click time. */
       params: unknown;
+      /** Boolean reading used by the server to select a transition action. */
+      stateDataPointId?: string | null;
+      /** Target that owns the state reading; independent of the action target. */
+      stateTargetId?: string | null;
+      /** How clients present a state-aware action. */
+      renderStyle?: "switch" | "stateButton" | null;
+      /** Invoked when the current cached state is false. */
+      toTrue?: PlacementActionTransition | null;
+      /** Invoked when the current cached state is true. */
+      toFalse?: PlacementActionTransition | null;
+      /** Per-state presentation for the state-button style. */
+      stateButtonDisplay?: StateButtonDisplay | null;
     };
+
+export type PlacementActionTransition = {
+  actionId: string;
+  params: unknown;
+};
+
+export type StateButtonColor = "success" | "warning" | "error" | "neutral";
+
+export type StateButtonDisplayState = {
+  label: string;
+  icon: string;
+  color: StateButtonColor | null;
+};
+
+export type StateButtonDisplay = {
+  whenTrue: StateButtonDisplayState;
+  whenFalse: StateButtonDisplayState;
+};
 
 /** The `navigate` arm's success body from `clickPlacement`. */
 export type PlacementNavigateResult = { targetDashboardId: string };

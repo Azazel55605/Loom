@@ -3,7 +3,7 @@ name = "loom-connector-tasmota"
 description = "Loom connector for a Tasmota smart plug over its HTTP command API."
 edition.workspace = true
 license.workspace = true
-version = "0.1.0"
+version = "0.1.5"
 repository.workspace = true
 rust-version.workspace = true
 

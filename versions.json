@@ -2,11 +2,11 @@
   "core": "0.3.0",
   "connector-docker": "0.6.0",
   "connector-pihole": "0.4.0",
-  "connector-tasmota": "0.1.0",
+  "connector-tasmota": "0.1.5",
   "connector-truenas": "0.2.5",
   "connector-unifi-network": "0.9.1",
   "web-backend": "0.4.8",
-  "web-frontend": "0.4.5",
+  "web-frontend": "0.4.8",
   "desktop": "0.3.8",
   "mobile": "0.4.8",
   "mobile-android-version-code": "048"

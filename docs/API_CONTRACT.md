@@ -1015,7 +1015,18 @@ the instances they may see are on `/connector-instances`, which asks only for
       "required": ["host"],
       "additionalProperties": false
     },
-    "setupGuide": null,
+    "setupGuide": {
+      "variants": [
+        {
+          "id": "device-address",
+          "label": "Connect to your Tasmota device",
+          "description": "Find the device address from its own status or your router's client list, and enter the optional password only when Tasmota WebPassword is configured under Configuration > Configure Other.",
+          "template": "",
+          "toggles": [],
+          "capabilityRequirements": []
+        }
+      ]
+    },
     "discoverableType": null,
     "discoveryTargetField": null
   }
@@ -1077,10 +1088,15 @@ When Tasmota's WebPassword is unset, no credentials are sent. When the optional
 sensitive `password` is configured, Loom supplies the documented default web
 username `admin` alongside it as `user`/`password` query parameters. This is
 Tasmota's own authentication convention and it is plaintext HTTP, not bearer
-or Basic authentication; use it only on a trusted network. The connector has
-no sub-targets, resource kinds, setup guide, or specialized connection test in
-this first pass. It uses `lucide:plug` because no Tasmota mark is currently
-vendored in Loom's reviewed brand-icon set.
+or Basic authentication; use it only on a trusted network. The connector has no
+sub-targets or resource kinds. Its template-less setup guide explains how to
+find the device address and when the optional WebPassword is needed. Test
+Connection performs the real combined `Status 0` call: it reports power state,
+Wi-Fi signal and uptime as tested, adds energy monitoring only when the response
+actually contains `StatusSNS.ENERGY`, and reports `setPower` as available after
+successful all-or-nothing HTTP authentication. Authentication and transport
+failures retain their distinct Tasmota-authored messages. It uses `lucide:plug`
+because no Tasmota mark is currently vendored in Loom's reviewed brand-icon set.
 
 The UniFi Network connector uses the official local Integration API. Its base is
 `https://<console>/proxy/network/integration/v1`; API keys are generated in
