@@ -7906,6 +7906,217 @@ mod tests {
         assert_eq!(status, StatusCode::BAD_REQUEST, "{unknown:#}");
     }
 
+    #[tokio::test]
+    async fn state_aware_placement_actions_require_complete_valid_boolean_transitions() {
+        let app = test_app().await;
+        let (admin, _) = setup_and_login(&app.router).await;
+        let connector_id = create_debug_instance(&app.router, &admin, "State fixture").await;
+        let dashboard_id = create_dashboard(&app.router, &admin, "State controls").await;
+
+        let placement = |state_data_point_id: &str, extras: Value| {
+            let mut action = serde_json::json!({
+                "type": "connectorAction",
+                "connectorInstanceId": connector_id,
+                "targetId": null,
+                "actionId": "ping",
+                "params": {},
+                "stateDataPointId": state_data_point_id,
+                "stateTargetId": null,
+            });
+            action
+                .as_object_mut()
+                .expect("action object")
+                .extend(extras.as_object().expect("extras object").clone());
+            serde_json::json!({
+                "positionX": 0,
+                "positionY": 0,
+                "width": 1,
+                "height": 1,
+                "placementAction": action,
+            })
+        };
+        let transitions = serde_json::json!({
+            "toTrue": { "actionId": "set-enabled", "params": { "enabled": true } },
+            "toFalse": { "actionId": "set-enabled", "params": { "enabled": false } },
+        });
+
+        let (status, incomplete) = send(
+            &app.router,
+            post_json_auth(
+                &format!("/dashboards/{dashboard_id}/placements"),
+                &admin,
+                placement(
+                    "enabled",
+                    serde_json::json!({
+                        "toTrue": {
+                            "actionId": "set-enabled",
+                            "params": { "enabled": true }
+                        }
+                    }),
+                ),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{incomplete:#}");
+        assert!(incomplete["error"]
+            .as_str()
+            .is_some_and(|message| message.contains("both toTrue and toFalse")));
+
+        for (state_id, expected) in [
+            ("does-not-exist", "does not advertise"),
+            ("load", "must reference a Bool"),
+        ] {
+            let (status, rejected) = send(
+                &app.router,
+                post_json_auth(
+                    &format!("/dashboards/{dashboard_id}/placements"),
+                    &admin,
+                    placement(state_id, transitions.clone()),
+                ),
+            )
+            .await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{rejected:#}");
+            assert!(
+                rejected["error"]
+                    .as_str()
+                    .is_some_and(|message| message.contains(expected)),
+                "unexpected validation response: {rejected:#}"
+            );
+        }
+
+        let (status, unknown_transition) = send(
+            &app.router,
+            post_json_auth(
+                &format!("/dashboards/{dashboard_id}/placements"),
+                &admin,
+                placement(
+                    "enabled",
+                    serde_json::json!({
+                        "toTrue": { "actionId": "not-an-action", "params": {} },
+                        "toFalse": {
+                            "actionId": "set-enabled",
+                            "params": { "enabled": false }
+                        }
+                    }),
+                ),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{unknown_transition:#}");
+        assert!(unknown_transition["error"]
+            .as_str()
+            .is_some_and(|message| message.contains("toTrue")));
+
+        let (status, missing_display) = send(
+            &app.router,
+            post_json_auth(
+                &format!("/dashboards/{dashboard_id}/placements"),
+                &admin,
+                placement(
+                    "enabled",
+                    serde_json::json!({
+                        "renderStyle": "stateButton",
+                        "toTrue": transitions["toTrue"].clone(),
+                        "toFalse": transitions["toFalse"].clone(),
+                    }),
+                ),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{missing_display:#}");
+        assert!(missing_display["error"]
+            .as_str()
+            .is_some_and(|message| message.contains("stateButtonDisplay")));
+    }
+
+    #[tokio::test]
+    async fn state_aware_placement_clicks_follow_cached_state_and_never_guess() {
+        let app = test_app().await;
+        let (admin, _) = setup_and_login(&app.router).await;
+        let connector_id = create_debug_instance(&app.router, &admin, "State fixture").await;
+        let connector_uuid = uuid::Uuid::parse_str(&connector_id).expect("connector uuid");
+        app.connectors.poll_once().await;
+        let dashboard_id = create_dashboard(&app.router, &admin, "State controls").await;
+
+        let (status, created) = send(
+            &app.router,
+            post_json_auth(
+                &format!("/dashboards/{dashboard_id}/placements"),
+                &admin,
+                serde_json::json!({
+                    "positionX": 0,
+                    "positionY": 0,
+                    "width": 1,
+                    "height": 1,
+                    "placementAction": {
+                        "type": "connectorAction",
+                        "connectorInstanceId": connector_id,
+                        "targetId": null,
+                        "actionId": "ping",
+                        "params": {},
+                        "stateDataPointId": "enabled",
+                        "stateTargetId": null,
+                        "renderStyle": "switch",
+                        "toTrue": {
+                            "actionId": "set-enabled",
+                            "params": { "enabled": true }
+                        },
+                        "toFalse": {
+                            "actionId": "set-enabled",
+                            "params": { "enabled": false }
+                        }
+                    }
+                }),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED, "{created:#}");
+        let placement_id = created["id"].as_str().expect("placement id");
+        let click_uri = format!("/dashboards/{dashboard_id}/placements/{placement_id}/click");
+
+        // DebugConnector begins enabled, so the first click must choose the
+        // transition to false rather than the legacy `ping` action.
+        let (status, turned_off) = send(
+            &app.router,
+            post_json_auth(&click_uri, &admin, serde_json::json!({})),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{turned_off:#}");
+        assert_eq!(turned_off["payload"]["enabled"], false);
+
+        app.connectors.poll_once().await;
+        let (status, turned_on) = send(
+            &app.router,
+            post_json_auth(&click_uri, &admin, serde_json::json!({})),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{turned_on:#}");
+        assert_eq!(turned_on["payload"]["enabled"], true);
+
+        // Re-inserting the same live connector deliberately clears only its
+        // cached reading. A state-aware click must now refuse to choose a
+        // direction even though action descriptors remain available.
+        let connector = app
+            .connectors
+            .get(&connector_uuid)
+            .await
+            .expect("live connector");
+        app.connectors.insert(connector_uuid, connector).await;
+        let (status, unavailable) = send(
+            &app.router,
+            post_json_auth(&click_uri, &admin, serde_json::json!({})),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CONFLICT, "{unavailable:#}");
+        assert!(
+            unavailable["error"]
+                .as_str()
+                .is_some_and(|message| message.contains("current Boolean state")
+                    && message.contains("unavailable")),
+            "the server must explain why it refused to guess: {unavailable:#}"
+        );
+    }
+
     /// The third binding kind resolves against a third namespace, and is
     /// checked with the same rigor as the other two.
     #[tokio::test]

@@ -14,7 +14,7 @@ use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::Json;
 use chrono::Utc;
-use loom_core::connector::{Connector, WidgetBinding};
+use loom_core::connector::{Connector, DataPointValueType, WidgetBinding};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sqlx::SqlitePool;
@@ -154,6 +154,65 @@ impl ShareRole {
 /// Internally tagged on `type`, matching the discriminated unions the clients
 /// already consume.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(super) struct PlacementActionTransition {
+    action_id: String,
+    #[serde(default)]
+    params: Value,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(super) enum PlacementActionRenderStyle {
+    Switch,
+    StateButton,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(super) struct StateButtonStateDisplay {
+    label: String,
+    icon: String,
+    #[serde(default)]
+    color: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(super) struct StateButtonDisplay {
+    when_true: StateButtonStateDisplay,
+    when_false: StateButtonStateDisplay,
+}
+
+/// Optional state-aware fields kept behind one allocation so the tagged enum
+/// remains compact. `flatten` preserves the public JSON shape: these fields
+/// still sit directly beside `actionId` rather than under an implementation-
+/// detail object.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(super) struct PlacementActionState {
+    /// Optional Boolean reading that chooses which transition to invoke.
+    #[serde(default)]
+    state_data_point_id: Option<String>,
+    /// The target that owns `state_data_point_id`; independent of the target
+    /// the transition action addresses.
+    #[serde(default)]
+    state_target_id: Option<String>,
+    /// Presentation hint for clients. It never affects dispatch.
+    #[serde(default)]
+    render_style: Option<PlacementActionRenderStyle>,
+    /// Transition invoked when the cached state is currently false.
+    #[serde(default)]
+    to_true: Option<PlacementActionTransition>,
+    /// Transition invoked when the cached state is currently true.
+    #[serde(default)]
+    to_false: Option<PlacementActionTransition>,
+    /// Labels/icons/colors used by the state-button presentation.
+    #[serde(default)]
+    state_button_display: Option<StateButtonDisplay>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(
     tag = "type",
     rename_all = "camelCase",
@@ -183,6 +242,8 @@ pub(super) enum PlacementAction {
         /// /connector-instances/{id}/actions/{actionId}` would receive them.
         #[serde(default)]
         params: Value,
+        #[serde(flatten)]
+        state: Box<PlacementActionState>,
     },
 }
 
@@ -1585,6 +1646,7 @@ pub(super) async fn click_placement(
             target_id,
             action_id,
             params,
+            state: state_config,
         } => {
             // Identical to the direct action endpoint, deliberately: the same
             // resource-scoped grant, the same invocation path, and therefore
@@ -1600,12 +1662,57 @@ pub(super) async fn click_placement(
                 return denied;
             }
 
-            let connector = match Uuid::parse_str(&connector_instance_id) {
-                Ok(uuid) => state.connectors.get(&uuid).await,
-                Err(_) => None,
+            let connector_uuid = match Uuid::parse_str(&connector_instance_id) {
+                Ok(uuid) => uuid,
+                Err(_) => return connectors::not_found(&connector_instance_id),
             };
+            let connector = state.connectors.get(&connector_uuid).await;
             let Some(connector) = connector else {
                 return connectors::not_found(&connector_instance_id);
+            };
+
+            let PlacementActionState {
+                state_data_point_id,
+                state_target_id,
+                to_true,
+                to_false,
+                ..
+            } = *state_config;
+            let (action_id, params) = if let Some(state_data_point_id) = state_data_point_id {
+                let current = state
+                    .connectors
+                    .cached_status(&connector_uuid)
+                    .await
+                    .and_then(|snapshot| snapshot.status)
+                    .and_then(|status| {
+                        status
+                            .data_point_value_for(state_target_id.as_deref(), &state_data_point_id)
+                            .cloned()
+                    })
+                    .and_then(|value| value.as_bool());
+                let Some(current) = current else {
+                    return ErrorBody::message(
+                        StatusCode::CONFLICT,
+                        format!(
+                            "the placement action's current Boolean state `{state_data_point_id}` \
+                             is unavailable; retry when the connector has a current status"
+                        ),
+                    );
+                };
+
+                // Save-time validation requires both transitions. Keep this
+                // defensive check because stored JSON can outlive server
+                // versions or be repaired manually, and a click must fail
+                // clearly rather than panic if that invariant is violated.
+                let transition = if current { to_false } else { to_true };
+                let Some(transition) = transition else {
+                    return bad_request(
+                        "the stored state-aware placement action is missing a transition",
+                    );
+                };
+                (transition.action_id, transition.params)
+            } else {
+                (action_id, params)
             };
 
             match connectors::invoke_action(
@@ -2485,6 +2592,7 @@ async fn validate_placement_action(
             connector_instance_id,
             target_id,
             action_id,
+            state: state_config,
             ..
         } => {
             let connector = match Uuid::parse_str(connector_instance_id) {
@@ -2498,22 +2606,85 @@ async fn validate_placement_action(
                 )))
             })?;
 
-            // The same descriptor lookup the action endpoint itself uses, so a
-            // tile can only be configured with an action that endpoint would
-            // accept — including a resource-kind row or kind action, which is
-            // an ordinary action advertised somewhere else.
-            if connectors::resolve_action(connector.as_ref(), action_id, target_id.as_deref())
-                .await
-                .is_none()
+            validate_advertised_placement_action(
+                connector.as_ref(),
+                action_id,
+                target_id.as_deref(),
+                "actionId",
+            )
+            .await?;
+
+            if matches!(
+                state_config.render_style,
+                Some(PlacementActionRenderStyle::StateButton)
+            ) && state_config.state_button_display.is_none()
             {
-                return Err(Box::new(bad_request(format!(
-                    "the placement action names an action this connector does not advertise: \
-                     {action_id}"
-                ))));
+                return Err(Box::new(bad_request(
+                    "stateButtonDisplay is required when renderStyle is stateButton",
+                )));
+            }
+
+            if let Some(state_data_point_id) = &state_config.state_data_point_id {
+                let (Some(to_true), Some(to_false)) =
+                    (&state_config.to_true, &state_config.to_false)
+                else {
+                    return Err(Box::new(bad_request(
+                        "stateDataPointId requires both toTrue and toFalse transitions",
+                    )));
+                };
+
+                let descriptor = connector.data_points().into_iter().find(|descriptor| {
+                    descriptor.id == *state_data_point_id
+                        && descriptor.target_id.as_deref()
+                            == state_config.state_target_id.as_deref()
+                });
+                let Some(descriptor) = descriptor else {
+                    return Err(Box::new(bad_request(format!(
+                        "stateDataPointId names a data point this connector does not advertise \
+                         at stateTargetId: {state_data_point_id}"
+                    ))));
+                };
+                if descriptor.value_type != DataPointValueType::Bool {
+                    return Err(Box::new(bad_request(format!(
+                        "stateDataPointId must reference a Bool data point: \
+                         {state_data_point_id} is {:?}",
+                        descriptor.value_type
+                    ))));
+                }
+
+                for (field, transition) in [("toTrue", to_true), ("toFalse", to_false)] {
+                    validate_advertised_placement_action(
+                        connector.as_ref(),
+                        &transition.action_id,
+                        target_id.as_deref(),
+                        field,
+                    )
+                    .await?;
+                }
             }
             Ok(())
         }
     }
+}
+
+/// Uses the same action resolver as direct invocation for every action id in a
+/// placement, including both sides of a state-aware transition.
+async fn validate_advertised_placement_action(
+    connector: &dyn Connector,
+    action_id: &str,
+    target_id: Option<&str>,
+    field: &str,
+) -> RouteResult<()> {
+    if connectors::resolve_action(connector, action_id, target_id)
+        .await
+        .is_none()
+    {
+        return Err(Box::new(bad_request(format!(
+            "the placement action's {field} names an action this connector does not advertise: \
+             {action_id}"
+        ))));
+    }
+    Ok(())
 }
 
 async fn validate_placement(

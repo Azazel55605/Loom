@@ -59,6 +59,26 @@ pre-configured arguments and calls the one path; it is not a parallel
 implementation, because a second dispatch path is a second place for an
 invocation to go unrecorded.
 
+### State awareness composes onto `connectorAction`
+
+An optional Boolean data-point reference and two action transitions extend the
+same `connectorAction` variant. They do not introduce a toggle endpoint or a
+second action mechanism. When configured, the click endpoint reads the current
+value from the existing connector status cache and selects `toFalse` for a
+current `true` value or `toTrue` for a current `false` value, then hands that
+selected action to the same `invoke_action` path described above.
+
+This keeps state resolution server-side: clients neither race a separate
+status read against a click nor change the click request signature. Save-time
+validation requires a real Boolean descriptor and two real action descriptors.
+If no current cached Boolean exists, the click is refused rather than choosing
+a potentially destructive direction from stale or absent information.
+
+`switch` and `stateButton` are presentation hints on this composition. A state
+button additionally carries its true/false labels, icons, and optional colors;
+none of those display fields participate in authorization or dispatch. Omitting
+all state-aware fields preserves the original one-action behavior exactly.
+
 ### `connector_instance_id` becomes nullable
 
 A tile whose whole purpose is to navigate has no data to show and therefore no

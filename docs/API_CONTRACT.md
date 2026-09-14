@@ -3435,7 +3435,35 @@ Internally tagged on `type`:
   "connectorInstanceId": "5aa2574d-9ba0-4af8-b7ae-74671fb48777",
   "targetId": "web",
   "actionId": "restart",
-  "params": {}
+  "params": {},
+  "stateDataPointId": null,
+  "stateTargetId": null,
+  "renderStyle": null,
+  "toTrue": null,
+  "toFalse": null,
+  "stateButtonDisplay": null
+}
+```
+
+A state-aware action keeps the same variant and click endpoint. The server
+reads the current Boolean value and chooses the configured transition:
+
+```json
+{
+  "type": "connectorAction",
+  "connectorInstanceId": "5aa2574d-9ba0-4af8-b7ae-74671fb48777",
+  "targetId": "device:relay-1",
+  "actionId": "toggle",
+  "params": {},
+  "stateDataPointId": "power",
+  "stateTargetId": "device:relay-1",
+  "renderStyle": "stateButton",
+  "toTrue": { "actionId": "setPower", "params": { "enabled": true } },
+  "toFalse": { "actionId": "setPower", "params": { "enabled": false } },
+  "stateButtonDisplay": {
+    "whenTrue": { "label": "Turn off", "icon": "power", "color": null },
+    "whenFalse": { "label": "Turn on", "icon": "power", "color": "green" }
+  }
 }
 ```
 
@@ -3453,6 +3481,21 @@ Internally tagged on `type`:
 | `targetId` | string | The sub-target to address, or the instance as a whole. | `null` for the aggregate. |
 | `actionId` | string | The action to invoke, as `POST /connector-instances/{id}/actions/{actionId}` would receive it. | Always present. |
 | `params` | object | The action's parameters, verbatim. Defaults to `null` when omitted. | Always present in a stored action. |
+| `stateDataPointId` | string | Enables state awareness by naming the current Boolean data point. | Optional; `null` preserves ordinary one-action behavior. |
+| `stateTargetId` | string | Target that owns `stateDataPointId`; this is independent from the action's `targetId`. | Optional; `null` means the connector-level reading. |
+| `renderStyle` | string | Client presentation hint: `switch` or `stateButton`. It does not affect server dispatch. | Optional. |
+| `toTrue` | object | `{ actionId, params }` transition invoked when current state is `false`. | Required when `stateDataPointId` is set; otherwise optional. |
+| `toFalse` | object | `{ actionId, params }` transition invoked when current state is `true`. | Required when `stateDataPointId` is set; otherwise optional. |
+| `stateButtonDisplay` | object | State-button presentation with `whenTrue` and `whenFalse`, each containing `label`, `icon`, and nullable `color`. | Required when `renderStyle` is `stateButton`; otherwise optional. |
+
+At save time, `stateDataPointId` must resolve to a currently advertised
+`Bool` data point at `stateTargetId`, and both transition action ids must
+resolve through the same action-descriptor lookup as an ordinary placement
+action. At click time, the backend reads that data point from the existing
+status cache. A current `true` invokes `toFalse`; a current `false` invokes
+`toTrue`. Missing, stale-unavailable, or non-Boolean cached state returns a
+clear conflict response and dispatches nothing—the server never guesses a
+direction. The click request body and endpoint signature are unchanged.
 
 This is a **dashboard** concept and deliberately not a connector one: nothing in
 the connector contract knows that dashboards exist, and a connector must not be
