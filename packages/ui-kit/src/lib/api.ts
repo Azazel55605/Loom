@@ -160,6 +160,15 @@ export type PendingOperation = {
   startedAt: string;
 };
 
+/** Fresh or cached status envelope shared by the reconnect endpoint and the
+ * connector-status WebSocket. */
+export type ConnectorStatusSnapshot = {
+  status: ConnectorStatus | null;
+  statusError?: ConnectorError;
+  pendingOperation: PendingOperation | null;
+  diagnosis: string | null;
+};
+
 /** Identifying information for a connector. */
 export type ConnectorMetadata = {
   /**
@@ -1705,6 +1714,20 @@ function deleteConnectorInstance(
   });
 }
 
+/** `POST /connector-instances/{id}/reconnect` — bypasses poll backoff and
+ * returns the resulting status snapshot immediately. */
+function reconnectConnectorInstance(
+  runtime: ApiRuntime,
+  id: string,
+  signal?: AbortSignal,
+): Promise<ConnectorStatusSnapshot> {
+  return authorizedRequest<ConnectorStatusSnapshot>(
+    runtime,
+    `/connector-instances/${encodeURIComponent(id)}/reconnect`,
+    { method: "POST", signal },
+  );
+}
+
 /**
  * `POST /connector-instances/{id}/actions/{actionId}`.
  *
@@ -2658,6 +2681,8 @@ export function createApiClient(options: {
     ) => updateConnectorInstance(runtime, id, data, signal),
     deleteConnectorInstance: (id: string, signal?: AbortSignal) =>
       deleteConnectorInstance(runtime, id, signal),
+    reconnectConnectorInstance: (id: string, signal?: AbortSignal) =>
+      reconnectConnectorInstance(runtime, id, signal),
     executeConnectorAction: (
       instanceId: string,
       actionId: string,

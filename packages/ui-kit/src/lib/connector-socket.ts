@@ -23,7 +23,14 @@ export type ConnectorStatusUpdate = {
   diagnosis: string | null;
 };
 
+export type NetworkAdvisoryUpdate = {
+  type: "networkAdvisory";
+  active: boolean;
+  affectedHostCount: number;
+};
+
 type StatusListener = (update: ConnectorStatusUpdate) => void;
+type NetworkAdvisoryListener = (update: NetworkAdvisoryUpdate) => void;
 
 function websocketUrl(baseUrl: string, accessToken: string): string {
   const fallback = typeof window === "undefined" ? "http://localhost/" : window.location.href;
@@ -46,6 +53,16 @@ function isStatusUpdate(value: unknown): value is ConnectorStatusUpdate {
   );
 }
 
+function isNetworkAdvisoryUpdate(value: unknown): value is NetworkAdvisoryUpdate {
+  if (typeof value !== "object" || value === null) return false;
+  const update = value as Partial<NetworkAdvisoryUpdate>;
+  return (
+    update.type === "networkAdvisory" &&
+    typeof update.active === "boolean" &&
+    typeof update.affectedHostCount === "number"
+  );
+}
+
 /**
  * One reconnecting connector-status socket for an authenticated API client.
  *
@@ -55,6 +72,8 @@ function isStatusUpdate(value: unknown): value is ConnectorStatusUpdate {
  */
 export class ConnectorStatusSocket {
   private readonly listeners = new Map<string, Set<StatusListener>>();
+  private readonly advisoryListeners = new Set<NetworkAdvisoryListener>();
+  private lastAdvisory: NetworkAdvisoryUpdate | null = null;
   private socket: TransportSocket | null = null;
   private socketOpen = false;
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
@@ -98,6 +117,25 @@ export class ConnectorStatusSocket {
     return () => this.removeListener(instanceIds, listener);
   }
 
+  /** Listen to the retained system-wide network advisory. Unlike status
+   * subscriptions this is intentionally unscoped: every signed-in shell needs
+   * to know when several distinct hosts fail together. */
+  subscribeNetworkAdvisory(listener: NetworkAdvisoryListener): () => void {
+    this.advisoryListeners.add(listener);
+    if (this.lastAdvisory !== null) {
+      queueMicrotask(() => {
+        if (this.advisoryListeners.has(listener) && this.lastAdvisory !== null) {
+          listener(this.lastAdvisory);
+        }
+      });
+    }
+    this.ensureConnected();
+    return () => {
+      this.advisoryListeners.delete(listener);
+      this.afterUnsubscribe([]);
+    };
+  }
+
   /** Remove every listener for these instances. Usually the cleanup returned
    * by `subscribe` is the more precise choice. */
   unsubscribe(instanceIds: readonly string[]): void {
@@ -113,6 +151,7 @@ export class ConnectorStatusSocket {
     this.disposed = true;
     this.unsubscribeFromTokens();
     this.listeners.clear();
+    this.advisoryListeners.clear();
     this.cancelReconnect();
     this.disconnect();
   }
@@ -135,7 +174,7 @@ export class ConnectorStatusSocket {
     if (inactive.length > 0 && this.socketOpen) {
       this.send("unsubscribe", inactive);
     }
-    if (this.listeners.size === 0) {
+    if (!this.hasListeners()) {
       this.cancelReconnect();
       this.disconnect();
     }
@@ -147,7 +186,7 @@ export class ConnectorStatusSocket {
       this.connecting ||
       this.socket !== null ||
       this.reconnectTimer !== null ||
-      this.listeners.size === 0 ||
+      !this.hasListeners() ||
       this.accessToken === null
     ) {
       return;
@@ -161,7 +200,7 @@ export class ConnectorStatusSocket {
         if (
           this.disposed ||
           generation !== this.generation ||
-          this.listeners.size === 0 ||
+          !this.hasListeners() ||
           this.accessToken === null
         ) {
           return;
@@ -174,7 +213,7 @@ export class ConnectorStatusSocket {
         if (
           this.disposed ||
           generation !== this.generation ||
-          this.listeners.size === 0 ||
+          !this.hasListeners() ||
           this.accessToken === null
         ) {
           void socket.close().catch(() => undefined);
@@ -190,10 +229,16 @@ export class ConnectorStatusSocket {
         });
         socket.onMessage((data) => {
           try {
-            const update: unknown = JSON.parse(data);
-            if (!isStatusUpdate(update)) return;
-            for (const listener of this.listeners.get(update.instanceId) ?? []) {
-              listener(update);
+            const message: unknown = JSON.parse(data);
+            if (isStatusUpdate(message)) {
+              for (const listener of this.listeners.get(message.instanceId) ?? []) {
+                listener(message);
+              }
+            } else if (isNetworkAdvisoryUpdate(message)) {
+              this.lastAdvisory = message;
+              for (const listener of this.advisoryListeners) {
+                listener(message);
+              }
             }
           } catch {
             // Unknown or malformed server messages are ignored; a later valid
@@ -243,7 +288,7 @@ export class ConnectorStatusSocket {
   private scheduleReconnect(): void {
     if (
       this.disposed ||
-      this.listeners.size === 0 ||
+      !this.hasListeners() ||
       this.accessToken === null ||
       this.reconnectTimer !== null
     ) {
@@ -260,6 +305,10 @@ export class ConnectorStatusSocket {
   private cancelReconnect(): void {
     if (this.reconnectTimer !== null) clearTimeout(this.reconnectTimer);
     this.reconnectTimer = null;
+  }
+
+  private hasListeners(): boolean {
+    return this.listeners.size > 0 || this.advisoryListeners.size > 0;
   }
 
   private send(type: "subscribe" | "unsubscribe", instanceIds: readonly string[]): void {

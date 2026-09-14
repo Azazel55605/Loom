@@ -12,6 +12,7 @@ import {
   DialogTitle,
 } from "@loom/ui-kit/components/ui/dialog";
 import { ConnectorIcon } from "@loom/ui-kit/components/ConnectorIcon";
+import { ConnectorReconnectButton } from "@loom/ui-kit/components/ConnectorReconnectButton";
 import { InstanceActionHistory } from "@loom/ui-kit/components/InstanceActionHistory";
 import { ResourceKindBrowser } from "@loom/ui-kit/components/ResourceKindBrowser";
 import {
@@ -271,6 +272,13 @@ export function ConnectorDetailModal({
               {target === null ? null : ` · ${target.text}`}
             </DialogTitle>
             <ConnectorStatusBadge availability={availability} />
+            {availability.tone === "down" || availability.tone === "degraded" ? (
+              <ConnectorReconnectButton
+                instanceId={instance.id}
+                instanceName={instance.name}
+                onStatus={setLive}
+              />
+            ) : null}
           </div>
           <DialogDescription>
             {instance.metadata.name} · {instance.connectorType} · v{instance.metadata.version}

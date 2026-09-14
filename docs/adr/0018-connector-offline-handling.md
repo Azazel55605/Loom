@@ -138,3 +138,31 @@ as a diagnosis.
 - `DebugConnector` gains a configurable `networkTarget`, so all three diagnostic
   outcomes are reachable on a laptop with no homelab — the same role its
   `fail_mode` already plays, one layer further out.
+
+## Recovery and correlated outages
+
+A later report that recovered services appeared permanently Down prompted a
+full trace of all three stages. The capped scheduler continued scheduling, a
+successful poll already reset its failure counter and updated the single status
+cache/broadcast path, and the shared socket client neither deduplicated recovery
+frames nor dropped subscriptions across reconnects. The observable gap was the
+documented two-minute maximum backoff: correct eventual recovery could still
+look stuck to someone who had just restored a service outside Loom.
+
+Scheduled recovery remains automatic and a regression test now follows an
+instance from Down through a due successful poll, asserting both the restored
+five-second cadence and the pushed Healthy snapshot. In addition,
+`POST /connector-instances/{id}/reconnect` lets any caller with
+`connectors.view` bypass the due time for an immediate observation. It uses the
+same poll/cache/broadcast path; success resets the failure history, while a
+failed retry remains backed off and returns the fresh diagnosis to the caller.
+
+The TCP probe result is also retained as structured internal evidence. A
+rolling two-minute tracker counts **distinct resolved IP addresses** currently
+failing specifically at TCP connect. Three or more activate a system-wide
+network advisory, broadcast to every authenticated status socket; falling below
+three or ageing out clears it. DNS failures and reachable ports with an
+unresponsive service are excluded because they do not support the same
+cross-host inference. Multiple connector instances aimed at one host count
+once. Clients may dismiss one activation for their current UI session, but a
+later inactive-to-active transition is presented again.

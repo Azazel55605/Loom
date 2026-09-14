@@ -98,6 +98,10 @@ pub fn routes() -> Router<AppState> {
                 .delete(connectors::delete_instance),
         )
         .route(
+            "/connector-instances/{id}/reconnect",
+            post(connectors::reconnect_instance),
+        )
+        .route(
             "/connector-instances/{id}/actions/{action_id}",
             post(connectors::execute_action),
         )

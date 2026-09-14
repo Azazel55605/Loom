@@ -14,6 +14,7 @@
 //! or an update would leave a stale one in use.
 
 use std::collections::HashMap;
+use std::net::IpAddr;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -22,7 +23,7 @@ use loom_core::connector::{Connector, ConnectorError, ConnectorStatus, HealthSta
 use serde::Serialize;
 use serde_json::Value;
 use sqlx::SqlitePool;
-use tokio::sync::{broadcast, RwLock};
+use tokio::sync::{broadcast, watch, RwLock};
 use tokio::task::{JoinHandle, JoinSet};
 use tokio::time::{self, MissedTickBehavior};
 use uuid::Uuid;
@@ -75,6 +76,82 @@ pub const PENDING_OPERATION_TIMEOUT: Duration = Duration::from_secs(120);
 /// is a stable fact anyway: a host that was unreachable a minute ago is
 /// overwhelmingly likely to still be unreachable now.
 pub const DIAGNOSIS_INTERVAL: Duration = Duration::from_secs(60);
+
+/// Recent TCP-connect failures remain relevant to the shared-outage advisory
+/// for this long. A rolling window avoids declaring a network incident from
+/// failures that happened hours apart while still tolerating backed-off polls.
+pub const NETWORK_ADVISORY_WINDOW: Duration = Duration::from_secs(120);
+
+/// Distinct unreachable hosts required before a local network problem becomes
+/// more plausible than several unrelated service failures.
+pub const NETWORK_ADVISORY_THRESHOLD: usize = 3;
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct NetworkAdvisory {
+    pub active: bool,
+    pub affected_host_count: usize,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct NetworkFailureObservation {
+    address: IpAddr,
+    observed_at: time::Instant,
+}
+
+#[derive(Debug, Default)]
+struct NetworkOutageTracker {
+    observations: HashMap<Uuid, NetworkFailureObservation>,
+}
+
+impl NetworkOutageTracker {
+    fn record(&mut self, id: Uuid, address: Option<IpAddr>, now: time::Instant) {
+        match address {
+            Some(address) => {
+                self.observations.insert(
+                    id,
+                    NetworkFailureObservation {
+                        address,
+                        observed_at: now,
+                    },
+                );
+            }
+            None => {
+                self.observations.remove(&id);
+            }
+        }
+        self.prune(now);
+    }
+
+    fn remove(&mut self, id: &Uuid, now: time::Instant) {
+        self.observations.remove(id);
+        self.prune(now);
+    }
+
+    fn prune(&mut self, now: time::Instant) {
+        self.observations.retain(|_, observation| {
+            now.duration_since(observation.observed_at) < NETWORK_ADVISORY_WINDOW
+        });
+    }
+
+    fn advisory(&self) -> NetworkAdvisory {
+        let affected_host_count = self
+            .observations
+            .values()
+            .map(|observation| observation.address)
+            .collect::<std::collections::HashSet<_>>()
+            .len();
+        NetworkAdvisory {
+            active: affected_host_count >= NETWORK_ADVISORY_THRESHOLD,
+            affected_host_count,
+        }
+    }
+}
+
+enum DiagnosticProbe {
+    Skipped,
+    Completed(Option<diagnostics::NetworkDiagnosis>),
+}
 
 /// A disruptive action currently running against an instance.
 ///
@@ -269,6 +346,8 @@ pub struct ConnectorRuntime {
     /// standing invitation to leak one.
     schedules: Arc<RwLock<HashMap<Uuid, PollSchedule>>>,
     status_updates: broadcast::Sender<ConnectorStatusUpdate>,
+    network_failures: Arc<RwLock<NetworkOutageTracker>>,
+    network_advisory: watch::Sender<NetworkAdvisory>,
     /// Overridable so a test can watch the safety net fire without waiting two
     /// minutes for it. Never changed in production.
     pending_timeout: Duration,
@@ -278,12 +357,15 @@ impl ConnectorRuntime {
     /// An empty runtime over `types`.
     pub fn new(types: ConnectorTypeRegistry) -> Self {
         let (status_updates, _) = broadcast::channel(256);
+        let (network_advisory, _) = watch::channel(NetworkAdvisory::default());
         Self {
             types,
             instances: Arc::new(RwLock::new(HashMap::new())),
             statuses: Arc::new(RwLock::new(HashMap::new())),
             schedules: Arc::new(RwLock::new(HashMap::new())),
             status_updates,
+            network_failures: Arc::new(RwLock::new(NetworkOutageTracker::default())),
+            network_advisory,
             pending_timeout: PENDING_OPERATION_TIMEOUT,
         }
     }
@@ -455,6 +537,7 @@ impl ConnectorRuntime {
             .write()
             .await
             .insert(id, PollSchedule::due_now());
+        self.record_network_failure(id, None).await;
     }
 
     /// Drops the live connector for `id`.
@@ -462,6 +545,7 @@ impl ConnectorRuntime {
         self.instances.write().await.remove(id);
         self.statuses.write().await.remove(id);
         self.schedules.write().await.remove(id);
+        self.remove_network_failure(id).await;
     }
 
     /// The live connector for `id`, if there is one.
@@ -575,6 +659,23 @@ impl ConnectorRuntime {
         self.status_updates.subscribe()
     }
 
+    /// Subscribe to the retained system-wide network advisory state.
+    pub fn subscribe_network_advisory(&self) -> watch::Receiver<NetworkAdvisory> {
+        self.network_advisory.subscribe()
+    }
+
+    /// Immediately polls one instance, bypassing its current backoff.
+    ///
+    /// The ordinary outcome path remains authoritative: success resets the
+    /// schedule to the base cadence, while a failed retry records another
+    /// failure and keeps backing off. Cache updates and WebSocket pushes also
+    /// pass through the same single path used by scheduled polls.
+    pub async fn reconnect(&self, id: Uuid) -> Option<ConnectorStatusSnapshot> {
+        let connector = self.get(&id).await?;
+        self.poll_connector(id, connector).await;
+        self.cached_status(&id).await
+    }
+
     /// Poll every live connector once, regardless of when each was last due.
     ///
     /// Used at startup and by tests. The scheduled poller uses
@@ -626,9 +727,11 @@ impl ConnectorRuntime {
 
         self.prune_expired_operations().await;
         if due.is_empty() {
+            self.prune_network_failures().await;
             return;
         }
         self.poll_all(due).await;
+        self.prune_network_failures().await;
     }
 
     /// Polls the given instances concurrently, one task each.
@@ -748,8 +851,18 @@ impl ConnectorRuntime {
         let diagnosis = if failing {
             self.diagnose_if_due(id, connector.as_ref()).await
         } else {
-            None
+            DiagnosticProbe::Completed(None)
         };
+
+        if let DiagnosticProbe::Completed(result) = &diagnosis {
+            self.record_network_failure(
+                id,
+                result
+                    .as_ref()
+                    .and_then(diagnostics::NetworkDiagnosis::tcp_unreachable_address),
+            )
+            .await;
+        }
 
         self.update_snapshot(id, |snapshot| {
             snapshot.status = outcome.status;
@@ -759,8 +872,8 @@ impl ConnectorRuntime {
                 // fresh probe; a recovery clears it, because a sentence about
                 // why something is unreachable is worse than nothing once it is
                 // reachable.
-                if diagnosis.is_some() {
-                    snapshot.diagnosis = diagnosis;
+                if let DiagnosticProbe::Completed(result) = diagnosis {
+                    snapshot.diagnosis = result.map(|diagnosis| diagnosis.message);
                 }
             } else {
                 snapshot.diagnosis = None;
@@ -771,11 +884,13 @@ impl ConnectorRuntime {
 
     /// Probes an instance's network target, unless it was probed recently.
     ///
-    /// Returns `None` both when the debounce blocks a probe and when the
-    /// connector publishes no target — the caller treats them the same way, by
-    /// leaving any existing diagnosis alone.
-    async fn diagnose_if_due(&self, id: Uuid, connector: &dyn Connector) -> Option<String> {
-        let target = connector.network_target()?;
+    /// `Skipped` means the debounce blocked a real probe and existing evidence
+    /// must remain intact. `Completed(None)` means there is no target worth
+    /// probing and clears any observation left by an older connector config.
+    async fn diagnose_if_due(&self, id: Uuid, connector: &dyn Connector) -> DiagnosticProbe {
+        let Some(target) = connector.network_target() else {
+            return DiagnosticProbe::Completed(None);
+        };
 
         {
             let mut schedules = self.schedules.write().await;
@@ -785,12 +900,45 @@ impl ConnectorRuntime {
                 .last_diagnosed_at
                 .is_some_and(|last| now.duration_since(last) < DIAGNOSIS_INTERVAL)
             {
-                return None;
+                return DiagnosticProbe::Skipped;
             }
             schedule.last_diagnosed_at = Some(now);
         }
 
-        diagnostics::diagnose(&target).await
+        DiagnosticProbe::Completed(diagnostics::diagnose(&target).await)
+    }
+
+    async fn record_network_failure(&self, id: Uuid, address: Option<IpAddr>) {
+        let advisory = {
+            let mut tracker = self.network_failures.write().await;
+            tracker.record(id, address, time::Instant::now());
+            tracker.advisory()
+        };
+        self.publish_network_advisory(advisory);
+    }
+
+    async fn remove_network_failure(&self, id: &Uuid) {
+        let advisory = {
+            let mut tracker = self.network_failures.write().await;
+            tracker.remove(id, time::Instant::now());
+            tracker.advisory()
+        };
+        self.publish_network_advisory(advisory);
+    }
+
+    async fn prune_network_failures(&self) {
+        let advisory = {
+            let mut tracker = self.network_failures.write().await;
+            tracker.prune(time::Instant::now());
+            tracker.advisory()
+        };
+        self.publish_network_advisory(advisory);
+    }
+
+    fn publish_network_advisory(&self, advisory: NetworkAdvisory) {
+        if *self.network_advisory.borrow() != advisory {
+            self.network_advisory.send_replace(advisory);
+        }
     }
 }
 
@@ -977,6 +1125,142 @@ mod tests {
         let recovered = schedule_of(&runtime, &id).await;
         assert_eq!(recovered.consecutive_failures, 0);
         assert_eq!(recovered.interval(), CONNECTOR_POLL_INTERVAL);
+    }
+
+    #[tokio::test]
+    async fn a_scheduled_poll_recovers_from_down_resets_backoff_and_pushes_status() {
+        let runtime = ConnectorRuntime::new(builtin_registry());
+        let id = failing_instance(&runtime).await;
+        runtime.poll_once().await;
+
+        for _ in 0..20 {
+            runtime.poll_once().await;
+        }
+        assert_eq!(
+            schedule_of(&runtime, &id).await.interval(),
+            CONNECTOR_POLL_MAX_INTERVAL
+        );
+
+        let healthy = runtime
+            .build(DEBUG_TYPE_ID, json!({}))
+            .await
+            .expect("the fixture builds");
+        runtime.instances.write().await.insert(id, healthy);
+        runtime
+            .schedules
+            .write()
+            .await
+            .get_mut(&id)
+            .expect("schedule")
+            .next_due = time::Instant::now();
+        let mut updates = runtime.subscribe_statuses();
+
+        runtime.poll_due().await;
+
+        let recovered = runtime.cached_status(&id).await.expect("recovered status");
+        assert_eq!(
+            recovered.status.as_ref().map(|status| status.health),
+            Some(HealthState::Healthy)
+        );
+        assert_eq!(schedule_of(&runtime, &id).await.consecutive_failures, 0);
+        assert_eq!(
+            schedule_of(&runtime, &id).await.interval(),
+            CONNECTOR_POLL_INTERVAL
+        );
+        let pushed = updates.recv().await.expect("recovery is pushed");
+        assert_eq!(pushed.instance_id, id);
+        assert_eq!(
+            pushed.snapshot.status.map(|status| status.health),
+            Some(HealthState::Healthy)
+        );
+    }
+
+    #[tokio::test]
+    async fn manual_reconnect_bypasses_backoff_and_resets_it_after_success() {
+        let runtime = ConnectorRuntime::new(builtin_registry());
+        let id = failing_instance(&runtime).await;
+        for _ in 0..20 {
+            runtime.poll_once().await;
+        }
+        let due_before = schedule_of(&runtime, &id).await.next_due;
+
+        let healthy = runtime
+            .build(DEBUG_TYPE_ID, json!({}))
+            .await
+            .expect("the fixture builds");
+        runtime.instances.write().await.insert(id, healthy);
+        let mut updates = runtime.subscribe_statuses();
+
+        let snapshot = runtime.reconnect(id).await.expect("live instance");
+
+        assert_eq!(
+            snapshot.status.as_ref().map(|status| status.health),
+            Some(HealthState::Healthy)
+        );
+        let schedule = schedule_of(&runtime, &id).await;
+        assert_eq!(schedule.consecutive_failures, 0);
+        assert_eq!(schedule.interval(), CONNECTOR_POLL_INTERVAL);
+        assert!(
+            schedule.next_due < due_before,
+            "manual retry bypassed the old due time"
+        );
+        assert_eq!(
+            updates
+                .recv()
+                .await
+                .expect("manual recovery is pushed")
+                .snapshot
+                .status
+                .map(|status| status.health),
+            Some(HealthState::Healthy)
+        );
+    }
+
+    #[test]
+    fn network_advisory_requires_three_distinct_recent_hosts() {
+        let now = time::Instant::now();
+        let mut tracker = NetworkOutageTracker::default();
+        let shared: IpAddr = "192.0.2.10".parse().unwrap();
+        let second: IpAddr = "192.0.2.11".parse().unwrap();
+        let third: IpAddr = "192.0.2.12".parse().unwrap();
+
+        tracker.record(Uuid::new_v4(), Some(shared), now);
+        tracker.record(Uuid::new_v4(), Some(shared), now);
+        assert_eq!(tracker.advisory().affected_host_count, 1);
+        assert!(!tracker.advisory().active);
+
+        tracker.record(Uuid::new_v4(), Some(second), now);
+        assert!(!tracker.advisory().active);
+        tracker.record(Uuid::new_v4(), Some(third), now);
+        assert_eq!(
+            tracker.advisory(),
+            NetworkAdvisory {
+                active: true,
+                affected_host_count: 3,
+            }
+        );
+    }
+
+    #[test]
+    fn network_advisory_expires_old_failures_and_clears_recovered_instances() {
+        let start = time::Instant::now();
+        let mut tracker = NetworkOutageTracker::default();
+        let ids = [Uuid::new_v4(), Uuid::new_v4(), Uuid::new_v4()];
+        for (index, id) in ids.into_iter().enumerate() {
+            tracker.record(
+                id,
+                Some(format!("192.0.2.{}", index + 1).parse().unwrap()),
+                start,
+            );
+        }
+        assert!(tracker.advisory().active);
+
+        tracker.record(ids[0], None, start + Duration::from_secs(1));
+        assert!(!tracker.advisory().active);
+        assert_eq!(tracker.advisory().affected_host_count, 2);
+
+        tracker.prune(start + NETWORK_ADVISORY_WINDOW);
+        assert_eq!(tracker.advisory(), NetworkAdvisory::default());
     }
 
     #[tokio::test]

@@ -702,6 +702,19 @@ subscription set; reconnecting clients must subscribe again. The shared client
 does that automatically and reconnects with bounded exponential backoff,
 including after an access-token refresh.
 
+Every authenticated socket also receives the retained cross-connector network
+advisory state immediately on connection and whenever it changes; this message
+is not scoped by instance subscriptions:
+
+```json
+{ "type": "networkAdvisory", "active": true, "affectedHostCount": 3 }
+```
+
+The advisory becomes active when TCP diagnostics have observed at least three
+distinct resolved hosts as unreachable within the rolling two-minute window.
+Multiple connector instances aimed at one host count once. DNS failures and a
+reachable TCP port whose service protocol is not answering do not contribute.
+
 ### `GET /connector-types`
 
 Requires a global `connectors.manage` grant. This is the catalog behind the "add
@@ -1540,6 +1553,16 @@ Not every Down instance gets one, and that is deliberate rather than a gap. A
 connector talking to a Unix socket, or an in-process fixture, has no host and
 port whose reachability would tell anyone anything — those report `null` rather
 than a reassuring sentence that means nothing.
+
+### `POST /connector-instances/{id}/reconnect`
+
+Requires a global `connectors.view` grant. Forces an immediate status check
+regardless of the instance's backed-off next-poll time. A successful check
+resets normal five-second polling, updates the cache, broadcasts the same
+snapshot over `/ws`, and returns it directly. A failed check is likewise
+returned as the fresh snapshot, including its `statusError` and network
+`diagnosis`; the request itself succeeded in performing the observation. An
+unknown instance is 404, and a stored instance that could not be loaded is 400.
 
 **One failing connector does not fail the list.** A connector whose `status()`
 returns an error contributes `"status": null` plus a `statusError`, and every

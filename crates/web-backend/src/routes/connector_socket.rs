@@ -13,12 +13,12 @@ use axum::extract::{Query, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use serde::{Deserialize, Serialize};
-use tokio::sync::broadcast;
+use tokio::sync::{broadcast, watch};
 use uuid::Uuid;
 
 use crate::auth::extract::{has_permission, ConnectorsView, Permission};
 use crate::auth::tokens::verify_access_token;
-use crate::connectors::runtime::{ConnectorStatusSnapshot, ConnectorStatusUpdate};
+use crate::connectors::runtime::{ConnectorStatusSnapshot, ConnectorStatusUpdate, NetworkAdvisory};
 use crate::error::ErrorBody;
 use crate::state::AppState;
 
@@ -49,7 +49,11 @@ enum ServerMessage {
     Status {
         instance_id: Uuid,
         #[serde(flatten)]
-        snapshot: ConnectorStatusSnapshot,
+        snapshot: Box<ConnectorStatusSnapshot>,
+    },
+    NetworkAdvisory {
+        active: bool,
+        affected_host_count: usize,
     },
 }
 
@@ -105,14 +109,21 @@ pub(super) async fn connector_status_socket(
         Err(rejection) => return rejection.into_response(),
     };
     let updates = state.connectors.subscribe_statuses();
-    ws.on_upgrade(move |socket| handle_socket(socket, updates))
+    let advisory = state.connectors.subscribe_network_advisory();
+    ws.on_upgrade(move |socket| handle_socket(socket, updates, advisory))
 }
 
 async fn handle_socket(
     mut socket: WebSocket,
     mut updates: broadcast::Receiver<ConnectorStatusUpdate>,
+    mut advisory: watch::Receiver<NetworkAdvisory>,
 ) {
     let mut subscriptions = Subscriptions::default();
+
+    let initial_advisory = *advisory.borrow();
+    if !send_server_message(&mut socket, advisory_message(initial_advisory)).await {
+        return;
+    }
 
     loop {
         tokio::select! {
@@ -142,19 +153,39 @@ async fn handle_socket(
 
                 let message = ServerMessage::Status {
                     instance_id: update.instance_id,
-                    snapshot: update.snapshot,
+                    snapshot: Box::new(update.snapshot),
                 };
-                let Ok(serialized) = serde_json::to_string(&message) else {
-                    tracing::error!("failed to serialize a connector status update");
-                    continue;
-                };
-
-                if socket.send(Message::Text(serialized.into())).await.is_err() {
+                if !send_server_message(&mut socket, message).await {
+                    break;
+                }
+            }
+            changed = advisory.changed() => {
+                if changed.is_err() {
+                    break;
+                }
+                let current = *advisory.borrow_and_update();
+                let message = advisory_message(current);
+                if !send_server_message(&mut socket, message).await {
                     break;
                 }
             }
         }
     }
+}
+
+fn advisory_message(advisory: NetworkAdvisory) -> ServerMessage {
+    ServerMessage::NetworkAdvisory {
+        active: advisory.active,
+        affected_host_count: advisory.affected_host_count,
+    }
+}
+
+async fn send_server_message(socket: &mut WebSocket, message: ServerMessage) -> bool {
+    let Ok(serialized) = serde_json::to_string(&message) else {
+        tracing::error!("failed to serialize a connector WebSocket message");
+        return true;
+    };
+    socket.send(Message::Text(serialized.into())).await.is_ok()
 }
 
 #[cfg(test)]
@@ -199,7 +230,7 @@ mod tests {
         let id = Uuid::new_v4();
         let message = ServerMessage::Status {
             instance_id: id,
-            snapshot: update(id).snapshot,
+            snapshot: Box::new(update(id).snapshot),
         };
         let json = serde_json::to_value(message).expect("serializable update");
 
@@ -213,6 +244,19 @@ mod tests {
         // something that meant to read `null`.
         assert_eq!(json["pendingOperation"], serde_json::Value::Null);
         assert_eq!(json["diagnosis"], serde_json::Value::Null);
+    }
+
+    #[test]
+    fn outgoing_network_advisory_messages_match_the_documented_wire_shape() {
+        let json = serde_json::to_value(advisory_message(NetworkAdvisory {
+            active: true,
+            affected_host_count: 4,
+        }))
+        .expect("serializable advisory");
+
+        assert_eq!(json["type"], "networkAdvisory");
+        assert_eq!(json["active"], true);
+        assert_eq!(json["affectedHostCount"], 4);
     }
 
     /// The overlay is what makes a restart legible, so its wire shape is worth
@@ -230,7 +274,7 @@ mod tests {
 
         let json = serde_json::to_value(ServerMessage::Status {
             instance_id: id,
-            snapshot,
+            snapshot: Box::new(snapshot),
         })
         .expect("serializable update");
 

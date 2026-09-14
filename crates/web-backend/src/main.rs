@@ -1358,6 +1358,39 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn reconnect_is_a_read_permission_and_returns_a_fresh_status() {
+        let app = test_app().await;
+        let (admin, _) = setup_and_login(&app.router).await;
+        let id = create_debug_instance(&app.router, &admin, "Retry fixture").await;
+        let viewer = user_with_grants(
+            &app.router,
+            &admin,
+            "retry-viewer",
+            serde_json::json!([{
+                "key": "connectors.view",
+                "resourceType": null,
+                "resourceId": null,
+            }]),
+        )
+        .await;
+
+        let (status, body) = send(
+            &app.router,
+            post_json_auth(
+                &format!("/connector-instances/{id}/reconnect"),
+                &viewer,
+                serde_json::Value::Null,
+            ),
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::OK, "reconnect failed: {body:#}");
+        assert_eq!(body["status"]["health"], "healthy");
+        assert_eq!(body["pendingOperation"], serde_json::Value::Null);
+        assert_eq!(body["diagnosis"], serde_json::Value::Null);
+    }
+
+    #[tokio::test]
     async fn the_type_catalog_lists_every_registered_type_with_its_schema() {
         let app = test_app().await;
         let (access, _) = setup_and_login(&app.router).await;

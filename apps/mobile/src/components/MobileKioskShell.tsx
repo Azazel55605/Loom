@@ -6,6 +6,7 @@ import { KioskExitDialog } from "@/components/KioskExitDialog";
 import { dashboardsQueryKey } from "@loom/ui-kit/components/DashboardSidebar";
 import { DashboardView } from "@loom/ui-kit/components/DashboardView";
 import { MotionContent } from "@loom/ui-kit/components/MotionContent";
+import { NetworkAdvisoryBanner } from "@loom/ui-kit/components/NetworkAdvisoryBanner";
 import { Alert, AlertDescription, AlertTitle } from "@loom/ui-kit/components/ui/alert";
 import { Button } from "@loom/ui-kit/components/ui/button";
 import { Skeleton } from "@loom/ui-kit/components/ui/skeleton";
@@ -123,6 +124,7 @@ export function MobileKioskShell({ onExited }: { onExited: () => void }) {
         );
       }}
     >
+      <NetworkAdvisoryBanner />
       <div className="min-h-full p-3 sm:p-5">
         {dashboards.isPending ? (
           <div className="flex flex-col gap-3">

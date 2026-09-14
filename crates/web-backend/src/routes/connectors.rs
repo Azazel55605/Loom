@@ -426,6 +426,34 @@ pub async fn get_instance(
     .await
 }
 
+/// `POST /connector-instances/{id}/reconnect`
+///
+/// Forces one status poll immediately, outside the backed-off schedule. This
+/// is observation rather than control of the remote service, so the same
+/// `connectors.view` grant used to read status is sufficient.
+pub async fn reconnect_instance(
+    _caller: RequirePermission<ConnectorsView>,
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Response {
+    let row = match load_row(&state, &id).await {
+        Ok(Some(row)) => row,
+        Ok(None) => return not_found(&id),
+        Err(response) => return *response,
+    };
+    let Ok(uuid) = Uuid::parse_str(&row.id) else {
+        return not_found(&id);
+    };
+
+    match state.connectors.reconnect(uuid).await {
+        Some(snapshot) => Json(snapshot).into_response(),
+        None => ErrorBody::message(
+            StatusCode::BAD_REQUEST,
+            "reconnect is unavailable because this connector instance is not loaded",
+        ),
+    }
+}
+
 /// `POST /connector-instances/{id}/discover`
 ///
 /// Discovery is a management operation: its suggestions are intended to lead

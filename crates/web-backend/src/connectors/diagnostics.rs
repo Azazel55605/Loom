@@ -54,7 +54,31 @@ pub const PROBE_TIMEOUT: Duration = Duration::from_secs(3);
 /// `None` — rather than a reassuring string — when the target names no port.
 /// A DNS lookup alone cannot distinguish a healthy host from a dead one, and
 /// "the name resolves" is not a diagnosis.
-pub async fn diagnose(target: &NetworkTarget) -> Option<String> {
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NetworkDiagnosis {
+    pub message: String,
+    pub kind: NetworkDiagnosisKind,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NetworkDiagnosisKind {
+    DnsFailure,
+    TcpUnreachable { address: IpAddr },
+    ServiceUnresponsive { address: IpAddr },
+}
+
+impl NetworkDiagnosis {
+    pub fn tcp_unreachable_address(&self) -> Option<IpAddr> {
+        match self.kind {
+            NetworkDiagnosisKind::TcpUnreachable { address } => Some(address),
+            NetworkDiagnosisKind::DnsFailure | NetworkDiagnosisKind::ServiceUnresponsive { .. } => {
+                None
+            }
+        }
+    }
+}
+
+pub async fn diagnose(target: &NetworkTarget) -> Option<NetworkDiagnosis> {
     let port = target.port?;
     let host = target.host.as_str();
 
@@ -66,10 +90,13 @@ pub async fn diagnose(target: &NetworkTarget) -> Option<String> {
         Err(_) => match resolve(host, port).await {
             Some(address) => address,
             None => {
-                return Some(format!(
-                    "DNS resolution failed for `{host}`. If this is a local DNS entry, check \
-                     your DNS server."
-                ))
+                return Some(NetworkDiagnosis {
+                    message: format!(
+                        "DNS resolution failed for `{host}`. If this is a local DNS entry, check \
+                         your DNS server."
+                    ),
+                    kind: NetworkDiagnosisKind::DnsFailure,
+                })
             }
         },
     };
@@ -82,17 +109,21 @@ pub async fn diagnose(target: &NetworkTarget) -> Option<String> {
     {
         // Connected. The network path is fine and the service on the other end
         // is not, which is the one outcome that rules the network *out*.
-        Ok(Ok(_stream)) => Some(
-            "The host is reachable, but the service itself isn't responding. It may have \
-             crashed or is misconfigured."
+        Ok(Ok(_stream)) => Some(NetworkDiagnosis {
+            message: "The host is reachable, but the service itself isn't responding. It may have \
+                      crashed or is misconfigured."
                 .to_owned(),
-        ),
+            kind: NetworkDiagnosisKind::ServiceUnresponsive { address },
+        }),
         // Refused, unreachable, or timed out. Named together because the
         // remedy is the same one: go look at the host.
-        Ok(Err(_)) | Err(_) => Some(format!(
-            "Host `{address}` is unreachable on port `{port}`. It may be offline, or a \
-             firewall is blocking the connection."
-        )),
+        Ok(Err(_)) | Err(_) => Some(NetworkDiagnosis {
+            message: format!(
+                "Host `{address}` is unreachable on port `{port}`. It may be offline, or a \
+                 firewall is blocking the connection."
+            ),
+            kind: NetworkDiagnosisKind::TcpUnreachable { address },
+        }),
     }
 }
 
@@ -129,13 +160,12 @@ mod tests {
         // which makes this deterministic on any machine and on any network.
         let target = NetworkTarget::new("loom-connector-probe.invalid", 9);
         let diagnosis = diagnose(&target).await.expect("a name that cannot resolve");
+        assert_eq!(diagnosis.kind, NetworkDiagnosisKind::DnsFailure);
+        assert!(diagnosis.message.contains("DNS resolution failed"));
         assert!(
-            diagnosis.contains("DNS resolution failed"),
-            "should blame DNS: {diagnosis}"
-        );
-        assert!(
-            diagnosis.contains("loom-connector-probe.invalid"),
-            "should name the host: {diagnosis}"
+            diagnosis.message.contains("loom-connector-probe.invalid"),
+            "should name the host: {}",
+            diagnosis.message
         );
     }
 
@@ -146,12 +176,14 @@ mod tests {
         let target = NetworkTarget::new("127.0.0.1", 1);
         let diagnosis = diagnose(&target).await.expect("nothing is listening");
         assert!(
-            diagnosis.contains("unreachable on port `1`"),
-            "should blame the host and name the port: {diagnosis}"
+            diagnosis.message.contains("unreachable on port `1`"),
+            "should blame the host and name the port: {}",
+            diagnosis.message
         );
         assert!(
-            !diagnosis.contains("DNS"),
-            "a literal address never goes near a resolver: {diagnosis}"
+            !diagnosis.message.contains("DNS"),
+            "a literal address never goes near a resolver: {}",
+            diagnosis.message
         );
     }
 
@@ -168,8 +200,9 @@ mod tests {
             .await
             .expect("a reachable port still warrants an explanation");
         assert!(
-            diagnosis.contains("host is reachable"),
-            "should rule the network out: {diagnosis}"
+            diagnosis.message.contains("host is reachable"),
+            "should rule the network out: {}",
+            diagnosis.message
         );
     }
 }

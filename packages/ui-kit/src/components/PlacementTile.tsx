@@ -17,6 +17,7 @@ import { toast } from "sonner";
 
 import { Alert, AlertDescription } from "@loom/ui-kit/components/ui/alert";
 import { ConnectorDetailModal } from "@loom/ui-kit/components/ConnectorDetailModal";
+import { ConnectorReconnectButton } from "@loom/ui-kit/components/ConnectorReconnectButton";
 import { Button } from "@loom/ui-kit/components/ui/button";
 import { Card, CardContent, CardHeader } from "@loom/ui-kit/components/ui/card";
 import { Checkbox } from "@loom/ui-kit/components/ui/checkbox";
@@ -213,6 +214,8 @@ function ConnectorPlacementTile({
   const api = useApiClient();
   const { user } = useAuth();
   const [detailOpen, setDetailOpen] = React.useState(false);
+  const [manualReading, setManualReading] = React.useState<LiveStatus | null>(null);
+  React.useEffect(() => setManualReading(null), [live]);
   // Which part of the detail view was asked for. The header's expand button
   // means "show me this connector"; a log preview's means "show me *that*",
   // and a modal that opens on a stat tile has ignored the question.
@@ -284,16 +287,18 @@ function ConnectorPlacementTile({
     [detail.data, execute, instance.name, placement.targetId],
   );
 
-  const status = live?.status ?? instance.status;
-  const statusError = live === undefined ? instance.statusError : live.statusError;
+  const currentReading = manualReading ?? live;
+  const status = currentReading?.status ?? instance.status;
+  const statusError = currentReading === undefined ? instance.statusError : currentReading.statusError;
   // One helper decides what the badge says and whether the controls work, so
   // "a pending operation outranks health" is a rule that exists once rather
   // than being re-derived in the tile, the modal and the dispatcher.
   const availability = connectorAvailability({
     status,
     statusError,
-    pendingOperation: live === undefined ? instance.pendingOperation : live.pendingOperation,
-    diagnosis: live === undefined ? instance.diagnosis : live.diagnosis,
+    pendingOperation:
+      currentReading === undefined ? instance.pendingOperation : currentReading.pendingOperation,
+    diagnosis: currentReading === undefined ? instance.diagnosis : currentReading.diagnosis,
   });
   const targetHealth =
     placement.targetId === null ? undefined : status?.targetHealth?.[placement.targetId];
@@ -307,8 +312,11 @@ function ConnectorPlacementTile({
           status: { ...status, health: targetHealth },
           statusError,
           pendingOperation:
-            live === undefined ? instance.pendingOperation : live.pendingOperation,
-          diagnosis: live === undefined ? instance.diagnosis : live.diagnosis,
+            currentReading === undefined
+              ? instance.pendingOperation
+              : currentReading.pendingOperation,
+          diagnosis:
+            currentReading === undefined ? instance.diagnosis : currentReading.diagnosis,
         });
   // Docker's id remains a useful immediate fallback. The shared cached target
   // lookup adds authoritative labels and icons for connectors such as UniFi,
@@ -442,6 +450,14 @@ function ConnectorPlacementTile({
             />
           ) : null}
           <ConnectorStatusBadge availability={badgeAvailability} />
+          {badgeAvailability.tone === "down" || badgeAvailability.tone === "degraded" ? (
+            <ConnectorReconnectButton
+              instanceId={instance.id}
+              instanceName={instance.name}
+              iconOnly
+              onStatus={setManualReading}
+            />
+          ) : null}
           {grouping ? null : editing ? (
             <>
               {groupMember !== undefined ? (

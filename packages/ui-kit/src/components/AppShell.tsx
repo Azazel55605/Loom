@@ -3,6 +3,7 @@ import { useQuery } from "@tanstack/react-query";
 import { LogOut, Menu, PanelLeftClose, PanelLeftOpen } from "lucide-react";
 
 import { Badge } from "@loom/ui-kit/components/ui/badge";
+import { NetworkAdvisoryBanner } from "@loom/ui-kit/components/NetworkAdvisoryBanner";
 import { Button } from "@loom/ui-kit/components/ui/button";
 import {
   Sheet,
@@ -155,6 +156,8 @@ export function AppShell({
           </div>
         </div>
       </header>
+
+      <NetworkAdvisoryBanner />
 
       {sidebar === undefined ? null : (
         <Button

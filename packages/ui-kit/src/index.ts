@@ -7,4 +7,4 @@ export type {
   WebSocketTransport,
 } from "./lib/websocket-transport";
 export { ConnectorStatusSocket } from "./lib/connector-socket";
-export type { ConnectorStatusUpdate } from "./lib/connector-socket";
+export type { ConnectorStatusUpdate, NetworkAdvisoryUpdate } from "./lib/connector-socket";
