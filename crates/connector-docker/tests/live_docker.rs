@@ -632,6 +632,50 @@ async fn one_host_instance_reports_the_daemon_and_lists_real_sub_targets() {
         .is_some_and(|version| !version.is_empty()));
 }
 
+/// Read-only compatibility check for whichever daemon
+/// `LOOM_TEST_DOCKER_HOST` names. Unlike the broader live tests this creates no
+/// fixture container, so it is safe to point at an existing host when checking
+/// an Engine-version-specific `/system/df` response.
+#[tokio::test]
+async fn a_real_host_parses_its_disk_usage_response() {
+    let test_name = "a_real_host_parses_its_disk_usage_response";
+    let Some(_) = docker_or_skip(test_name).await else {
+        return;
+    };
+    let connector = DockerConnector::connect(DockerConnectorConfig {
+        docker_host: test_docker_host(),
+        ..DockerConnectorConfig::default()
+    })
+    .await
+    .expect("the read-only connector should reach the daemon");
+
+    let status = connector.status().await.expect("host status");
+    let Some(disk_usage) = status
+        .data_point_value_for(None, DATA_POINT_DISK_USAGE_BYTES)
+        .and_then(serde_json::Value::as_i64)
+    else {
+        let error = status
+            .data_point_value("error")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("no diagnosis");
+        if error.contains("disk usage timed out") {
+            eprintln!(
+                "SKIPPING {test_name}: the optional /system/df read exceeded the connector's status-poll timeout"
+            );
+            return;
+        }
+        panic!("the daemon's real /system/df shape should produce disk usage: {error}");
+    };
+    assert!(disk_usage > 0, "a populated Docker host uses disk space");
+    assert!(
+        !status
+            .data_point_value("error")
+            .and_then(serde_json::Value::as_str)
+            .is_some_and(|error| error.contains("/system/df")),
+        "a parsed /system/df response must not leave a parsing diagnosis"
+    );
+}
+
 #[tokio::test]
 async fn stopping_and_restarting_a_container_moves_its_reported_state() {
     let test_name = "stopping_and_restarting_a_container_moves_its_reported_state";

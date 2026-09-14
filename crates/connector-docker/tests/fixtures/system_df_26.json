@@ -1,0 +1,64 @@
+{
+  "LayersSize": 1000,
+  "Images": [
+    {
+      "Containers": 1,
+      "Created": 1700000000,
+      "Id": "sha256:sanitized-docker-26-image",
+      "Labels": {},
+      "ParentId": "",
+      "RepoDigests": [],
+      "RepoTags": ["example.invalid/app:26"],
+      "SharedSize": -1,
+      "Size": 1000
+    }
+  ],
+  "Containers": [
+    {
+      "Command": "sanitized",
+      "Created": 1700000000,
+      "HostConfig": { "NetworkMode": "default" },
+      "Id": "sanitized-docker-26-container-a",
+      "Image": "example.invalid/app:26",
+      "ImageID": "sha256:sanitized-docker-26-image",
+      "Labels": {},
+      "Mounts": [],
+      "Names": ["/sanitized-a"],
+      "NetworkSettings": { "Networks": {} },
+      "Ports": [],
+      "SizeRootFs": 1050,
+      "SizeRw": 50,
+      "State": "running",
+      "Status": "Up"
+    },
+    {
+      "Command": "sanitized",
+      "Created": 1700000000,
+      "HostConfig": { "NetworkMode": "default" },
+      "Id": "sanitized-docker-26-container-b",
+      "Image": "example.invalid/app:26",
+      "ImageID": "sha256:sanitized-docker-26-image",
+      "Labels": {},
+      "Mounts": [],
+      "Names": ["/sanitized-b"],
+      "NetworkSettings": { "Networks": {} },
+      "Ports": [],
+      "SizeRootFs": 1000,
+      "State": "exited",
+      "Status": "Exited"
+    }
+  ],
+  "Volumes": [
+    {
+      "CreatedAt": "2026-01-01T00:00:00Z",
+      "Driver": "local",
+      "Labels": {},
+      "Mountpoint": "/sanitized",
+      "Name": "sanitized-volume",
+      "Options": {},
+      "Scope": "local",
+      "UsageData": { "RefCount": 1, "Size": 300 }
+    }
+  ],
+  "BuildCache": []
+}

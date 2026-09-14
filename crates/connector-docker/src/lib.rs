@@ -16,6 +16,7 @@
 
 mod config;
 mod connector;
+mod disk_usage;
 mod metrics;
 mod registry;
 mod resources;

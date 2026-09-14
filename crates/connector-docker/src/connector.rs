@@ -27,6 +27,7 @@ use serde::Serialize;
 use serde_json::{json, Map, Value};
 
 use crate::config::{config_schema, DockerConnectorConfig};
+use crate::disk_usage::{self, DiskUsageError};
 use crate::metrics::{cpu_percent, format_uptime, health_for_state};
 use crate::registry::{HttpRegistry, RegistryTransport};
 use crate::updates::{apply_update, check_container, configured_image_ref, UpdateCache};
@@ -2768,71 +2769,8 @@ impl DockerConnector {
             return cached;
         }
 
-        let (usage, version) = tokio::join!(self.docker.df(None), self.docker.version());
+        let (usage, version) = tokio::join!(disk_usage::read(&self.config), self.docker.version());
         let mut errors = Vec::new();
-        // One `/system/df` read answers both numbers. Splitting the image share
-        // out costs nothing here and would cost a second call to that
-        // deliberately-rate-limited endpoint if it were read anywhere else.
-        let (disk_usage, image_disk_usage, image_storage_breakdown, container_state_breakdown) =
-            match usage {
-                Ok(usage)
-                    if usage.image_usage.is_none()
-                        && usage.container_usage.is_none()
-                        && usage.volume_usage.is_none()
-                        && usage.build_cache_usage.is_none() =>
-                {
-                    // Older Docker Engine API versions return the legacy
-                    // LayersSize/Images/Containers/Volumes/BuildCache shape.
-                    // Bollard's current model ignores those unknown fields,
-                    // leaving an apparently-successful but empty response.
-                    // Treat that as unavailable instead of reporting a
-                    // misleading 0 B while keeping the connector Healthy.
-                    errors.push(
-                        "Docker disk usage is unavailable: /system/df returned no recognized usage fields; the daemon may use an older Docker API response format"
-                            .to_owned(),
-                    );
-                    (None, None, None, None)
-                }
-                Ok(usage) => {
-                    let images = usage
-                        .image_usage
-                        .as_ref()
-                        .and_then(|value| value.total_size);
-                    let image_breakdown = image_storage_breakdown(
-                        usage
-                            .image_usage
-                            .as_ref()
-                            .and_then(|value| value.items.as_deref()),
-                    );
-                    let state_breakdown = container_state_breakdown(
-                        usage
-                            .container_usage
-                            .as_ref()
-                            .and_then(|value| value.items.as_deref()),
-                    );
-                    let sizes = [
-                        images,
-                        usage
-                            .container_usage
-                            .as_ref()
-                            .and_then(|value| value.total_size),
-                        usage
-                            .volume_usage
-                            .as_ref()
-                            .and_then(|value| value.total_size),
-                        usage
-                            .build_cache_usage
-                            .as_ref()
-                            .and_then(|value| value.total_size),
-                    ];
-                    let total = sizes.iter().flatten().copied().reduce(i64::saturating_add);
-                    (total, images, Some(image_breakdown), Some(state_breakdown))
-                }
-                Err(error) => {
-                    errors.push(optional_host_read_failure("Docker disk usage", &error));
-                    (None, None, None, None)
-                }
-            };
         let version = match version {
             Ok(version) => version.version,
             Err(error) => {
@@ -2840,6 +2778,43 @@ impl DockerConnector {
                 None
             }
         };
+        // One `/system/df` read answers both numbers. Splitting the image share
+        // out costs nothing here and would cost a second call to that
+        // deliberately-rate-limited endpoint if it were read anywhere else.
+        let (disk_usage, image_disk_usage, image_storage_breakdown, container_state_breakdown) =
+            match usage {
+                Ok(usage) => {
+                    let image_breakdown = image_storage_breakdown(Some(&usage.images));
+                    let state_breakdown = container_state_breakdown(Some(&usage.containers));
+                    (
+                        usage.total_size,
+                        usage.image_size,
+                        Some(image_breakdown),
+                        Some(state_breakdown),
+                    )
+                }
+                Err(DiskUsageError::TimedOut) => {
+                    errors.push(
+                        "Docker disk usage timed out. Container status and actions remain available."
+                            .to_owned(),
+                    );
+                    (None, None, None, None)
+                }
+                Err(DiskUsageError::Unavailable(error)) => {
+                    errors.push(format!("Docker disk usage is unavailable: {error}"));
+                    (None, None, None, None)
+                }
+                Err(DiskUsageError::UnsupportedShape) => {
+                    errors.push(match version.as_deref() {
+                        Some(version) => format!(
+                            "Docker disk usage is not supported by Docker version {version}: /system/df returned neither the legacy resource arrays nor aggregate usage fields"
+                        ),
+                        None => "Docker disk usage is unavailable: /system/df returned no recognized usage fields"
+                            .to_owned(),
+                    });
+                    (None, None, None, None)
+                }
+            };
         let refreshed = CachedHostDetails {
             disk_usage,
             image_disk_usage,

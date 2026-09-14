@@ -1,0 +1,50 @@
+{
+  "LayersSize": 3000,
+  "Images": [],
+  "Containers": [],
+  "Volumes": [],
+  "BuildCache": [],
+  "ImageUsage": {
+    "ActiveCount": 1,
+    "Items": [
+      {
+        "Id": "sha256:sanitized-docker-29-image",
+        "RepoTags": ["example.invalid/app:latest"],
+        "Size": 3000
+      }
+    ],
+    "Reclaimable": 0,
+    "TotalCount": 1,
+    "TotalSize": 3000
+  },
+  "ContainerUsage": {
+    "ActiveCount": 1,
+    "Items": [
+      {
+        "Id": "sanitized-docker-29-container",
+        "Names": ["/sanitized"],
+        "SizeRw": 100,
+        "State": "running"
+      }
+    ],
+    "TotalCount": 1,
+    "TotalSize": 100
+  },
+  "VolumeUsage": {
+    "ActiveCount": 1,
+    "Items": [
+      {
+        "Name": "sanitized-volume",
+        "UsageData": { "RefCount": 1, "Size": 300 }
+      }
+    ],
+    "TotalCount": 1,
+    "TotalSize": 300
+  },
+  "BuildCacheUsage": {
+    "Items": [],
+    "Reclaimable": 0,
+    "TotalCount": 1,
+    "TotalSize": 600
+  }
+}
