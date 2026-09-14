@@ -12,7 +12,6 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@loom/ui-kit/components/ui/dialog";
-import { Input } from "@loom/ui-kit/components/ui/input";
 import { Label } from "@loom/ui-kit/components/ui/label";
 import {
   Select,
@@ -22,7 +21,7 @@ import {
   SelectValue,
 } from "@loom/ui-kit/components/ui/select";
 import { Skeleton } from "@loom/ui-kit/components/ui/skeleton";
-import { IconPicker } from "@loom/ui-kit/components/IconPicker";
+import { ButtonTileWizard } from "@loom/ui-kit/components/ButtonTileWizard";
 import { PlacementBindingEditor } from "@loom/ui-kit/components/PlacementBindingEditor";
 import {
   isPlacementActionComplete,
@@ -278,7 +277,7 @@ export function AddPlacementDialog({
         if (!next) reset();
       }}
     >
-      <DialogContent className="max-h-[85vh] max-w-2xl overflow-y-auto">
+      <DialogContent className="flex max-h-[85dvh] max-w-2xl flex-col overflow-hidden">
         <DialogHeader>
           <DialogTitle>Add a tile</DialogTitle>
           <DialogDescription>
@@ -288,7 +287,7 @@ export function AddPlacementDialog({
         </DialogHeader>
 
         <form
-          className="flex flex-col gap-5"
+          className="flex min-h-0 flex-1 flex-col gap-5"
           // Native validation bubbles are a browser-default control per
           // docs/UI_GUIDELINES.md, and they would pre-empt the backend's own
           // message about a binding or a size it refused.
@@ -325,46 +324,33 @@ export function AddPlacementDialog({
           </div>
 
           {kind === "button" ? (
-            <div className="flex flex-col gap-5">
-              <div className="flex flex-col gap-1.5">
-                <Label htmlFor="placement-button-label">Label</Label>
-                <Input
-                  id="placement-button-label"
-                  value={buttonLabel}
-                  disabled={create.isPending}
-                  placeholder="Network"
-                  onChange={(event) => setButtonLabel(event.target.value)}
-                />
-                <p className="text-xs text-muted-foreground">
-                  What the tile says. It has no connector to take a name from.
-                </p>
-              </div>
-
-              <div className="flex flex-col gap-2">
-                <Label>Icon</Label>
-                <IconPicker
-                  value={buttonIcon}
-                  defaultIcon={null}
-                  label="Button tile icon"
-                  defaultLabel="No icon"
-                  disabled={create.isPending}
-                  onChange={setButtonIcon}
-                />
-              </div>
-
-              <PlacementActionEditor
-                value={action}
-                onChange={setAction}
-                currentDashboardId={dashboardId}
-                // No toggle: the backend refuses a placement with neither a
-                // connector nor an action, and offering to turn this off would
-                // be offering to build a tile that cannot be saved.
-                required
-                disabled={create.isPending}
-              />
-            </div>
+            <ButtonTileWizard
+              name={buttonLabel}
+              icon={buttonIcon}
+              action={action}
+              currentDashboardId={dashboardId}
+              disabled={create.isPending}
+              pending={create.isPending}
+              submitLabel="Add to dashboard"
+              resetKey={`${open}-${kind}`}
+              onNameChange={setButtonLabel}
+              onIconChange={setButtonIcon}
+              onActionChange={setAction}
+              onCancel={() => {
+                reset();
+                onOpenChange(false);
+              }}
+              error={
+                create.isError ? (
+                  <Alert variant="destructive" className="mt-4">
+                    <AlertCircle aria-hidden="true" />
+                    <AlertDescription>{describeConnectorError(create.error)}</AlertDescription>
+                  </Alert>
+                ) : undefined
+              }
+            />
           ) : (
-          <>
+          <div className="min-h-0 flex-1 overflow-y-auto pr-1">
           <div className="flex flex-col gap-1.5">
             <Label htmlFor="placement-instance">Connector</Label>
             {instances.isPending ? (
@@ -548,17 +534,17 @@ export function AddPlacementDialog({
               />
             </div>
           )}
-          </>
+          </div>
           )}
 
-          {create.isError ? (
+          {kind === "connector" && create.isError ? (
             <Alert variant="destructive">
               <AlertCircle aria-hidden="true" />
               <AlertDescription>{describeConnectorError(create.error)}</AlertDescription>
             </Alert>
           ) : null}
 
-          <DialogFooter>
+          {kind === "connector" ? <DialogFooter>
             <Button
               type="button"
               variant="outline"
@@ -574,7 +560,7 @@ export function AddPlacementDialog({
               {create.isPending && <Loader2 className="animate-spin" aria-hidden="true" />}
               Add to dashboard
             </Button>
-          </DialogFooter>
+          </DialogFooter> : null}
         </form>
       </DialogContent>
     </Dialog>

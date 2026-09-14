@@ -23,7 +23,7 @@ import {
 } from "@loom/ui-kit/components/ActionParamsDialog";
 import { dashboardsQueryKey } from "@loom/ui-kit/components/DashboardSidebar";
 import { DataPointPicker } from "@loom/ui-kit/components/DataPointPicker";
-import { IconPicker } from "@loom/ui-kit/components/IconPicker";
+import { IconPickerPopover } from "@loom/ui-kit/components/IconPicker";
 import {
   SearchablePickerList,
   type SearchablePickerOption,
@@ -44,6 +44,7 @@ import { describeConnectorError } from "@loom/ui-kit/lib/connector-error";
 import { describeTargetKind } from "@loom/ui-kit/lib/target-label";
 
 type ActionKind = "navigate" | "connectorAction";
+export type PlacementActionEditorSection = "all" | "click" | "state" | "display";
 
 /** The host view, as a `Select` value — Radix reserves the empty string. */
 const HOST_TARGET = "__host__";
@@ -95,12 +96,15 @@ export function PlacementActionEditor({
   currentDashboardId,
   required = false,
   disabled = false,
+  section = "all",
 }: {
   value: PlacementAction | null;
   onChange: (next: PlacementAction | null) => void;
   currentDashboardId: string;
   required?: boolean;
   disabled?: boolean;
+  /** A wizard host can expose one focused part without duplicating the editor. */
+  section?: PlacementActionEditorSection;
 }) {
   const api = useApiClient();
   const enabled = required || value !== null;
@@ -253,9 +257,103 @@ export function PlacementActionEditor({
           (action) => action.id === connectorAction?.[paramsPurpose ?? "toTrue"]?.actionId,
         );
 
+  function handleSeparateActionsChange(separate: boolean) {
+    setSeparateTransitionActions(separate);
+    if (separate || connectorAction === null) return;
+    const actionId =
+      connectorAction.toTrue?.actionId ??
+      connectorAction.toFalse?.actionId ??
+      connectorAction.actionId;
+    if (actionId === "") return;
+    patchConnectorAction({
+      toTrue: {
+        actionId,
+        params:
+          connectorAction.toTrue?.actionId === actionId
+            ? connectorAction.toTrue.params
+            : {},
+      },
+      toFalse: {
+        actionId,
+        params:
+          connectorAction.toFalse?.actionId === actionId
+            ? connectorAction.toFalse.params
+            : {},
+      },
+    });
+  }
+
+  function renderStateConfiguration(mode: "all" | "state" | "display") {
+    if (connectorAction === null) {
+      return (
+        <p className="text-sm text-muted-foreground">
+          Dashboard navigation does not use connector state.
+        </p>
+      );
+    }
+    if (detail.isPending) return <Skeleton className="h-24 w-full" />;
+    if (detail.isError) {
+      return (
+        <Alert variant="destructive">
+          <AlertCircle aria-hidden="true" />
+          <AlertDescription>{describeConnectorError(detail.error)}</AlertDescription>
+        </Alert>
+      );
+    }
+    if (detail.data === undefined) return null;
+
+    return (
+      <>
+        {mode !== "display" ? (
+          <div className="flex items-start justify-between gap-4 rounded-md border p-3">
+            <div className="min-w-0">
+              <Label
+                htmlFor="placement-action-state-aware"
+                className="text-sm font-medium"
+              >
+                Make this state-aware
+              </Label>
+              <p className="text-xs text-muted-foreground">
+                Read a live on/off value and let the server choose the correct
+                transition when this control is pressed.
+              </p>
+            </div>
+            <Switch
+              id="placement-action-state-aware"
+              checked={stateAware}
+              disabled={disabled}
+              onCheckedChange={(checked) =>
+                checked ? enableStateAwareness() : clearStateAwareness()
+              }
+            />
+          </div>
+        ) : null}
+
+        {stateAware ? (
+          <StateAwareActionEditor
+            action={connectorAction}
+            actions={availableActions}
+            dataPoints={detail.data.dataPoints}
+            disabled={disabled}
+            separateActions={separateTransitionActions}
+            section={mode}
+            onSeparateActionsChange={handleSeparateActionsChange}
+            onPatch={patchConnectorAction}
+            onPatchTransition={patchTransition}
+            onEditParams={setParamsPurpose}
+          />
+        ) : mode === "state" ? (
+          <p className="text-sm text-muted-foreground">
+            This button will run the selected action without reading live state.
+          </p>
+        ) : null}
+      </>
+    );
+  }
+
   return (
     <div className="flex flex-col gap-4">
-      {required ? null : (
+      {required || section !== "all" ? null : (
         <div className="flex items-start justify-between gap-4">
           <div className="min-w-0">
             <Label htmlFor="placement-clickable" className="text-sm font-medium">
@@ -277,7 +375,7 @@ export function PlacementActionEditor({
         </div>
       )}
 
-      {enabled ? (
+      {enabled && (section === "all" || section === "click") ? (
         <div className="flex flex-col gap-4 rounded-md border p-3">
           <div className="flex flex-col gap-2">
             <Label>When clicked</Label>
@@ -511,72 +609,16 @@ export function PlacementActionEditor({
                     </p>
                   ) : null}
 
-                  <div className="flex items-start justify-between gap-4 rounded-md border p-3">
-                    <div className="min-w-0">
-                      <Label
-                        htmlFor="placement-action-state-aware"
-                        className="text-sm font-medium"
-                      >
-                        Make this state-aware
-                      </Label>
-                      <p className="text-xs text-muted-foreground">
-                        Read a live on/off value and let the server choose the
-                        correct transition when this control is pressed.
-                      </p>
-                    </div>
-                    <Switch
-                      id="placement-action-state-aware"
-                      checked={stateAware}
-                      disabled={disabled}
-                      onCheckedChange={(checked) =>
-                        checked ? enableStateAwareness() : clearStateAwareness()
-                      }
-                    />
-                  </div>
-
-                  {stateAware && connectorAction !== null ? (
-                    <StateAwareActionEditor
-                      action={connectorAction}
-                      actions={availableActions}
-                      dataPoints={detail.data.dataPoints}
-                      disabled={disabled}
-                      separateActions={separateTransitionActions}
-                      onSeparateActionsChange={(separate) => {
-                        setSeparateTransitionActions(separate);
-                        if (separate) return;
-                        const actionId =
-                          connectorAction.toTrue?.actionId ??
-                          connectorAction.toFalse?.actionId ??
-                          connectorAction.actionId;
-                        if (actionId === "") return;
-                        patchConnectorAction({
-                          toTrue: {
-                            actionId,
-                            params:
-                              connectorAction.toTrue?.actionId === actionId
-                                ? connectorAction.toTrue.params
-                                : {},
-                          },
-                          toFalse: {
-                            actionId,
-                            params:
-                              connectorAction.toFalse?.actionId === actionId
-                                ? connectorAction.toFalse.params
-                                : {},
-                          },
-                        });
-                      }}
-                      onPatch={patchConnectorAction}
-                      onPatchTransition={patchTransition}
-                      onEditParams={setParamsPurpose}
-                    />
-                  ) : null}
+                  {section === "all" ? renderStateConfiguration("all") : null}
                 </>
               )}
             </div>
           )}
         </div>
       ) : null}
+
+      {enabled && section === "state" ? renderStateConfiguration("state") : null}
+      {enabled && section === "display" ? renderStateConfiguration("display") : null}
 
       {paramsPurpose !== null && paramsAction !== undefined ? (
         <ActionParamsDialog
@@ -608,6 +650,7 @@ function StateAwareActionEditor({
   dataPoints,
   disabled,
   separateActions,
+  section,
   onSeparateActionsChange,
   onPatch,
   onPatchTransition,
@@ -618,6 +661,7 @@ function StateAwareActionEditor({
   dataPoints: DataPointDescriptor[];
   disabled: boolean;
   separateActions: boolean;
+  section: "all" | "state" | "display";
   onSeparateActionsChange: (separate: boolean) => void;
   onPatch: (
     patch: Partial<Extract<PlacementAction, { type: "connectorAction" }>>,
@@ -656,122 +700,126 @@ function StateAwareActionEditor({
 
   return (
     <div className="surface-panel flex flex-col gap-4 rounded-md border p-3">
-      <div className="flex flex-col gap-2">
-        <Label>State data point</Label>
-        <DataPointPicker
-          idPrefix="placement-action-state"
-          value={
-            action.stateDataPointId === "" || action.stateDataPointId == null
-              ? null
-              : {
-                  connectorInstanceId: action.connectorInstanceId,
-                  targetId: action.stateTargetId ?? null,
-                  dataPointId: action.stateDataPointId,
-                }
-          }
-          fixedContext={{
-            connectorInstanceId: action.connectorInstanceId,
-            targetId: action.targetId,
-            dataPoints,
-          }}
-          allowedValueTypes={BOOLEAN_DATA_POINT_TYPES}
-          disabled={disabled}
-          onChange={(selection) =>
-            onPatch({
-              stateDataPointId: selection?.dataPointId ?? "",
-              stateTargetId: selection?.targetId ?? action.targetId,
-            })
-          }
-        />
-        <p className="text-xs text-muted-foreground">
-          Only Boolean readings on this connector view are available.
-        </p>
-      </div>
+      {section !== "display" ? (
+        <>
+          <div className="flex flex-col gap-2">
+            <Label>State data point</Label>
+            <DataPointPicker
+              idPrefix="placement-action-state"
+              value={
+                action.stateDataPointId === "" || action.stateDataPointId == null
+                  ? null
+                  : {
+                      connectorInstanceId: action.connectorInstanceId,
+                      targetId: action.stateTargetId ?? null,
+                      dataPointId: action.stateDataPointId,
+                    }
+              }
+              fixedContext={{
+                connectorInstanceId: action.connectorInstanceId,
+                targetId: action.targetId,
+                dataPoints,
+              }}
+              allowedValueTypes={BOOLEAN_DATA_POINT_TYPES}
+              disabled={disabled}
+              onChange={(selection) =>
+                onPatch({
+                  stateDataPointId: selection?.dataPointId ?? "",
+                  stateTargetId: selection?.targetId ?? action.targetId,
+                })
+              }
+            />
+            <p className="text-xs text-muted-foreground">
+              Only Boolean readings on this connector view are available.
+            </p>
+          </div>
 
-      <div className="flex items-start justify-between gap-4">
-        <div className="min-w-0">
-          <Label htmlFor="placement-transition-actions">Use the same action</Label>
-          <p className="text-xs text-muted-foreground">
-            Keep this on when one action accepts different on/off parameters.
-            Turn it off for separate actions such as Start and Stop.
-          </p>
-        </div>
-        <Switch
-          id="placement-transition-actions"
-          checked={!separateActions}
-          disabled={disabled}
-          onCheckedChange={(same) => onSeparateActionsChange(!same)}
-        />
-      </div>
+          <div className="flex items-start justify-between gap-4">
+            <div className="min-w-0">
+              <Label htmlFor="placement-transition-actions">Use the same action</Label>
+              <p className="text-xs text-muted-foreground">
+                Keep this on when one action accepts different on/off parameters.
+                Turn it off for separate actions such as Start and Stop.
+              </p>
+            </div>
+            <Switch
+              id="placement-transition-actions"
+              checked={!separateActions}
+              disabled={disabled}
+              onCheckedChange={(same) => onSeparateActionsChange(!same)}
+            />
+          </div>
 
-      {separateActions ? (
-        <div className="grid gap-3 sm:grid-cols-2">
-          <TransitionActionField
-            title="When turning on"
-            direction="toTrue"
-            transition={action.toTrue ?? null}
-            actions={actions}
-            disabled={disabled}
-            onChange={onPatchTransition}
-            onEditParams={onEditParams}
-          />
-          <TransitionActionField
-            title="When turning off"
-            direction="toFalse"
-            transition={action.toFalse ?? null}
-            actions={actions}
-            disabled={disabled}
-            onChange={onPatchTransition}
-            onEditParams={onEditParams}
-          />
-        </div>
-      ) : (
-        <div className="flex flex-col gap-3">
-          <ActionSelect
-            id="placement-shared-transition-action"
-            label="Transition action"
-            value={sharedActionId}
-            actions={actions}
-            disabled={disabled}
-            onChange={setSharedAction}
-          />
-          {sharedActionId === "" ? null : (
+          {separateActions ? (
             <div className="grid gap-3 sm:grid-cols-2">
-              <TransitionParameters
+              <TransitionActionField
                 title="When turning on"
                 direction="toTrue"
                 transition={action.toTrue ?? null}
                 actions={actions}
                 disabled={disabled}
+                onChange={onPatchTransition}
                 onEditParams={onEditParams}
               />
-              <TransitionParameters
+              <TransitionActionField
                 title="When turning off"
                 direction="toFalse"
                 transition={action.toFalse ?? null}
                 actions={actions}
                 disabled={disabled}
+                onChange={onPatchTransition}
                 onEditParams={onEditParams}
               />
             </div>
+          ) : (
+            <div className="flex flex-col gap-3">
+              <ActionSelect
+                id="placement-shared-transition-action"
+                label="Transition action"
+                value={sharedActionId}
+                actions={actions}
+                disabled={disabled}
+                onChange={setSharedAction}
+              />
+              {sharedActionId === "" ? null : (
+                <div className="grid gap-3 sm:grid-cols-2">
+                  <TransitionParameters
+                    title="When turning on"
+                    direction="toTrue"
+                    transition={action.toTrue ?? null}
+                    actions={actions}
+                    disabled={disabled}
+                    onEditParams={onEditParams}
+                  />
+                  <TransitionParameters
+                    title="When turning off"
+                    direction="toFalse"
+                    transition={action.toFalse ?? null}
+                    actions={actions}
+                    disabled={disabled}
+                    onEditParams={onEditParams}
+                  />
+                </div>
+              )}
+            </div>
           )}
-        </div>
-      )}
 
-      <div className="flex flex-col gap-2">
-        <Label>Render style</Label>
-        <SegmentedControl
-          label="State-aware action style"
-          value={renderStyle}
-          options={[
-            { value: "switch", label: "Switch" },
-            { value: "stateButton", label: "State Button" },
-          ]}
-          onChange={setRenderStyle}
-        />
-      </div>
+          <div className="flex flex-col gap-2">
+            <Label>Render style</Label>
+            <SegmentedControl
+              label="State-aware action style"
+              value={renderStyle}
+              options={[
+                { value: "switch", label: "Switch" },
+                { value: "stateButton", label: "State Button" },
+              ]}
+              onChange={setRenderStyle}
+            />
+          </div>
+        </>
+      ) : null}
 
-      {renderStyle === "stateButton" && action.stateButtonDisplay != null ? (
+      {section !== "state" && renderStyle === "stateButton" && action.stateButtonDisplay != null ? (
         <div className="grid gap-4 sm:grid-cols-2">
           <StateButtonDisplayEditor
             title="When true"
@@ -951,7 +999,7 @@ function StateButtonDisplayEditor({
           onChange={(event) => onChange({ ...value, label: event.target.value })}
         />
       </div>
-      <IconPicker
+      <IconPickerPopover
         label={`${title} icon`}
         value={value.icon === "" ? null : value.icon}
         defaultIcon="lucide:power"
@@ -1010,9 +1058,30 @@ function defaultStateButtonDisplay(): StateButtonDisplay {
  * whether the caller may reach it, are the backend's answers to give.
  */
 export function isPlacementActionComplete(action: PlacementAction | null): boolean {
+  if (!isPlacementActionClickComplete(action)) return false;
+  if (action?.type !== "connectorAction") return true;
+  if (!isPlacementActionStateComplete(action)) return false;
+  if (!placementActionNeedsDisplayStep(action)) return true;
+  const display = action.stateButtonDisplay;
+  return (
+    display != null &&
+    display.whenTrue.label.trim() !== "" &&
+    display.whenTrue.icon !== "" &&
+    display.whenFalse.label.trim() !== "" &&
+    display.whenFalse.icon !== ""
+  );
+}
+
+/** The fields owned by the wizard's click-behaviour step. */
+export function isPlacementActionClickComplete(action: PlacementAction | null): boolean {
   if (action === null) return false;
   if (action.type === "navigate") return action.targetDashboardId !== "";
-  if (action.connectorInstanceId === "" || action.actionId === "") return false;
+  return action.connectorInstanceId !== "" && action.actionId !== "";
+}
+
+/** State selection and transitions, intentionally excluding display labels. */
+export function isPlacementActionStateComplete(action: PlacementAction | null): boolean {
+  if (action?.type !== "connectorAction") return true;
   if (action.stateDataPointId == null) return true;
   if (
     action.stateDataPointId === "" ||
@@ -1023,14 +1092,15 @@ export function isPlacementActionComplete(action: PlacementAction | null): boole
   ) {
     return false;
   }
-  if (action.renderStyle !== "stateButton") return action.renderStyle === "switch";
-  const display = action.stateButtonDisplay;
+  return action.renderStyle === "switch" || action.renderStyle === "stateButton";
+}
+
+/** Whether the short third step has anything to configure. */
+export function placementActionNeedsDisplayStep(action: PlacementAction | null): boolean {
   return (
-    display != null &&
-    display.whenTrue.label.trim() !== "" &&
-    display.whenTrue.icon !== "" &&
-    display.whenFalse.label.trim() !== "" &&
-    display.whenFalse.icon !== ""
+    action?.type === "connectorAction" &&
+    action.stateDataPointId != null &&
+    action.renderStyle === "stateButton"
   );
 }
 

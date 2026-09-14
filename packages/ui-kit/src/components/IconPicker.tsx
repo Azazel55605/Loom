@@ -1,10 +1,16 @@
 import * as React from "react";
 
 import * as RadioGroupPrimitive from "@radix-ui/react-radio-group";
-import { Search } from "lucide-react";
+import { ImageIcon, Search } from "lucide-react";
 
 import { AppIcon } from "@loom/ui-kit/components/AppIcon";
+import { Button } from "@loom/ui-kit/components/ui/button";
 import { Input } from "@loom/ui-kit/components/ui/input";
+import {
+  Popover,
+  PopoverContent,
+  PopoverTrigger,
+} from "@loom/ui-kit/components/ui/popover";
 import { RadioGroup } from "@loom/ui-kit/components/ui/radio-group";
 import { iconCatalogEntry, searchIconSections } from "@loom/ui-kit/lib/icon-catalog";
 import { cn } from "@loom/ui-kit/lib/utils";
@@ -138,6 +144,70 @@ export function IconPicker({
         )}
       </RadioGroup>
     </div>
+  );
+}
+
+/**
+ * Compact trigger for the full picker.
+ *
+ * The icon catalog is useful but intentionally large. Forms that only need one
+ * icon should not pay for that grid in their permanent layout, so this keeps
+ * the searchable picker in a Popover and closes it as soon as a choice is made.
+ */
+export function IconPickerPopover({
+  value,
+  onChange,
+  label = "Icon",
+  defaultIcon = null,
+  defaultLabel = "Choose icon",
+  disabled,
+}: {
+  value: string | null;
+  onChange: (value: string | null) => void;
+  label?: string;
+  defaultIcon?: string | null;
+  defaultLabel?: string;
+  disabled?: boolean;
+}) {
+  const [open, setOpen] = React.useState(false);
+  const selected = iconCatalogEntry(value);
+  const selectedLabel = selected?.label ?? (value === null ? defaultLabel : value);
+
+  return (
+    <Popover open={open} onOpenChange={setOpen}>
+      <PopoverTrigger asChild>
+        <Button
+          type="button"
+          variant="outline"
+          className="w-full justify-start"
+          disabled={disabled}
+          aria-label={`${label}: ${selectedLabel}`}
+        >
+          {value === null && defaultIcon === null ? (
+            <ImageIcon data-icon="inline-start" aria-hidden="true" />
+          ) : (
+            <AppIcon icon={value} fallback={defaultIcon} />
+          )}
+          <span className="truncate">{selectedLabel}</span>
+        </Button>
+      </PopoverTrigger>
+      <PopoverContent
+        align="start"
+        className="w-[min(22rem,calc(100vw-2rem))] p-3"
+      >
+        <IconPicker
+          value={value}
+          label={label}
+          defaultIcon={defaultIcon}
+          defaultLabel={defaultLabel}
+          disabled={disabled}
+          onChange={(next) => {
+            onChange(next);
+            setOpen(false);
+          }}
+        />
+      </PopoverContent>
+    </Popover>
   );
 }
 

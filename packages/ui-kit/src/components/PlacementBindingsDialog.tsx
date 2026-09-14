@@ -15,6 +15,7 @@ import {
 } from "@loom/ui-kit/components/ui/dialog";
 import { Skeleton } from "@loom/ui-kit/components/ui/skeleton";
 import { Label } from "@loom/ui-kit/components/ui/label";
+import { ButtonTileWizard } from "@loom/ui-kit/components/ButtonTileWizard";
 import { PlacementBindingEditor } from "@loom/ui-kit/components/PlacementBindingEditor";
 import {
   isPlacementActionComplete,
@@ -68,6 +69,8 @@ export function PlacementBindingsDialog({
   const api = useApiClient();
   const [bindings, setBindings] = React.useState<WidgetBinding[]>([]);
   const [action, setAction] = React.useState<PlacementAction | null>(null);
+  const [label, setLabel] = React.useState("");
+  const [icon, setIcon] = React.useState<string | null>(null);
   const seededFor = React.useRef<string | null>(null);
 
   const instanceId = placement?.connector?.id ?? null;
@@ -91,6 +94,8 @@ export function PlacementBindingsDialog({
     seededFor.current = placement.id;
     setBindings(placement.widgetBindings);
     setAction(placement.placementAction);
+    setLabel(placement.label ?? "");
+    setIcon(placement.icon);
   }, [placement]);
 
   const save = useMutation({
@@ -100,6 +105,7 @@ export function PlacementBindingsDialog({
         // A static tile has nothing to bind, and sending an empty array would
         // be indistinguishable from clearing bindings it never had.
         ...(isStaticTile ? {} : { widgetBindings: bindings }),
+        ...(isStaticTile ? { label: label.trim(), icon } : {}),
         // Always sent, including as `null`: absent would leave the stored
         // action alone, which is not what turning the toggle off means.
         placementAction: action,
@@ -124,7 +130,7 @@ export function PlacementBindingsDialog({
         }
       }}
     >
-      <DialogContent className="max-h-[85vh] max-w-2xl overflow-y-auto">
+      <DialogContent className="flex max-h-[85dvh] max-w-2xl flex-col overflow-hidden">
         <DialogHeader>
           <DialogTitle>
             {isStaticTile
@@ -139,7 +145,7 @@ export function PlacementBindingsDialog({
         </DialogHeader>
 
         <form
-          className="flex flex-col gap-5"
+          className="flex min-h-0 flex-1 flex-col gap-5"
           // See AddPlacementDialog: native bubbles would pre-empt the backend's
           // own message about a binding it refused.
           noValidate
@@ -148,8 +154,32 @@ export function PlacementBindingsDialog({
             save.mutate();
           }}
         >
-          {isStaticTile ? null : (
+          {isStaticTile ? (
+            <ButtonTileWizard
+              name={label}
+              icon={icon}
+              action={action}
+              currentDashboardId={dashboardId}
+              disabled={save.isPending}
+              pending={save.isPending}
+              submitLabel="Save button"
+              resetKey={placement.id}
+              onNameChange={setLabel}
+              onIconChange={setIcon}
+              onActionChange={setAction}
+              onCancel={() => onOpenChange(false)}
+              error={
+                save.isError ? (
+                  <Alert variant="destructive" className="mt-4">
+                    <AlertCircle aria-hidden="true" />
+                    <AlertDescription>{describeConnectorError(save.error)}</AlertDescription>
+                  </Alert>
+                ) : undefined
+              }
+            />
+          ) : (
             <>
+              <div className="min-h-0 flex-1 overflow-y-auto pr-1">
               {/* Target identity is intentionally read-only in this pass.
                   Changing it would require discarding and re-seeding the entire
                   binding set; delete and recreate the placement instead. */}
@@ -183,29 +213,25 @@ export function PlacementBindingsDialog({
                   disabled={save.isPending}
                 />
               )}
-            </>
-          )}
+                <div className="mt-5 flex flex-col gap-2 border-t pt-4">
+                  <h3 className="text-sm font-medium">Click behaviour</h3>
+                  <PlacementActionEditor
+                    value={action}
+                    onChange={setAction}
+                    currentDashboardId={dashboardId}
+                    disabled={save.isPending}
+                  />
+                </div>
 
-          <div className="flex flex-col gap-2 border-t pt-4">
-            <h3 className="text-sm font-medium">Click behaviour</h3>
-            <PlacementActionEditor
-              value={action}
-              onChange={setAction}
-              currentDashboardId={dashboardId}
-              // A static tile cannot have it removed; the backend answers 400.
-              required={isStaticTile}
-              disabled={save.isPending}
-            />
-          </div>
+                {save.isError ? (
+                  <Alert variant="destructive" className="mt-5">
+                    <AlertCircle aria-hidden="true" />
+                    <AlertDescription>{describeConnectorError(save.error)}</AlertDescription>
+                  </Alert>
+                ) : null}
+              </div>
 
-          {save.isError ? (
-            <Alert variant="destructive">
-              <AlertCircle aria-hidden="true" />
-              <AlertDescription>{describeConnectorError(save.error)}</AlertDescription>
-            </Alert>
-          ) : null}
-
-          <DialogFooter>
+              <DialogFooter>
             <Button
               type="button"
               variant="outline"
@@ -217,7 +243,7 @@ export function PlacementBindingsDialog({
             <Button
               type="submit"
               disabled={
-                (!isStaticTile && detail.isPending) ||
+                detail.isPending ||
                 save.isPending ||
                 // A half-filled action is refused by the backend; saying so
                 // with a dead button beats saying so with a 400.
@@ -225,9 +251,11 @@ export function PlacementBindingsDialog({
               }
             >
               {save.isPending && <Loader2 className="animate-spin" aria-hidden="true" />}
-              {isStaticTile ? "Save button" : "Save tile"}
+              Save tile
             </Button>
-          </DialogFooter>
+              </DialogFooter>
+            </>
+          )}
         </form>
       </DialogContent>
     </Dialog>
