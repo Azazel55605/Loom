@@ -1,6 +1,7 @@
 {
   "core": "0.3.0",
   "connector-docker": "0.6.0",
+  "connector-govee": "0.1.0",
   "connector-pihole": "0.4.0",
   "connector-tasmota": "0.1.5",
   "connector-truenas": "0.2.5",

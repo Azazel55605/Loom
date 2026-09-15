@@ -15,6 +15,7 @@ use std::pin::Pin;
 use std::sync::Arc;
 
 use loom_connector_docker::DockerConnector;
+use loom_connector_govee::GoveeConnector;
 use loom_connector_pihole::PiHoleConnector;
 use loom_connector_tasmota::TasmotaConnector;
 use loom_connector_truenas::TrueNasConnector;
@@ -83,7 +84,8 @@ pub type ConnectorTypeRegistry = Arc<HashMap<&'static str, ConnectorTypeRegistra
 
 /// The types compiled into this build.
 ///
-/// Six today: the debug fixture, Docker, TrueNAS, Pi-hole, Tasmota, and UniFi Network. Further integrations
+/// Seven today: the debug fixture, Docker, Govee, TrueNAS, Pi-hole, Tasmota,
+/// and UniFi Network. Further integrations
 /// (a reverse proxy, a hypervisor) register here alongside them,
 /// and nothing else in the backend has to change when they do — that is the
 /// point of the indirection.
@@ -152,6 +154,30 @@ pub fn builtin_registry() -> ConnectorTypeRegistry {
             // Containers are addressable sub-targets of this one connection,
             // not proposals for separate connector instances.
             setup_guide: Some(loom_connector_docker::setup_guide()),
+            discoverable_type: None,
+            discovery_target_field: None,
+        },
+    );
+
+    // Govee construction verifies the account key by listing its devices. Its
+    // cloud endpoint is fixed, so the only user-supplied configuration is the
+    // sensitive API key.
+    types.insert(
+        loom_connector_govee::TYPE_ID,
+        ConnectorTypeRegistration {
+            type_id: loom_connector_govee::TYPE_ID,
+            display_name: loom_connector_govee::DISPLAY_NAME,
+            icon: Some(loom_connector_govee::ICON.to_owned()),
+            factory: |config| {
+                Box::pin(async move {
+                    GoveeConnector::from_config_value(config)
+                        .await
+                        .map(|connector| Box::new(connector) as Box<dyn Connector>)
+                })
+            },
+            connection_test_factory: None,
+            schema: loom_connector_govee::config_schema(),
+            setup_guide: None,
             discoverable_type: None,
             discovery_target_field: None,
         },
@@ -364,6 +390,25 @@ mod tests {
         assert_eq!(guide.variants.len(), 1);
         assert_eq!(guide.variants[0].id, "api-key");
         assert!(registration.connection_test_factory.is_none());
+        assert!(registration.discoverable_type.is_none());
+    }
+
+    #[test]
+    fn the_govee_type_is_registered_with_an_encrypted_api_key_schema() {
+        let registry = builtin_registry();
+        let registration = registry
+            .get(loom_connector_govee::TYPE_ID)
+            .expect("the Govee type must be registered");
+
+        assert_eq!(registration.type_id, "govee");
+        assert_eq!(registration.display_name, "Govee");
+        assert_eq!(registration.icon.as_deref(), Some("lucide:lightbulb"));
+        assert_eq!(
+            registration.schema["properties"]["apiKey"]["x-loom-sensitive"],
+            true
+        );
+        assert_eq!(registration.schema["required"], json!(["apiKey"]));
+        assert!(registration.setup_guide.is_none());
         assert!(registration.discoverable_type.is_none());
     }
 

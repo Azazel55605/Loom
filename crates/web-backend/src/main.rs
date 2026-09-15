@@ -1405,8 +1405,8 @@ mod tests {
         let types = body.as_array().expect("array");
         assert_eq!(
             types.len(),
-            6,
-            "the catalog should contain Debug, Docker, TrueNAS, Pi-hole, Tasmota, and UniFi Network"
+            7,
+            "the catalog should contain Debug, Docker, Govee, TrueNAS, Pi-hole, Tasmota, and UniFi Network"
         );
         assert!(types.iter().all(|entry| {
             entry["typeId"] != "docker-host" && entry["typeId"] != "docker-container"
@@ -1471,6 +1471,16 @@ mod tests {
                 .any(|toggle| toggle["envVar"] == "CONTAINERS")));
         assert_eq!(docker["discoverableType"], serde_json::Value::Null);
         assert_eq!(docker["discoveryTargetField"], serde_json::Value::Null);
+
+        let govee = by_id("govee");
+        assert_eq!(govee["displayName"], "Govee");
+        assert_eq!(govee["icon"], "lucide:lightbulb");
+        assert_eq!(
+            govee["configSchema"]["properties"]["apiKey"]["x-loom-sensitive"],
+            true
+        );
+        assert_eq!(govee["setupGuide"], serde_json::Value::Null);
+        assert_eq!(govee["discoverableType"], serde_json::Value::Null);
 
         let truenas = by_id("truenas");
         assert_eq!(truenas["displayName"], "TrueNAS");

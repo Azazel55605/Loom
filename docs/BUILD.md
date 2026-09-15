@@ -31,6 +31,7 @@ dependencies are fetched by Cargo on first build; no separate step.
 | --- | --- | --- |
 | core (library) | `pnpm build:core` | Compiled rlib inside `target/release/`. No standalone artifact — Core is a library and never runs on its own. |
 | connector-docker (library) | `pnpm build:connector-docker` | Compiled rlib inside `target/release/`. Like Core, a library: it is linked into web-backend, which is what decides that this build has a Docker connector in it. |
+| connector-govee | `pnpm build:connector-govee` | Compiled rlib inside `target/release/`. Capability-driven Govee cloud light/device telemetry and controls. |
 | connector-pihole | `pnpm build:connector-pihole` | Compiled rlib inside `target/release/`. Pi-hole v6 session-authenticated REST client with host metrics, domain-list resources, top clients, setup guidance, and capability checks. |
 | connector-tasmota | `pnpm build:connector-tasmota` | Compiled rlib inside `target/release/`. Tasmota HTTP-command client for one smart plug, including power control and optional energy monitoring. |
 | connector-truenas | `pnpm build:connector-truenas` | Compiled rlib inside `target/release/`. TLS-only JSON-RPC transport plus the minimal host-level TrueNAS connector. |
@@ -41,7 +42,7 @@ dependencies are fetched by Cargo on first build; no separate step.
 | mobile | `pnpm build:mobile` | Unsigned arm64 debug APK under `apps/mobile/src-tauri/gen/android/app/build/outputs/` |
 
 The Cargo packages are named `loom-core`, `loom-connector-docker`,
-`loom-connector-pihole`, `loom-connector-tasmota`, `loom-connector-truenas`,
+`loom-connector-govee`, `loom-connector-pihole`, `loom-connector-tasmota`, `loom-connector-truenas`,
 `loom-connector-unifi-network`, and `loom-web-backend` — a crate named `core` would
 collide with Rust's built-in `core`, and the `loom-` prefix is carried through for consistency. The
 `pnpm build:*` scripts already use the correct names; prefer them over

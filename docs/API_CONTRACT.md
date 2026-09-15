@@ -1049,9 +1049,9 @@ to the connector's factory, which is the only thing that knows what the keys
 mean. A configuration that satisfies the schema's shape can still be refused
 (see [`POST /connector-instances`](#post-connector-instances)).
 
-Today the array holds six: the debug fixture, the unified Docker connector,
-the TrueNAS connector, the Pi-hole connector, the Tasmota connector, and the
-UniFi Network connector. It was an array from day one so that registering a real connector
+Today the array holds seven: the debug fixture, the unified Docker connector,
+the Govee connector, the TrueNAS connector, the Pi-hole connector, the Tasmota
+connector, and the UniFi Network connector. It was an array from day one so that registering a real connector
 type is an insertion rather than a reshape of this response, which is exactly
 what adding Docker turned out to be.
 
@@ -1067,10 +1067,41 @@ is created, not here.
 | --- | --- | --- | --- |
 | `debug` | A fixture that contacts nothing. Permanent — see `crates/core/src/connector/debug.rs`. | How it should pretend to behave. | Parsing alone; there is nothing to reach. |
 | `docker` | One Docker daemon connection and its host-level aggregate view. Containers are addressable sub-targets of that instance. | Required `dockerHost` (`unix://` or `tcp://`) only. | A real daemon connection and ping. |
+| `govee` | One Govee cloud account with capability-driven device sub-targets. | Required sensitive `apiKey`; the cloud API origin is fixed. | `GET /router/api/v1/user/devices` with `Govee-API-Key`. |
 | `pihole` | One Pi-hole v6 instance with host-level statistics and DNS blocking control. | Required `baseUrl` including `http://` or `https://`, sensitive `password`, and optional `allowInsecureCert` (default `false`); an application password is recommended. | `POST /api/auth`, retaining `session.sid` for `X-FTL-SID` authentication. |
 | `tasmota` | One Tasmota smart plug using its local HTTP command API. | Required bare `host` (optional HTTP port) and optional sensitive `password`. | One combined `Status 0` command; when a password is supplied Loom sends Tasmota's documented default web username `admin`. |
 | `truenas` | One TrueNAS host with an aggregate host view plus addressable pool and dataset sub-targets. | Required bare `host`, required API-key owner `username`, sensitive `apiKey`, and optional `allowInsecureCert` (default `false`). | A mandatory-TLS WebSocket connection and `auth.login_ex` API-key authentication. |
 | `unifi-network` | One local UniFi Network console site with host-level counts and addressable device sub-targets. | Required HTTPS `host` origin, sensitive `apiKey`, optional site UUID/internal reference/name (default `default`), and optional `allowInsecureCert` (default `false`). | `GET /proxy/network/integration/v1/sites` with `X-API-KEY`, followed by resolution of the configured site. |
+
+The Govee connector uses the fixed HTTPS Router API base
+`https://openapi.api.govee.com/router/api/v1` and sends the configured key as
+the raw `Govee-API-Key` header value. The account view exposes `deviceCount`
+and a host-only `devices` resource with `name` and `model`; device row ids are
+also `device:<deviceId>` sub-target ids, so selecting a row opens that device.
+The device-list response carries capability descriptors rather than live
+state, so the host table deliberately has no `powerState` column: adding it
+would require a separate rate-limited state request for every row.
+
+Device descriptors and controls are capability-driven. `powerSwitch` exposes
+`powerState`/`setPower`; `brightness` exposes a number and `setBrightness`;
+`colorRgb` exposes `colorHex`/`setColor` with packed RGB converted at the
+connector boundary; and `colorTemperatureK` exposes Kelvin state/control.
+Brightness and colour-temperature schemas and slider bindings use each
+device's own declared `parameters.range` values. Their default target layout
+places every applicable Toggle, Slider, and Color Picker binding into one
+composite light tile, with live-value links back to the corresponding data
+points.
+
+The target-only `scenes` resource lists dynamic scene names on demand. Its
+`apply` row action passes the standard `resourceId`, resolves it against a
+fresh scene listing, and sends Govee's opaque scene option value unchanged to
+`device/control`. Every state, scene, and control request carries the SKU and
+device id; every control additionally carries a generated `requestId`, which
+is returned in the action result for audit correlation. Loom paces calls at
+Govee's documented account/device limits and reports service-side rate-limit
+responses distinctly. A successful state response is Healthy even when the
+API's `online` flag is false: Govee documents that such state values may be
+historical, and the flag is not used to pre-emptively reject controls.
 
 The Tasmota connector uses the device-local HTTP command endpoint:
 `GET http://<host>/cm?cmnd=<command>`. Its poll sends one `Status 0` command,
