@@ -424,8 +424,11 @@ Locally built images are tagged `loom-web-backend:local` and
 Tagged web releases publish both `linux/amd64` and `linux/arm64` variants for
 the frontend and backend under one multi-platform GHCR manifest. Docker selects
 the matching image automatically when the same version or `latest` tag is
-pulled on either architecture. The release workflows install QEMU before
-Buildx because GitHub's hosted release runner is amd64.
+pulled on either architecture. The frontend remains a lightweight QEMU build.
+The Rust-heavy backend compiles AMD64 and ARM64 in parallel on matching
+GitHub-hosted runners, caches each architecture separately in GHCR, then joins
+the two immutable digests into the version and `latest` manifest tags. This
+keeps the ARM64 Rust compiler off the much slower emulation path.
 
 Both Compose files mount a `loom-data` volume at `/data`, where the backend will
 persist generated secrets and instance config once that system exists.
