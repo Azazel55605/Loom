@@ -1479,7 +1479,10 @@ mod tests {
             govee["configSchema"]["properties"]["apiKey"]["x-loom-sensitive"],
             true
         );
-        assert_eq!(govee["setupGuide"], serde_json::Value::Null);
+        assert_eq!(
+            govee["setupGuide"]["variants"][0]["label"],
+            "Connect your Govee account"
+        );
         assert_eq!(govee["discoverableType"], serde_json::Value::Null);
 
         let truenas = by_id("truenas");

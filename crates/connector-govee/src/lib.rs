@@ -6,4 +6,4 @@ mod connector;
 
 pub use client::{GoveeCapability, GoveeClient, GoveeDevice, GoveeError};
 pub use config::{config_schema, GoveeConnectorConfig};
-pub use connector::{GoveeConnector, DISPLAY_NAME, ICON, TYPE_ID};
+pub use connector::{setup_guide, GoveeConnector, DISPLAY_NAME, ICON, TYPE_ID};

@@ -1092,6 +1092,22 @@ places every applicable Toggle, Slider, and Color Picker binding into one
 composite light tile, with live-value links back to the corresponding data
 points.
 
+Its template-less setup guide directs users to **Govee Home → Settings → Apply
+for API Key**. Current Govee policy makes a newly generated key available
+immediately and invalidates the account's previously active key when a
+replacement is generated. The key is account-wide; Govee exposes no
+partial-permission scopes for it.
+
+Test Connection calls `user/devices` first. HTTP 401/403 responses are reported
+as authentication failures (covering a bad or unusable key), while connection,
+DNS, TLS and timeout failures remain connectivity failures. After successful
+authentication it reports `list-devices` as tested, attempts a real state read
+for one returned device for `read-device-state`, and reports the authenticated
+write capabilities `set-power`, `set-brightness`, `set-color`,
+`set-color-temperature`, and `apply-scene`. If the account has no device to
+probe, or that probe fails, only the state-read capability is marked
+unavailable; successful authentication is still reported honestly.
+
 The target-only `scenes` resource lists dynamic scene names on demand. Its
 `apply` row action passes the standard `resourceId`, resolves it against a
 fresh scene listing, and sends Govee's opaque scene option value unchanged to

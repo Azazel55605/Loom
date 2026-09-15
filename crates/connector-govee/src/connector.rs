@@ -2,10 +2,11 @@ use std::sync::{Arc, RwLock};
 
 use async_trait::async_trait;
 use loom_core::connector::{
-    details::set_detail, ActionResult, ActionWidgetType, ApplicableTarget, ColumnDescriptor,
-    ColumnValueType, ConnectorAction, ConnectorError, ConnectorMetadata, ConnectorStatus,
-    DataPointDescriptor, DataPointValueType, DisplayField, DisplayWidgetType, HealthState,
-    NetworkTarget, ResourceItem, ResourceKindDescriptor, SubTarget, WidgetBinding, WidgetLayout,
+    details::set_detail, ActionResult, ActionWidgetType, ApplicableTarget, CapabilityStatus,
+    ColumnDescriptor, ColumnValueType, ConnectionTestResult, ConnectorAction, ConnectorError,
+    ConnectorMetadata, ConnectorStatus, DataPointDescriptor, DataPointValueType, DisplayField,
+    DisplayWidgetType, HealthState, NetworkTarget, ResourceItem, ResourceKindDescriptor,
+    SetupGuide, SetupGuideVariant, SubTarget, WidgetBinding, WidgetLayout,
 };
 use serde_json::{json, Map, Value};
 
@@ -46,6 +47,31 @@ const INSTANCE_COLOR_RGB: &str = "colorRgb";
 const INSTANCE_COLOR_TEMPERATURE: &str = "colorTemperatureK";
 const INSTANCE_SCENE: &str = "lightScene";
 
+const TEST_CAPABILITY_LIST_DEVICES: &str = "list-devices";
+const TEST_CAPABILITY_READ_DEVICE_STATE: &str = "read-device-state";
+const TEST_CAPABILITY_SET_POWER: &str = "set-power";
+const TEST_CAPABILITY_SET_BRIGHTNESS: &str = "set-brightness";
+const TEST_CAPABILITY_SET_COLOR: &str = "set-color";
+const TEST_CAPABILITY_SET_COLOR_TEMPERATURE: &str = "set-color-temperature";
+const TEST_CAPABILITY_APPLY_SCENE: &str = "apply-scene";
+
+/// Setup instructions published with the connector type catalog.
+pub fn setup_guide() -> SetupGuide {
+    SetupGuide {
+        variants: vec![SetupGuideVariant {
+            id: "api-key".to_owned(),
+            label: "Connect your Govee account".to_owned(),
+            description: "In the Govee Home app, open Settings, choose Apply for API Key, and submit the requested information. Govee now makes a newly generated key available immediately; generating another key invalidates the account's previous active key, so update every integration that used it. Enter the key in Loom's API key field. A Govee API key grants access across the account and cannot be narrowed with partial permissions."
+                .to_owned(),
+            // Account-key creation has no deployment snippet, so the shared
+            // setup UI deliberately omits the empty template surface.
+            template: String::new(),
+            toggles: Vec::new(),
+            capability_requirements: Vec::new(),
+        }],
+    }
+}
+
 /// One Govee account, with each device represented as a sub-target.
 pub struct GoveeConnector {
     client: GoveeClient,
@@ -61,6 +87,16 @@ impl GoveeConnector {
         Ok(Self {
             client,
             devices: Arc::new(RwLock::new(devices)),
+        })
+    }
+
+    /// Builds a candidate for Test Connection without performing network I/O.
+    pub fn from_config_value_for_connection_test(value: Value) -> Result<Self, ConnectorError> {
+        let config = GoveeConnectorConfig::from_value(value)?;
+        let client = GoveeClient::connect(&config.api_key).map_err(connector_error)?;
+        Ok(Self {
+            client,
+            devices: Arc::new(RwLock::new(Vec::new())),
         })
     }
 
@@ -149,6 +185,74 @@ impl loom_core::connector::Connector for GoveeConnector {
             status.health = HealthState::Degraded;
         }
         Ok(status)
+    }
+
+    async fn test_connection(&self) -> ConnectionTestResult {
+        let devices = match self.client.devices().await {
+            Ok(devices) => devices,
+            Err(error) => {
+                return ConnectionTestResult {
+                    reachable: false,
+                    capabilities: Vec::new(),
+                    // GoveeClient keeps HTTP 401/403 authentication failures
+                    // distinct from DNS, TLS, timeout and transport failures.
+                    message: Some(error.to_string()),
+                };
+            }
+        };
+        self.remember_devices(devices.clone());
+
+        let state_capability = match devices.first() {
+            Some(device) => match self.client.state(device).await {
+                Ok(_) => available_test_capability(
+                    TEST_CAPABILITY_READ_DEVICE_STATE,
+                    "Read device state",
+                ),
+                Err(error) => unavailable_test_capability(
+                    TEST_CAPABILITY_READ_DEVICE_STATE,
+                    "Read device state",
+                    error.to_string(),
+                ),
+            },
+            None => unavailable_test_capability(
+                TEST_CAPABILITY_READ_DEVICE_STATE,
+                "Read device state",
+                "The account returned no devices to test.".to_owned(),
+            ),
+        };
+        let state_available = state_capability.available;
+
+        ConnectionTestResult {
+            reachable: true,
+            capabilities: vec![
+                CapabilityStatus {
+                    key: TEST_CAPABILITY_LIST_DEVICES.to_owned(),
+                    label: "List devices".to_owned(),
+                    available: true,
+                    note: Some(format!("Found {} device(s).", devices.len())),
+                },
+                state_capability,
+                available_test_capability(TEST_CAPABILITY_SET_POWER, "Set power"),
+                available_test_capability(TEST_CAPABILITY_SET_BRIGHTNESS, "Set brightness"),
+                available_test_capability(TEST_CAPABILITY_SET_COLOR, "Set colour"),
+                available_test_capability(
+                    TEST_CAPABILITY_SET_COLOR_TEMPERATURE,
+                    "Set colour temperature",
+                ),
+                available_test_capability(TEST_CAPABILITY_APPLY_SCENE, "Apply scene"),
+            ],
+            message: Some(if state_available {
+                format!(
+                    "Authenticated successfully, found {} device(s), and verified a live device-state read. Available controls depend on each device's declared capabilities.",
+                    devices.len()
+                )
+            } else {
+                format!(
+                    "Authenticated successfully and found {} device(s), but a live device-state read could not be verified.",
+                    devices.len()
+                )
+            }),
+        }
     }
 
     async fn actions(&self) -> Vec<ConnectorAction> {
@@ -337,6 +441,10 @@ impl loom_core::connector::Connector for GoveeConnector {
         config_schema()
     }
 
+    fn setup_guide(&self) -> Option<SetupGuide> {
+        Some(setup_guide())
+    }
+
     fn metadata(&self) -> ConnectorMetadata {
         ConnectorMetadata {
             id: TYPE_ID.to_owned(),
@@ -387,6 +495,24 @@ impl loom_core::connector::Connector for GoveeConnector {
 
     fn network_target(&self) -> Option<NetworkTarget> {
         Some(NetworkTarget::new(API_HOST, 443))
+    }
+}
+
+fn available_test_capability(key: &str, label: &str) -> CapabilityStatus {
+    CapabilityStatus {
+        key: key.to_owned(),
+        label: label.to_owned(),
+        available: true,
+        note: Some("Available after account-wide API-key authentication.".to_owned()),
+    }
+}
+
+fn unavailable_test_capability(key: &str, label: &str, note: String) -> CapabilityStatus {
+    CapabilityStatus {
+        key: key.to_owned(),
+        label: label.to_owned(),
+        available: false,
+        note: Some(note),
     }
 }
 
@@ -946,7 +1072,42 @@ mod tests {
             &[None, Some("device:fixture-device".to_owned())],
         )
         .await;
+
+        let test = connector.test_connection().await;
+        assert!(test.reachable);
+        let reported = test
+            .capabilities
+            .iter()
+            .map(|capability| (capability.key.as_str(), capability.available))
+            .collect::<std::collections::HashMap<_, _>>();
+        for capability in [
+            TEST_CAPABILITY_LIST_DEVICES,
+            TEST_CAPABILITY_READ_DEVICE_STATE,
+            TEST_CAPABILITY_SET_POWER,
+            TEST_CAPABILITY_SET_BRIGHTNESS,
+            TEST_CAPABILITY_SET_COLOR,
+            TEST_CAPABILITY_SET_COLOR_TEMPERATURE,
+            TEST_CAPABILITY_APPLY_SCENE,
+        ] {
+            assert_eq!(reported.get(capability), Some(&true), "{capability}");
+        }
         server.abort();
+    }
+
+    #[test]
+    fn setup_guide_uses_the_current_template_less_account_key_flow() {
+        let guide = setup_guide();
+        assert_eq!(guide.variants.len(), 1);
+        let variant = &guide.variants[0];
+        assert_eq!(variant.id, "api-key");
+        assert_eq!(variant.label, "Connect your Govee account");
+        assert!(variant.description.contains("Settings"));
+        assert!(variant.description.contains("Apply for API Key"));
+        assert!(variant.description.contains("available immediately"));
+        assert!(variant.description.contains("account"));
+        assert!(variant.template.is_empty());
+        assert!(variant.toggles.is_empty());
+        assert!(variant.capability_requirements.is_empty());
     }
 
     #[test]

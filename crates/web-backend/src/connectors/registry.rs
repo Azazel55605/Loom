@@ -175,9 +175,14 @@ pub fn builtin_registry() -> ConnectorTypeRegistry {
                         .map(|connector| Box::new(connector) as Box<dyn Connector>)
                 })
             },
-            connection_test_factory: None,
+            connection_test_factory: Some(|config| {
+                Box::pin(async move {
+                    GoveeConnector::from_config_value_for_connection_test(config)
+                        .map(|connector| Box::new(connector) as Box<dyn Connector>)
+                })
+            }),
             schema: loom_connector_govee::config_schema(),
-            setup_guide: None,
+            setup_guide: Some(loom_connector_govee::setup_guide()),
             discoverable_type: None,
             discovery_target_field: None,
         },
@@ -408,7 +413,10 @@ mod tests {
             true
         );
         assert_eq!(registration.schema["required"], json!(["apiKey"]));
-        assert!(registration.setup_guide.is_none());
+        let guide = registration.setup_guide.as_ref().expect("setup guide");
+        assert_eq!(guide.variants.len(), 1);
+        assert_eq!(guide.variants[0].id, "api-key");
+        assert!(registration.connection_test_factory.is_some());
         assert!(registration.discoverable_type.is_none());
     }
 

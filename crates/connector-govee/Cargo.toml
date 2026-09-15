@@ -3,7 +3,7 @@ name = "loom-connector-govee"
 description = "Loom connector for Govee devices through the official cloud Router API."
 edition.workspace = true
 license.workspace = true
-version = "0.1.0"
+version = "0.1.5"
 repository.workspace = true
 rust-version.workspace = true
 

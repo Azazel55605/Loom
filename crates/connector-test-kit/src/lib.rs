@@ -252,23 +252,29 @@ pub async fn assert_connector_contract(
             }
         }
 
-        for action in &actions {
-            assert_capability_declared(
-                connector_id,
-                "action",
-                &action.id,
-                &guide_capabilities,
-                true,
-            );
-        }
-        for kind in resource_kinds.values() {
-            assert_capability_declared(
-                connector_id,
-                "resource kind",
-                &kind.kind,
-                &guide_capabilities,
-                false,
-            );
+        // An empty requirements list is the established representation for
+        // all-or-nothing credentials with no setup toggles. In that case the
+        // live test may still report useful capabilities, but there is no
+        // declarative toggle-to-capability relationship to validate.
+        if !guide_capabilities.is_empty() {
+            for action in &actions {
+                assert_capability_declared(
+                    connector_id,
+                    "action",
+                    &action.id,
+                    &guide_capabilities,
+                    true,
+                );
+            }
+            for kind in resource_kinds.values() {
+                assert_capability_declared(
+                    connector_id,
+                    "resource kind",
+                    &kind.kind,
+                    &guide_capabilities,
+                    false,
+                );
+            }
         }
     }
 

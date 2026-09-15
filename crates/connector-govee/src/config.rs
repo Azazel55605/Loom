@@ -33,7 +33,7 @@ pub fn config_schema() -> Value {
             "apiKey": {
                 "type": "string",
                 "title": "API key",
-                "description": "API key created in the Govee Home app under Profile > About Us > Apply for API Key.",
+                "description": "API key created in the Govee Home app under Settings > Apply for API Key.",
                 "minLength": 1,
                 "x-loom-sensitive": true
             }
