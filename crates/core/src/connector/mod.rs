@@ -1420,6 +1420,8 @@ pub enum DisplayWidgetType {
     StatusDot,
     /// A scrolling run of text lines.
     LogStream,
+    /// A hexadecimal colour shown as a read-only swatch and text value.
+    ColorPicker,
 }
 
 /// How an action is offered.
@@ -1443,6 +1445,8 @@ pub enum ActionWidgetType {
     /// A dropdown that triggers an action taking one of a set of values;
     /// `config` supplies `options`.
     Selector,
+    /// A colour picker that triggers an action taking a `#RRGGBB` string.
+    ColorPicker,
 }
 
 /// One widget, and the thing it is wired to.
@@ -1488,8 +1492,9 @@ pub enum WidgetBinding {
         widget_type: ActionWidgetType,
         /// Widget-specific extras: `options` for an
         /// [`ActionWidgetType::Selector`], `min`/`max`/`step` for a
-        /// [`ActionWidgetType::Slider`]. Same free-form contract as the display
-        /// arm's `config`.
+        /// [`ActionWidgetType::Slider`], and optionally `linkedDataPointId`
+        /// for controls that reflect a current reading. Same free-form
+        /// contract as the display arm's `config`.
         config: Value,
     },
     /// A widget showing one of the connector's browsable resource kinds.

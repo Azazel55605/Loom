@@ -248,7 +248,8 @@ export type DisplayWidgetType =
   | { metricChart: { chartType: ChartType } }
   | "gauge"
   | "statusDot"
-  | "logStream";
+  | "logStream"
+  | "colorPicker";
 
 /**
  * How a resource table's cell should be *formatted*.
@@ -390,7 +391,8 @@ export type ActionWidgetType =
   | "toggle"
   | "slider"
   | "textField"
-  | "selector";
+  | "selector"
+  | "colorPicker";
 
 /**
  * One widget and the thing it is wired to.
@@ -418,8 +420,9 @@ export type WidgetBinding =
         /** A `ConnectorAction.id`, as passed to `executeConnectorAction`. */
         actionId: string;
         widgetType: ActionWidgetType;
-        /** Widget-specific extras (`options`, `min`/`max`/`step`). Always an
-         *  object. */
+        /** Widget-specific extras (`options`, `min`/`max`/`step`, and the
+         *  optional `linkedDataPointId` used by value-reflecting controls).
+         *  Always an object. */
         config: unknown;
       };
     }

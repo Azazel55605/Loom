@@ -1658,7 +1658,9 @@ carries, plus what a dashboard placement UI needs.
       { "display": { "dataPointId": "loadHistory", "widgetType": { "metricChart": { "chartType": "line" } }, "config": {} } },
       { "display": { "dataPointId": "load", "widgetType": "gauge", "config": { "min": 0, "max": 100 } } },
       { "display": { "dataPointId": "log", "widgetType": "logStream", "config": {} } },
-      { "action": { "actionId": "set-enabled", "widgetType": "toggle", "config": {} } }
+      { "action": { "actionId": "set-enabled", "widgetType": "toggle", "config": {} } },
+      { "display": { "dataPointId": "accentColor", "widgetType": "colorPicker", "config": {} } },
+      { "action": { "actionId": "set-accent-color", "widgetType": "colorPicker", "config": { "linkedDataPointId": "accentColor" } } }
     ]
   },
   "discoverableType": "debug",
@@ -4499,7 +4501,7 @@ once and re-rendered on every poll without re-reading the schema.
       "action": {
         "actionId": "set-load",
         "widgetType": "slider",
-        "config": { "min": 0, "max": 100, "step": 1 }
+        "config": { "min": 0, "max": 100, "step": 1, "linkedDataPointId": "load" }
       }
     },
     {
@@ -4523,7 +4525,7 @@ carry different id fields because they resolve against different things.
 | Field | JSON type | Meaning | Nullability |
 | --- | --- | --- | --- |
 | `dataPointId` | string | Which `DataPointDescriptor.id` this widget shows. Its current value is `status.details[dataPointId]`. | Always present. |
-| `widgetType` | string **or** object | One of `"statTile"`, `"progressBar"`, `{"metricChart": {"chartType": "pie" \| "bar" \| "line"}}`, `"gauge"`, `"statusDot"`, `"logStream"`. | Always present. |
+| `widgetType` | string **or** object | One of `"statTile"`, `"progressBar"`, `{"metricChart": {"chartType": "pie" \| "bar" \| "line"}}`, `"gauge"`, `"statusDot"`, `"logStream"`, `"colorPicker"`. | Always present. |
 | `config` | object | Widget-specific extras: `min`/`max` for a gauge or progress bar. Free-form. | Always present; an empty object, never `null`. |
 
 `{ "action": … }` — a control that invokes one action:
@@ -4531,8 +4533,14 @@ carry different id fields because they resolve against different things.
 | Field | JSON type | Meaning | Nullability |
 | --- | --- | --- | --- |
 | `actionId` | string | Which `ConnectorAction.id` this widget invokes, as passed to [`POST /connectors/{id}/actions/{actionId}`](#post-connectorsidactionsactionid). | Always present. |
-| `widgetType` | string | One of `"button"`, `"toggle"`, `"slider"`, `"textField"`, `"selector"`. | Always present. |
-| `config` | object | Widget-specific extras: `min`/`max`/`step` for a slider, `options` for a selector. Free-form. | Always present; an empty object, never `null`. |
+| `widgetType` | string | One of `"button"`, `"toggle"`, `"slider"`, `"textField"`, `"selector"`, `"colorPicker"`. | Always present. |
+| `config` | object | Widget-specific extras: `min`/`max`/`step` for a slider, `options` for a selector, and optional `linkedDataPointId` for Slider/Color Picker live-value reflection. A Slider link must name a Number data point in the placement's view; a Color Picker link must name a String data point. | Always present; an empty object, never `null`. |
+
+Color values at the data-point/widget boundary are always six-digit hexadecimal
+strings (`#RRGGBB`). Connectors translate any service-native representation at
+the connector boundary. A linked Slider or Color Picker initializes from and
+follows its current status reading while it is not being edited; omitting
+`linkedDataPointId` preserves the original fire-and-forget control behavior.
 
 `{ "resourceKindDisplay": … }` — one of the connector's browsable resource
 kinds, drawn as a bound widget:

@@ -14,7 +14,7 @@ use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::Json;
 use chrono::Utc;
-use loom_core::connector::{Connector, DataPointValueType, WidgetBinding};
+use loom_core::connector::{ActionWidgetType, Connector, DataPointValueType, WidgetBinding};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sqlx::SqlitePool;
@@ -2781,7 +2781,11 @@ async fn validate_widget_bindings(
     // they are not interchangeable, so checking one list for all three would
     // either reject valid bindings or wave through bindings that can never
     // render.
-    let data_point_ids = connector_data_point_ids(connector);
+    let data_points: HashMap<(String, Option<String>), DataPointValueType> = connector
+        .data_points()
+        .into_iter()
+        .map(|point| ((point.id, point.target_id), point.value_type))
+        .collect();
     let action_ids: HashSet<(String, Option<String>)> = connector
         .actions()
         .await
@@ -2801,17 +2805,33 @@ async fn validate_widget_bindings(
     let mut unknown_data_points: Vec<&str> = Vec::new();
     let mut unknown_actions: Vec<&str> = Vec::new();
     let mut unknown_resource_kinds: Vec<&str> = Vec::new();
+    let mut invalid_linked_data_points: Vec<String> = Vec::new();
     for binding in bindings {
         match binding {
             WidgetBinding::Display { data_point_id, .. }
-                if !data_point_ids.contains(&(data_point_id.clone(), selected_target.clone())) =>
+                if !data_points.contains_key(&(data_point_id.clone(), selected_target.clone())) =>
             {
                 unknown_data_points.push(data_point_id);
             }
-            WidgetBinding::Action { action_id, .. }
-                if !action_ids.contains(&(action_id.clone(), selected_target.clone())) =>
-            {
-                unknown_actions.push(action_id);
+            WidgetBinding::Action {
+                action_id,
+                widget_type,
+                config,
+            } => {
+                if !action_ids.contains(&(action_id.clone(), selected_target.clone())) {
+                    unknown_actions.push(action_id);
+                }
+                if let Some(linked_id) = config.get("linkedDataPointId").and_then(Value::as_str) {
+                    let expected = match widget_type {
+                        ActionWidgetType::Slider => Some(DataPointValueType::Number),
+                        ActionWidgetType::ColorPicker => Some(DataPointValueType::String),
+                        _ => None,
+                    };
+                    let actual = data_points.get(&(linked_id.to_owned(), selected_target.clone()));
+                    if expected.is_none() || actual != expected.as_ref() {
+                        invalid_linked_data_points.push(linked_id.to_owned());
+                    }
+                }
             }
             WidgetBinding::ResourceKindDisplay { resource_kind }
                 if !resource_kinds.contains(resource_kind) =>
@@ -2829,10 +2849,13 @@ async fn validate_widget_bindings(
         list.sort_unstable();
         list.dedup();
     }
+    invalid_linked_data_points.sort_unstable();
+    invalid_linked_data_points.dedup();
 
     if !unknown_data_points.is_empty()
         || !unknown_actions.is_empty()
         || !unknown_resource_kinds.is_empty()
+        || !invalid_linked_data_points.is_empty()
     {
         // Named separately, because "unknown data point restart" would send
         // someone looking in the wrong half of the connector.
@@ -2850,6 +2873,12 @@ async fn validate_widget_bindings(
             problems.push(format!(
                 "unknown resource kinds: {}",
                 unknown_resource_kinds.join(", ")
+            ));
+        }
+        if !invalid_linked_data_points.is_empty() {
+            problems.push(format!(
+                "invalid linked data points for their action controls: {}",
+                invalid_linked_data_points.join(", ")
             ));
         }
         return Err(Box::new(ErrorBody::message(

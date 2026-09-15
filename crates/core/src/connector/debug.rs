@@ -105,6 +105,10 @@ pub const ACTION_SET_LOAD: &str = "set-load";
 /// The action id that rewrites the simulated label. Takes `{"label": string}`.
 pub const ACTION_SET_LABEL: &str = "set-label";
 
+/// The action id that changes the simulated accent colour. Takes
+/// `{"color": "#RRGGBB"}`.
+pub const ACTION_SET_ACCENT_COLOR: &str = "set-accent-color";
+
 /// The resource kind id for the fake browsable "widgets" table.
 pub const RESOURCE_KIND_WIDGETS: &str = "widgets";
 
@@ -131,6 +135,9 @@ pub const DATA_POINT_LABEL: &str = "label";
 
 /// The data point id for the simulated on/off flag.
 pub const DATA_POINT_ENABLED: &str = "enabled";
+
+/// The data point id for the simulated hexadecimal accent colour.
+pub const DATA_POINT_ACCENT_COLOR: &str = "accentColor";
 
 /// The data point id for the rolling buffer of recent load readings.
 pub const DATA_POINT_LOAD_HISTORY: &str = "loadHistory";
@@ -169,6 +176,9 @@ const RECALIBRATED_LOAD: f64 = 50.0;
 /// The fake "latest version" the simulated update check reports. Obviously not
 /// a real registry reference.
 const SIMULATED_LATEST_REF: &str = "debug-fixture:2.0.0";
+
+/// An obviously synthetic starting colour for the picker fixture.
+const DEFAULT_ACCENT_COLOR: &str = "#2F7FED";
 
 /// How a [`DebugConnector`] should behave.
 ///
@@ -290,6 +300,8 @@ struct SimulatedState {
     enabled: bool,
     /// Current value of the text data point.
     label: String,
+    /// Current value of the hexadecimal colour data point.
+    accent_color: String,
     /// The last [`LOG_CAPACITY`] fake log lines, oldest first.
     log: VecDeque<String>,
 }
@@ -366,6 +378,7 @@ impl DebugConnector {
             log: VecDeque::with_capacity(LOG_CAPACITY),
             enabled: config.enabled,
             label: config.label.clone(),
+            accent_color: DEFAULT_ACCENT_COLOR.to_owned(),
         };
 
         Self {
@@ -491,6 +504,7 @@ impl DebugConnector {
             DATA_POINT_LOAD: round2(state.load),
             DATA_POINT_LABEL: state.label,
             DATA_POINT_ENABLED: state.enabled,
+            DATA_POINT_ACCENT_COLOR: state.accent_color,
             DATA_POINT_LOAD_HISTORY: state.history.iter().collect::<Vec<&HistorySample>>(),
             // Newline-joined rather than an array: the data point's declared
             // value type is `String`, and `LogStream` is the widget that splits
@@ -595,6 +609,13 @@ fn simulated_load(base: f64, tick: u64) -> f64 {
 /// Rounds to two decimals so the wire values stay readable.
 fn round2(value: f64) -> f64 {
     (value * 100.0).round() / 100.0
+}
+
+/// Whether a string is exactly the widget boundary's `#RRGGBB` colour shape.
+fn is_hex_color(value: &str) -> bool {
+    value.len() == 7
+        && value.starts_with('#')
+        && value.as_bytes()[1..].iter().all(u8::is_ascii_hexdigit)
 }
 
 /// Reads a required boolean parameter, or explains why it could not.
@@ -733,9 +754,9 @@ impl Connector for DebugConnector {
     /// for an unreachable service. Reporting actions that would immediately
     /// fail, or panicking, would both be worse.
     ///
-    /// The five cover the interaction shapes a client has to render: two
-    /// parameterless buttons, a boolean toggle, a numeric slider, and a text
-    /// field.
+    /// The controls cover every interaction shape a client has to render: two
+    /// parameterless buttons, a boolean toggle, a numeric slider, text, and a
+    /// hexadecimal colour.
     async fn actions(&self) -> Vec<ConnectorAction> {
         if self.gate().await.is_err() {
             return Vec::new();
@@ -806,6 +827,25 @@ impl Connector for DebugConnector {
                         "label": { "type": "string", "minLength": 1 }
                     },
                     "required": ["label"],
+                    "additionalProperties": false
+                }),
+                is_disruptive: false,
+                snapshot_data_point_ids: Vec::new(),
+            },
+            ConnectorAction {
+                id: ACTION_SET_ACCENT_COLOR.to_string(),
+                target_id: None,
+                label: "Accent colour".to_string(),
+                description: Some("Changes the simulated hexadecimal colour reading.".to_string()),
+                params_schema: json!({
+                    "type": "object",
+                    "properties": {
+                        "color": {
+                            "type": "string",
+                            "pattern": "^#[0-9A-Fa-f]{6}$"
+                        }
+                    },
+                    "required": ["color"],
                     "additionalProperties": false
                 }),
                 is_disruptive: false,
@@ -911,6 +951,22 @@ impl Connector for DebugConnector {
 
                 Ok(ActionResult::ok("Simulated label updated.")
                     .with_payload(json!({ DATA_POINT_LABEL: label })))
+            }
+
+            ACTION_SET_ACCENT_COLOR => {
+                let color = params
+                    .get("color")
+                    .and_then(Value::as_str)
+                    .filter(|color| is_hex_color(color))
+                    .ok_or_else(|| ConnectorError::InvalidParams {
+                        action_id: action_id.to_string(),
+                        reason: "expected `color` as a #RRGGBB hexadecimal string".to_string(),
+                    })?
+                    .to_ascii_uppercase();
+
+                self.lock().accent_color = color.clone();
+                Ok(ActionResult::ok("Simulated accent colour updated.")
+                    .with_payload(json!({ DATA_POINT_ACCENT_COLOR: color })))
             }
 
             ACTION_RECYCLE => {
@@ -1300,14 +1356,19 @@ impl Connector for DebugConnector {
         ]
     }
 
-    /// One data point of every [`DataPointValueType`], so a renderer can be
-    /// built against all four without a real service.
+    /// Every scalar shape plus the rolling series fixture, so a renderer can
+    /// be built against the closed data-point types without a real service.
     fn data_points(&self) -> Vec<DataPointDescriptor> {
         let host = vec![
             DataPointDescriptor::new(DATA_POINT_LOAD, "Load", DataPointValueType::Number)
                 .with_unit("%"),
             DataPointDescriptor::new(DATA_POINT_LABEL, "Label", DataPointValueType::String),
             DataPointDescriptor::new(DATA_POINT_ENABLED, "Enabled", DataPointValueType::Bool),
+            DataPointDescriptor::new(
+                DATA_POINT_ACCENT_COLOR,
+                "Accent colour",
+                DataPointValueType::String,
+            ),
             DataPointDescriptor::new(
                 DATA_POINT_LOAD_HISTORY,
                 "Load history",
@@ -1367,8 +1428,15 @@ impl Connector for DebugConnector {
             // would not exercise the half of the renderer that has to send an
             // action, which is the gap the flat binding shape used to hide.
             WidgetBinding::action(ACTION_SET_ENABLED, ActionWidgetType::Toggle),
-            WidgetBinding::action(ACTION_SET_LOAD, ActionWidgetType::Slider)
-                .with_config(json!({ "min": 0, "max": 100, "step": 1 })),
+            WidgetBinding::action(ACTION_SET_LOAD, ActionWidgetType::Slider).with_config(json!({
+                "min": 0,
+                "max": 100,
+                "step": 1,
+                "linkedDataPointId": DATA_POINT_LOAD
+            })),
+            WidgetBinding::display(DATA_POINT_ACCENT_COLOR, DisplayWidgetType::ColorPicker),
+            WidgetBinding::action(ACTION_SET_ACCENT_COLOR, ActionWidgetType::ColorPicker)
+                .with_config(json!({ "linkedDataPointId": DATA_POINT_ACCENT_COLOR })),
             WidgetBinding::action(ACTION_SET_LABEL, ActionWidgetType::TextField),
             WidgetBinding::action(ACTION_RESTART, ActionWidgetType::Button),
             // The third binding kind, present for the same reason the action
@@ -1423,7 +1491,8 @@ mod tests {
                 ACTION_RECALIBRATE,
                 ACTION_SET_ENABLED,
                 ACTION_SET_LOAD,
-                ACTION_SET_LABEL
+                ACTION_SET_LABEL,
+                ACTION_SET_ACCENT_COLOR
             ]
         );
 
@@ -1627,7 +1696,7 @@ mod tests {
     #[tokio::test]
     async fn data_points_cover_every_value_type_and_have_unique_ids() {
         let points = DebugConnector::default().data_points();
-        assert_eq!(points.len(), 9);
+        assert_eq!(points.len(), 10);
 
         let ids: HashSet<(&str, Option<&str>)> = points
             .iter()
@@ -1701,7 +1770,7 @@ mod tests {
             .collect();
 
         let layout = connector.default_layout();
-        assert_eq!(layout.bindings.len(), 12);
+        assert_eq!(layout.bindings.len(), 14);
 
         for binding in &layout.bindings {
             match binding {
@@ -1756,6 +1825,10 @@ mod tests {
             DATA_POINT_LOG,
             DisplayWidgetType::LogStream
         )));
+        assert!(layout.bindings.contains(&WidgetBinding::display(
+            DATA_POINT_ACCENT_COLOR,
+            DisplayWidgetType::ColorPicker
+        )));
 
         // ...and at least one control, so the action half of the renderer has
         // something to be built against.
@@ -1771,6 +1844,24 @@ mod tests {
         assert!(actions.contains(&&WidgetBinding::action(
             ACTION_SET_ENABLED,
             ActionWidgetType::Toggle
+        )));
+        assert!(actions.iter().any(|binding| matches!(
+            binding,
+            WidgetBinding::Action {
+                action_id,
+                widget_type: ActionWidgetType::Slider,
+                config,
+            } if action_id == ACTION_SET_LOAD
+                && config["linkedDataPointId"] == json!(DATA_POINT_LOAD)
+        )));
+        assert!(actions.iter().any(|binding| matches!(
+            binding,
+            WidgetBinding::Action {
+                action_id,
+                widget_type: ActionWidgetType::ColorPicker,
+                config,
+            } if action_id == ACTION_SET_ACCENT_COLOR
+                && config["linkedDataPointId"] == json!(DATA_POINT_ACCENT_COLOR)
         )));
 
         // ...and exactly one resource-kind binding, so the third arm of the
@@ -2269,6 +2360,20 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(result.payload.unwrap()[DATA_POINT_LOAD], json!(12.5));
+
+        let result = connector
+            .execute_action(ACTION_SET_ACCENT_COLOR, None, json!({ "color": "#a1b2c3" }))
+            .await
+            .unwrap();
+        assert_eq!(
+            result.payload.unwrap()[DATA_POINT_ACCENT_COLOR],
+            json!("#A1B2C3")
+        );
+        let status = connector.status().await.unwrap();
+        assert_eq!(
+            status.data_point_value(DATA_POINT_ACCENT_COLOR),
+            Some(&json!("#A1B2C3"))
+        );
     }
 
     #[tokio::test]
@@ -2280,6 +2385,11 @@ mod tests {
             (ACTION_SET_ENABLED, json!({ "enabled": "yes" }), "enabled"),
             (ACTION_SET_LOAD, json!({ "value": "lots" }), "value"),
             (ACTION_SET_LABEL, json!({ "label": "  " }), "label"),
+            (
+                ACTION_SET_ACCENT_COLOR,
+                json!({ "color": "not-a-colour" }),
+                "color",
+            ),
         ] {
             let error = connector
                 .execute_action(action, None, params.clone())

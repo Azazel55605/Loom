@@ -4,7 +4,12 @@ import { Label } from "@loom/ui-kit/components/ui/label";
 import { Skeleton } from "@loom/ui-kit/components/ui/skeleton";
 import { Slider } from "@loom/ui-kit/components/ui/slider";
 import { cn } from "@loom/ui-kit/lib/utils";
-import { configNumber, configString, type ActionWidgetProps } from "@loom/ui-kit/widgets/types";
+import {
+  configNumber,
+  configOptionalNumber,
+  configString,
+  type ActionWidgetProps,
+} from "@loom/ui-kit/widgets/types";
 
 export function ActionSliderSkeleton({ className }: { className?: string }) {
   return <div className={cn("space-y-2", className)}><div className="flex justify-between"><Skeleton className="h-3 w-20" /><Skeleton className="h-4 w-6" /></div><Skeleton className="h-4 w-full rounded-full" /></div>;
@@ -20,9 +25,11 @@ export function ActionSliderSkeleton({ className }: { className?: string }) {
  * stopped on. Radix separates the two callbacks for exactly this, so the thumb
  * tracks the drag locally and only `onValueCommit` reaches the connector.
  *
- * Bounds come from the binding: `config.min`, `config.max`, `config.step`. Like
- * `Toggle`, this shows the value it last sent, not the service's current one —
- * see that widget's note.
+ * Bounds come from the binding: `config.min`, `config.max`, `config.step`.
+ * When a binding supplies `config.linkedDataPointId`, `renderWidget` resolves
+ * that reading into `config.currentValue`; the slider follows live reports
+ * whenever it is not being dragged or waiting for its committed action.
+ * Bindings without that link retain the original fire-and-forget behaviour.
  */
 export function ActionSliderWidget({
   label,
@@ -37,15 +44,36 @@ export function ActionSliderWidget({
   const max = configNumber(config, "max", 100);
   const step = configNumber(config, "step", 1);
   const paramName = configString(config, "paramName", "value");
+  const reportedValue = configOptionalNumber(config, "currentValue");
+  const normalizedReport =
+    reportedValue === undefined ? undefined : Math.min(max, Math.max(min, reportedValue));
 
-  const [value, setValue] = React.useState(min);
+  const [value, setValue] = React.useState(normalizedReport ?? min);
   const [pending, setPending] = React.useState(false);
-  const committed = React.useRef(min);
+  const [dragging, setDragging] = React.useState(false);
+  const committed = React.useRef(normalizedReport ?? min);
+  const lastAppliedReport = React.useRef(normalizedReport);
   const id = React.useId();
+
+  React.useEffect(() => {
+    if (
+      dragging ||
+      pending ||
+      normalizedReport === undefined ||
+      normalizedReport === lastAppliedReport.current
+    ) {
+      return;
+    }
+    lastAppliedReport.current = normalizedReport;
+    committed.current = normalizedReport;
+    setValue(normalizedReport);
+  }, [dragging, normalizedReport, pending]);
 
   async function commit(next: number) {
     const previous = committed.current;
     committed.current = next;
+    lastAppliedReport.current = normalizedReport;
+    setDragging(false);
     setPending(true);
     try {
       await onExecute(actionId, { [paramName]: next });
@@ -73,7 +101,10 @@ export function ActionSliderWidget({
         value={[value]}
         disabled={disabled || pending}
         aria-label={label}
-        onValueChange={([next]) => setValue(next ?? min)}
+        onValueChange={([next]) => {
+          setDragging(true);
+          setValue(next ?? min);
+        }}
         onValueCommit={([next]) => void commit(next ?? min)}
       />
     </div>

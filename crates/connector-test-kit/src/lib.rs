@@ -9,8 +9,8 @@
 use std::collections::{HashMap, HashSet};
 
 use loom_core::connector::{
-    details::get_detail, Connector, ConnectorAction, HealthState, ResourceKindDescriptor,
-    WidgetBinding,
+    details::get_detail, ActionWidgetType, Connector, ConnectorAction, DataPointValueType,
+    HealthState, ResourceKindDescriptor, WidgetBinding,
 };
 
 /// Assert that one configured connector obeys Loom's public connector contract.
@@ -134,11 +134,39 @@ pub async fn assert_connector_contract(
                     "connector `{connector_id}` layout for target {} binds missing data point `{data_point_id}`",
                     target_label(*target)
                 ),
-                WidgetBinding::Action { action_id, .. } => assert!(
-                    action_keys.contains(&(action_id.as_str(), *target)),
-                    "connector `{connector_id}` layout for target {} binds missing action `{action_id}`",
-                    target_label(*target)
-                ),
+                WidgetBinding::Action {
+                    action_id,
+                    widget_type,
+                    config,
+                } => {
+                    assert!(
+                        action_keys.contains(&(action_id.as_str(), *target)),
+                        "connector `{connector_id}` layout for target {} binds missing action `{action_id}`",
+                        target_label(*target)
+                    );
+                    if let Some(linked_id) = config
+                        .get("linkedDataPointId")
+                        .and_then(serde_json::Value::as_str)
+                    {
+                        let expected = match widget_type {
+                            ActionWidgetType::Slider => Some(DataPointValueType::Number),
+                            ActionWidgetType::ColorPicker => Some(DataPointValueType::String),
+                            _ => None,
+                        };
+                        assert!(
+                            expected.is_some(),
+                            "connector `{connector_id}` layout links data point `{linked_id}` from an action control that cannot reflect a value"
+                        );
+                        let point = data_points.iter().find(|point| {
+                            point.id == linked_id && point.target_id.as_deref() == *target
+                        });
+                        assert!(
+                            point.is_some_and(|point| Some(point.value_type) == expected),
+                            "connector `{connector_id}` layout links missing or incorrectly typed data point `{linked_id}` for target {}",
+                            target_label(*target)
+                        );
+                    }
+                }
                 WidgetBinding::ResourceKindDisplay { resource_kind } => assert!(
                     kind_ids.contains(resource_kind),
                     "connector `{connector_id}` layout for target {} binds missing resource kind `{resource_kind}`",

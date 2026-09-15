@@ -100,3 +100,19 @@ sources of the same reading, drifting from each other between polls.
 - A future typed `config` (0011 left it free-form on purpose) can now be
   introduced per variant rather than as one struct spanning every widget, which
   was the shape that made typing it unattractive in the first place.
+
+## 2026-09-15 extension — reflected action values and colour
+
+Color Picker is the twelfth widget primitive, represented by a read-only
+`DisplayWidgetType::ColorPicker` and an interactive
+`ActionWidgetType::ColorPicker`. Its data-point/action value is always a
+six-digit `#RRGGBB` string; connectors that speak another colour encoding own
+the conversion at their boundary.
+
+Slider and Color Picker action bindings may opt into live value reflection with
+`config.linkedDataPointId`. The id resolves against a data point in the same
+connector/target view as the action binding (Number for Slider, String for
+Color Picker). The status WebSocket therefore remains the one source of live
+readings: the control invokes its existing action on change, while the linked
+display reading supplies its initial and subsequent position/value. The field
+is optional so existing fire-and-forget bindings retain their behavior.

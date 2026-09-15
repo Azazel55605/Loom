@@ -80,6 +80,12 @@ export function configOptionalBoolean(config: unknown, key: string): boolean | u
   return typeof value === "boolean" ? value : undefined;
 }
 
+/** A finite number from `config[key]`, or `undefined` when none is present. */
+export function configOptionalNumber(config: unknown, key: string): number | undefined {
+  const value = record(config)[key];
+  return typeof value === "number" && Number.isFinite(value) ? value : undefined;
+}
+
 /** A list of strings from `config[key]`, dropping any non-string entries. */
 export function configStringArray(config: unknown, key: string): string[] {
   const value = record(config)[key];

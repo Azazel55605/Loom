@@ -21,6 +21,11 @@ import { ActionSliderSkeleton, ActionSliderWidget } from "@loom/ui-kit/widgets/A
 import { ActionTextFieldSkeleton, ActionTextFieldWidget } from "@loom/ui-kit/widgets/ActionTextField";
 import { ActionToggleSkeleton, ActionToggleWidget } from "@loom/ui-kit/widgets/ActionToggle";
 import {
+  ColorPickerActionWidget,
+  ColorPickerDisplayWidget,
+  ColorPickerSkeleton,
+} from "@loom/ui-kit/widgets/ColorPicker";
+import {
   Tooltip,
   TooltipContent,
   TooltipTrigger,
@@ -177,6 +182,7 @@ export function renderWidget({
         case "gauge": return <GaugeSkeleton className={className} />;
         case "statusDot": return <StatusDotSkeleton className={className} />;
         case "logStream": return size === "expanded" ? <LogStreamSkeleton className={className} expanded /> : <LogPreviewSkeleton className={className} />;
+        case "colorPicker": return <ColorPickerSkeleton className={className} />;
       }
     }
 
@@ -205,6 +211,8 @@ export function renderWidget({
         ) : (
           <LogPreviewWidget {...shared} onExpand={onExpand} />
         );
+      case "colorPicker":
+        return <ColorPickerDisplayWidget {...shared} />;
       default:
         // Unreachable while the union and this switch agree. Kept because they
         // are updated in different repositories' worth of code — Core adds the
@@ -222,6 +230,7 @@ export function renderWidget({
       case "slider": return <ActionSliderSkeleton className={className} />;
       case "textField": return <ActionTextFieldSkeleton className={className} />;
       case "selector": return <ActionSelectorSkeleton className={className} />;
+      case "colorPicker": return <ColorPickerSkeleton className={className} />;
     }
   }
   const action = actions.find((candidate) => candidate.id === actionId);
@@ -257,6 +266,8 @@ export function renderWidget({
         return <ActionTextFieldWidget {...shared} />;
       case "selector":
         return <ActionSelectorWidget {...shared} />;
+      case "colorPicker":
+        return <ColorPickerActionWidget {...shared} />;
       default:
         return null;
     }
@@ -276,6 +287,12 @@ function resolveActionConfig(
   config: Record<string, unknown>,
   statusDetails: Record<string, unknown>,
 ): Record<string, unknown> {
+  const linkedDataPointId = config.linkedDataPointId;
+  if (typeof linkedDataPointId === "string") {
+    const currentValue = statusDetails[linkedDataPointId];
+    if (currentValue !== undefined) return { ...config, currentValue };
+  }
+
   const stateDataPointId = config.stateDataPointId;
   if (typeof stateDataPointId !== "string") return config;
 

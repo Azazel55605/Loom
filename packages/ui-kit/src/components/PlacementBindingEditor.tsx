@@ -325,6 +325,9 @@ function BindingRow({
       ) : "action" in binding ? (
         <ActionBindingFields
           binding={binding.action}
+          connectorInstanceId={connectorInstanceId}
+          targetId={targetId}
+          dataPoints={dataPoints}
           actions={actions}
           disabled={disabled}
           idPrefix={idPrefix}
@@ -545,12 +548,18 @@ function DisplayBindingFields({
 
 function ActionBindingFields({
   binding,
+  connectorInstanceId,
+  targetId,
+  dataPoints,
   actions,
   disabled,
   idPrefix,
   onChange,
 }: {
   binding: ActionBinding;
+  connectorInstanceId: string;
+  targetId: string | null;
+  dataPoints: DataPointDescriptor[];
   actions: ConnectorAction[];
   disabled?: boolean;
   idPrefix: string;
@@ -562,6 +571,14 @@ function ActionBindingFields({
   const options = Array.isArray(config.options)
     ? config.options.filter((entry): entry is string => typeof entry === "string")
     : [];
+  const linkedDataPointId =
+    typeof config.linkedDataPointId === "string" ? config.linkedDataPointId : null;
+  const linkedValueType =
+    binding.widgetType === "slider"
+      ? (["number"] as const)
+      : binding.widgetType === "colorPicker"
+        ? (["string"] as const)
+        : null;
 
   function setConfig(key: string, next: unknown) {
     const merged = { ...config };
@@ -617,7 +634,10 @@ function ActionBindingFields({
           disabled={disabled || compatible.length === 0}
           onValueChange={(next) => {
             if (next === "") return;
-            onChange({ ...binding, widgetType: next as ActionWidgetType });
+            const widgetType = next as ActionWidgetType;
+            const nextConfig = { ...config };
+            if (widgetType !== binding.widgetType) delete nextConfig.linkedDataPointId;
+            onChange({ ...binding, widgetType, config: nextConfig });
           }}
         >
           <SelectTrigger id={`${idPrefix}-control`}>
@@ -632,6 +652,47 @@ function ActionBindingFields({
           </SelectContent>
         </Select>
       </Field>
+
+      {linkedValueType !== null ? (
+        <div className="flex flex-col gap-2 sm:col-span-2">
+          <div className="flex items-end gap-2">
+            <div className="min-w-0 flex-1">
+              <DataPointPicker
+                value={
+                  linkedDataPointId === null
+                    ? null
+                    : {
+                        connectorInstanceId,
+                        targetId,
+                        dataPointId: linkedDataPointId,
+                      }
+                }
+                fixedContext={{ connectorInstanceId, targetId, dataPoints }}
+                allowedValueTypes={linkedValueType}
+                disabled={disabled}
+                idPrefix={`${idPrefix}-linked`}
+                onChange={(selection) =>
+                  setConfig("linkedDataPointId", selection?.dataPointId)
+                }
+              />
+            </div>
+            {linkedDataPointId !== null ? (
+              <Button
+                type="button"
+                variant="ghost"
+                disabled={disabled}
+                onClick={() => setConfig("linkedDataPointId", undefined)}
+              >
+                Clear
+              </Button>
+            ) : null}
+          </div>
+          <p className="text-xs text-muted-foreground">
+            Optional live value shown by this control. Without one, it keeps its original
+            fire-and-forget behaviour.
+          </p>
+        </div>
+      ) : null}
 
       {binding.widgetType === "slider" ? (
         <>

@@ -2167,7 +2167,7 @@ mod tests {
             .as_array()
             .expect("array")
             .is_empty());
-        assert_eq!(created["dataPoints"].as_array().expect("array").len(), 9);
+        assert_eq!(created["dataPoints"].as_array().expect("array").len(), 10);
         assert!(!created["defaultLayout"]["bindings"]
             .as_array()
             .expect("array")
@@ -4648,6 +4648,28 @@ mod tests {
         // to the right half of the connector.
         assert!(!message.contains("unknown data points"), "{message}");
 
+        let (status, bad_linked_value) = send(
+            &app.router,
+            post_json_auth(
+                &format!("/dashboards/{dashboard_id}/placements"),
+                &owner,
+                placement_body(serde_json::json!([{
+                    "action": {
+                        "actionId": loom_core::connector::debug::ACTION_SET_LOAD,
+                        "widgetType": "slider",
+                        "config": {
+                            "linkedDataPointId": loom_core::connector::debug::DATA_POINT_ENABLED,
+                        },
+                    }
+                }])),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{bad_linked_value:#}");
+        assert!(bad_linked_value["error"]
+            .as_str()
+            .is_some_and(|message| message.contains("invalid linked data points")));
+
         // A target is checked live, and its binding namespace is coupled to
         // that exact target rather than merely to the connector instance.
         let target_placement = |target_id: &str, data_point_id: &str| {
@@ -4724,6 +4746,26 @@ mod tests {
                     "actionId": loom_core::connector::debug::ACTION_SET_ENABLED,
                     "widgetType": "toggle",
                     "config": {},
+                }
+            },
+            {
+                "action": {
+                    "actionId": loom_core::connector::debug::ACTION_SET_LOAD,
+                    "widgetType": "slider",
+                    "config": {
+                        "min": 0,
+                        "max": 100,
+                        "linkedDataPointId": loom_core::connector::debug::DATA_POINT_LOAD,
+                    },
+                }
+            },
+            {
+                "action": {
+                    "actionId": loom_core::connector::debug::ACTION_SET_ACCENT_COLOR,
+                    "widgetType": "colorPicker",
+                    "config": {
+                        "linkedDataPointId": loom_core::connector::debug::DATA_POINT_ACCENT_COLOR,
+                    },
                 }
             },
         ]);

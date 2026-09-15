@@ -27,7 +27,8 @@ export type DisplayWidgetKey =
   | "metricChart"
   | "gauge"
   | "statusDot"
-  | "logStream";
+  | "logStream"
+  | "colorPicker";
 
 /** The key of a display widget type, whichever serialized form it arrived in. */
 export function displayWidgetKey(widgetType: DisplayWidgetType): DisplayWidgetKey {
@@ -54,6 +55,7 @@ const DISPLAY_LABELS: Record<DisplayWidgetKey, string> = {
   gauge: "Gauge",
   statusDot: "Status dot",
   logStream: "Log stream",
+  colorPicker: "Color picker",
 };
 
 const ACTION_LABELS: Record<ActionWidgetType, string> = {
@@ -62,6 +64,7 @@ const ACTION_LABELS: Record<ActionWidgetType, string> = {
   slider: "Slider",
   textField: "Text field",
   selector: "Dropdown",
+  colorPicker: "Color picker",
 };
 
 /** Human-facing name for a display widget, for the editor's picker. */
@@ -80,7 +83,7 @@ const BY_VALUE_TYPE: Record<DataPointValueType, DisplayWidgetKey[]> = {
   // case it only renders at all as a courtesy.
   number: ["statTile", "progressBar", "gauge"],
   // A string is either short enough to show whole or long enough to scroll.
-  string: ["statTile", "logStream"],
+  string: ["statTile", "logStream", "colorPicker"],
   // A boolean is a state, and a dot reads faster than the word — but the tile
   // stays available for when the word is what matters.
   bool: ["statusDot", "statTile"],
@@ -124,7 +127,7 @@ export function getCompatibleActionWidgetTypes(action: ConnectorAction): ActionW
   const type = properties[names[0]]?.type;
   if (type === "boolean") return ["toggle", "button"];
   if (type === "number" || type === "integer") return ["slider", "button"];
-  if (type === "string") return ["textField", "selector", "button"];
+  if (type === "string") return ["textField", "selector", "colorPicker", "button"];
   return ["button"];
 }
 
