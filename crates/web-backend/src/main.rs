@@ -1406,8 +1406,8 @@ mod tests {
         let types = body.as_array().expect("array");
         assert_eq!(
             types.len(),
-            7,
-            "the catalog should contain Debug, Docker, Govee, TrueNAS, Pi-hole, Tasmota, and UniFi Network"
+            8,
+            "the catalog should contain Debug, Docker, Govee, Music Assistant, TrueNAS, Pi-hole, Tasmota, and UniFi Network"
         );
         assert!(types.iter().all(|entry| {
             entry["typeId"] != "docker-host" && entry["typeId"] != "docker-container"

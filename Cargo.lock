@@ -1277,7 +1277,10 @@ dependencies = [
 name = "loom-connector-music-assistant"
 version = "0.1.0"
 dependencies = [
+ "async-trait",
+ "chrono",
  "futures-util",
+ "loom-connector-test-kit",
  "loom-core",
  "loom-media",
  "serde",
@@ -1400,6 +1403,7 @@ dependencies = [
  "jsonwebtoken",
  "loom-connector-docker",
  "loom-connector-govee",
+ "loom-connector-music-assistant",
  "loom-connector-pihole",
  "loom-connector-tasmota",
  "loom-connector-truenas",

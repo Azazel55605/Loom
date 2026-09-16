@@ -20,6 +20,7 @@ type SvgLoader = () => Promise<{ default: string }>;
 /** Vendored `homarr-labs/dashboard-icons` SVGs, keyed by filename stem. */
 export const BRAND_ICON_LOADERS: Record<string, SvgLoader> = {
   docker: () => import("../assets/icons/brand/docker.svg?raw"),
+  "music-assistant": () => import("../assets/icons/brand/music-assistant.svg?raw"),
   pihole: () => import("../assets/icons/brand/pihole.svg?raw"),
   truenas: () => import("../assets/icons/brand/truenas.svg?raw"),
   unifi: () => import("../assets/icons/brand/unifi.svg?raw"),

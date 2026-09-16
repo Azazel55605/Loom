@@ -1,8 +1,7 @@
-//! Reconnecting WebSocket transport for Music Assistant.
-//!
-//! This crate deliberately contains no Loom [`loom_core::connector::Connector`]
-//! implementation yet. It proves and isolates Music Assistant's transport
-//! boundary before media source and target behavior is mapped onto it.
+//! Music Assistant connector and reconnecting WebSocket transport.
+
+mod config;
+mod connector;
 
 use std::{collections::HashMap, fmt, sync::Arc, time::Duration};
 
@@ -17,6 +16,13 @@ use tokio::{
 };
 use tokio_tungstenite::{connect_async, tungstenite::Message, MaybeTlsStream, WebSocketStream};
 use uuid::Uuid;
+
+pub use config::{config_schema, MusicAssistantConnectorConfig};
+pub use connector::{
+    MusicAssistantConnector, DATA_POINT_IS_AVAILABLE, DATA_POINT_MUSIC_ASSISTANT_VERSION,
+    DATA_POINT_PLAYER_COUNT, DATA_POINT_PLAYER_NAME, DATA_POINT_PLAYER_TYPE, DISPLAY_NAME, ICON,
+    RESOURCE_KIND_PLAYERS, TYPE_ID,
+};
 
 /// Default port published by Music Assistant's local web server.
 pub const DEFAULT_PORT: u16 = 8095;

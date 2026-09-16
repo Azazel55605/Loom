@@ -45,9 +45,9 @@ These facts were checked on 2026-09-16 against Music Assistant's current
 
 ## Decision
 
-Create `loom-connector-music-assistant` as a transport-only crate. It depends on
-Core and Media in preparation for the next phase, but deliberately implements
-neither `Connector`, `MediaSourceCapable`, nor `MediaTargetCapable` yet.
+Create `loom-connector-music-assistant` with an independently-tested transport
+layer, then map that layer onto `Connector`, `MediaSourceCapable`, and
+`MediaTargetCapable` without changing the wire client.
 
 Use `tokio-tungstenite`, matching the proven TrueNAS client architecture. A
 background task owns the socket and correlates UUID message ids through a
@@ -61,11 +61,27 @@ re-authenticates before returning to `Connected`. Calls attempted while the
 transport is reconnecting fail immediately rather than building an unbounded
 offline queue.
 
+The connector maps `players/all` to player sub-targets and the host players
+resource. Library discovery uses `music/browse`, `music/search`, and
+`music/item_by_uri`. Playback state comes from
+`player_queues/get_active_queue` plus `player_queues/items`; queue transport,
+seek, shuffle, repeat, and insertion use the corresponding `player_queues/*`
+commands, while player volume uses `players/cmd/volume_set`.
+
+Music Assistant's `player_queues/play_media` consumes MA's canonical media URI,
+not a raw stream fetched by Loom. The source adapter therefore deliberately
+carries that URI in `ResolvedPlayable.stream_url`; only the matching MA target
+adapter interprets it. This is the source-specific token case anticipated by
+ADR 0041, not a claim that an MA URI is an HTTP URL.
+
 ## Consequences
 
 - MA protocol drift is isolated from Loom's connector and media contracts.
 - Both ordinary local `ws://` deployments and TLS reverse proxies are usable.
 - Current servers fail clearly when a token is missing or rejected; historical
   tokenless support is not misrepresented as a current configuration mode.
-- The next phase can focus on player sub-targets, library browsing, playback,
-  and queues against an already-proven transport.
+- Player targets immediately render the shared MediaPlayer widget, including
+  the host library browser, without connector-specific frontend code.
+- Read-only live tests are opt-in through environment variables. The audible
+  play/pause/resume/seek/skip/stop sequence is additionally ignored by default
+  and requires an explicit acknowledgement and selected player/item.

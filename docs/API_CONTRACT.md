@@ -1049,9 +1049,9 @@ to the connector's factory, which is the only thing that knows what the keys
 mean. A configuration that satisfies the schema's shape can still be refused
 (see [`POST /connector-instances`](#post-connector-instances)).
 
-Today the array holds seven: the debug fixture, the unified Docker connector,
-the Govee connector, the TrueNAS connector, the Pi-hole connector, the Tasmota
-connector, and the UniFi Network connector. It was an array from day one so that registering a real connector
+Today the array holds eight: the debug fixture, the unified Docker connector,
+the Govee connector, the Music Assistant connector, the TrueNAS connector, the
+Pi-hole connector, the Tasmota connector, and the UniFi Network connector. It was an array from day one so that registering a real connector
 type is an insertion rather than a reshape of this response, which is exactly
 what adding Docker turned out to be.
 
@@ -1068,6 +1068,7 @@ is created, not here.
 | `debug` | A fixture that contacts nothing. Permanent — see `crates/core/src/connector/debug.rs`. | How it should pretend to behave. | Parsing alone; there is nothing to reach. |
 | `docker` | One Docker daemon connection and its host-level aggregate view. Containers are addressable sub-targets of that instance. | Required `dockerHost` (`unix://` or `tcp://`) only. | A real daemon connection and ping. |
 | `govee` | One Govee cloud account with capability-driven device sub-targets. | Required sensitive `apiKey`; the cloud API origin is fixed. | `GET /router/api/v1/user/devices` with `Govee-API-Key`. |
+| `music-assistant` | One Music Assistant server with a host library source and one media-capable sub-target per player. | Required `host`, optional `port` (default `8095`), and sensitive `token`. Current schema 28+ servers require the token; omission exists only for legacy compatibility. | Authenticated `/ws` connection followed by the side-effect-free `players/all` command. |
 | `pihole` | One Pi-hole v6 instance with host-level statistics and DNS blocking control. | Required `baseUrl` including `http://` or `https://`, sensitive `password`, and optional `allowInsecureCert` (default `false`); an application password is recommended. | `POST /api/auth`, retaining `session.sid` for `X-FTL-SID` authentication. |
 | `tasmota` | One Tasmota smart plug using its local HTTP command API. | Required bare `host` (optional HTTP port) and optional sensitive `password`. | One combined `Status 0` command; when a password is supplied Loom sends Tasmota's documented default web username `admin`. |
 | `truenas` | One TrueNAS host with an aggregate host view plus addressable pool and dataset sub-targets. | Required bare `host`, required API-key owner `username`, sensitive `apiKey`, and optional `allowInsecureCert` (default `false`). | A mandatory-TLS WebSocket connection and `auth.login_ex` API-key authentication. |
@@ -1118,6 +1119,30 @@ Govee's documented account/device limits and reports service-side rate-limit
 responses distinctly. A successful state response is Healthy even when the
 API's `online` flag is false: Govee documents that such state values may be
 historical, and the flag is not used to pre-emptively reject controls.
+
+The Music Assistant connector uses the server's `/ws` command transport rather
+than JSON-RPC. Its host view publishes `playerCount` and
+`musicAssistantVersion`; each `player:<playerId>` sub-target publishes
+`playerName`, `playerType`, and `isAvailable`. The host-only `players` resource
+has `name`, `type`, and `available` columns, and its row ids map directly to
+those player sub-targets. No generic connector actions are exposed: playback is
+authorized and dispatched through the dedicated media endpoints.
+
+The host implements `MediaSourceCapable` through `music/browse`,
+`music/search`, and `music/item_by_uri`. MA browse folders and non-playable
+collections become containers; playable entries become leaves. Artwork uses
+MA's image-proxy reference when supplied, or a directly fetchable HTTP(S)/data
+reference. Resolve intentionally carries MA's canonical internal media URI in
+the resolved playback token because `player_queues/play_media` consumes that
+URI rather than a raw stream URL.
+
+Player playback state is read from `player_queues/get_active_queue`, with the
+player list supplying availability and volume, and queue contents from
+`player_queues/items`. Play/pause/resume/stop/seek/next/previous, shuffle,
+repeat, and queue insertion use the corresponding `player_queues/*` commands;
+volume uses `players/cmd/volume_set`. Each player default layout combines an
+availability StatusDot with the shared MediaPlayer widget and its embedded host
+library browser.
 
 The Tasmota connector uses the device-local HTTP command endpoint:
 `GET http://<host>/cm?cmnd=<command>`. Its poll sends one `Status 0` command,

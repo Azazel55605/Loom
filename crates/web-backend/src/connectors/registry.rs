@@ -16,6 +16,7 @@ use std::sync::Arc;
 
 use loom_connector_docker::DockerConnector;
 use loom_connector_govee::GoveeConnector;
+use loom_connector_music_assistant::MusicAssistantConnector;
 use loom_connector_pihole::PiHoleConnector;
 use loom_connector_tasmota::TasmotaConnector;
 use loom_connector_truenas::TrueNasConnector;
@@ -84,8 +85,8 @@ pub type ConnectorTypeRegistry = Arc<HashMap<&'static str, ConnectorTypeRegistra
 
 /// The types compiled into this build.
 ///
-/// Seven today: the debug fixture, Docker, Govee, TrueNAS, Pi-hole, Tasmota,
-/// and UniFi Network. Further integrations
+/// Eight today: the debug fixture, Docker, Govee, Music Assistant, TrueNAS,
+/// Pi-hole, Tasmota, and UniFi Network. Further integrations
 /// (a reverse proxy, a hypervisor) register here alongside them,
 /// and nothing else in the backend has to change when they do — that is the
 /// point of the indirection.
@@ -183,6 +184,30 @@ pub fn builtin_registry() -> ConnectorTypeRegistry {
             }),
             schema: loom_connector_govee::config_schema(),
             setup_guide: Some(loom_connector_govee::setup_guide()),
+            discoverable_type: None,
+            discovery_target_field: None,
+        },
+    );
+
+    // Music Assistant verifies its authenticated WebSocket command path by
+    // listing players during construction. Library browsing and player media
+    // control then share that one reconnecting transport.
+    types.insert(
+        loom_connector_music_assistant::TYPE_ID,
+        ConnectorTypeRegistration {
+            type_id: loom_connector_music_assistant::TYPE_ID,
+            display_name: loom_connector_music_assistant::DISPLAY_NAME,
+            icon: Some(loom_connector_music_assistant::ICON.to_owned()),
+            factory: |config| {
+                Box::pin(async move {
+                    MusicAssistantConnector::from_config_value(config)
+                        .await
+                        .map(|connector| Box::new(connector) as Box<dyn Connector>)
+                })
+            },
+            connection_test_factory: None,
+            schema: loom_connector_music_assistant::config_schema(),
+            setup_guide: None,
             discoverable_type: None,
             discovery_target_field: None,
         },
@@ -417,6 +442,28 @@ mod tests {
         assert_eq!(guide.variants.len(), 1);
         assert_eq!(guide.variants[0].id, "api-key");
         assert!(registration.connection_test_factory.is_some());
+        assert!(registration.discoverable_type.is_none());
+    }
+
+    #[test]
+    fn music_assistant_is_registered_with_sensitive_token_and_default_port() {
+        let registry = builtin_registry();
+        let registration = registry
+            .get(loom_connector_music_assistant::TYPE_ID)
+            .expect("the Music Assistant type must be registered");
+
+        assert_eq!(registration.type_id, "music-assistant");
+        assert_eq!(registration.display_name, "Music Assistant");
+        assert_eq!(registration.icon.as_deref(), Some("brand:music-assistant"));
+        assert_eq!(
+            registration.schema["properties"]["token"]["x-loom-sensitive"],
+            true
+        );
+        assert_eq!(
+            registration.schema["properties"]["port"]["default"],
+            loom_connector_music_assistant::DEFAULT_PORT
+        );
+        assert!(registration.setup_guide.is_none());
         assert!(registration.discoverable_type.is_none());
     }
 

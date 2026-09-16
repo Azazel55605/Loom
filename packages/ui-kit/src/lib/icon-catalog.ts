@@ -261,6 +261,7 @@ const SIMPLE_ICONS: readonly (readonly [slug: string, title: string, keywords: s
  *  `assets/icons/brand/`; see `BRAND_ICON_LOADERS`. */
 const BRAND_ICONS: readonly (readonly [key: string, label: string])[] = [
   ["docker", "Docker"],
+  ["music-assistant", "Music Assistant"],
   ["pihole", "Pi-hole"],
   ["truenas", "TrueNAS"],
   ["unifi", "UniFi"],
