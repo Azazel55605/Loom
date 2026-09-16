@@ -132,6 +132,11 @@ export function AddPlacementDialog({
   // Which instance's default layout has already been copied in, so re-renders
   // do not overwrite edits but choosing a different connector does.
   const seededFor = React.useRef<string | null>(null);
+  // Target layouts are fetched separately from the host detail. Keep their
+  // seed identity separate too: selecting another player must replace the
+  // previous player's suggested bindings, while an ordinary re-render must
+  // not overwrite edits made in the shared binding editor.
+  const targetSeededFor = React.useRef<string | null>(null);
 
   const instances = useQuery({
     queryKey: ["connector-instances"],
@@ -153,6 +158,16 @@ export function AddPlacementDialog({
       instanceId !== null &&
       detail.data?.supportsSubTargets === true &&
       mode === "target",
+  });
+  const targetDetail = useQuery({
+    queryKey: ["connector-instance", instanceId, targetId],
+    queryFn: ({ signal }) =>
+      api.getConnectorInstance(instanceId as string, targetId as string, signal),
+    enabled:
+      open &&
+      instanceId !== null &&
+      mode === "target" &&
+      targetId !== null,
   });
   const resourceKinds = useQuery({
     queryKey: [
@@ -181,6 +196,14 @@ export function AddPlacementDialog({
     setResourceKind(null);
     setBindings(detail.data.defaultLayout.bindings);
   }, [detail.data, kind]);
+
+  React.useEffect(() => {
+    if (mode !== "target" || targetId === null || targetDetail.data === undefined) return;
+    const seedKey = `${targetDetail.data.id}:${targetId}`;
+    if (targetSeededFor.current === seedKey) return;
+    targetSeededFor.current = seedKey;
+    setBindings(targetDetail.data.defaultLayout.bindings);
+  }, [mode, targetDetail.data, targetId]);
 
   // Exactly one connector is the common case in a small deployment, and making
   // someone pick from a list of one is friction with no decision in it.
@@ -220,19 +243,15 @@ export function AddPlacementDialog({
         positionY,
         width,
         height,
-        // The detail endpoint publishes the host layout only. For a sub-target
-        // the backend already applies `default_layout_for(targetId)` whenever
-        // bindings are omitted, so it remains the one source of the initial
-        // container layout rather than a second preview contract being added.
+        // Both scopes are seeded from the backend's `default_layout_for` result
+        // and then become ordinary user-owned bindings in this editor.
         ...(resourceKind !== null
           ? {
               widgetBindings: [
                 { resourceKindDisplay: { resourceKind } } satisfies WidgetBinding,
               ],
             }
-          : mode === "server"
-            ? { widgetBindings: bindings }
-            : {}),
+          : { widgetBindings: bindings }),
         // Optional here: a connector tile may also be clickable, which is what
         // composing the action onto an ordinary placement buys.
         ...(action === null ? {} : { placementAction: action }),
@@ -251,7 +270,7 @@ export function AddPlacementDialog({
       ? buttonLabel.trim() !== "" && isPlacementActionComplete(action)
       : instanceId !== null &&
         detail.data !== undefined &&
-        (mode === "server" || targetId !== null) &&
+        (mode === "server" || (targetId !== null && targetDetail.data !== undefined)) &&
         (!resourceKinds.isPending) &&
         (action === null || isPlacementActionComplete(action));
 
@@ -266,6 +285,7 @@ export function AddPlacementDialog({
     setButtonIcon(null);
     setAction(null);
     seededFor.current = null;
+    targetSeededFor.current = null;
     create.reset();
   }
 
@@ -318,6 +338,7 @@ export function AddPlacementDialog({
                 setResourceKind(null);
                 setAction(null);
                 seededFor.current = null;
+                targetSeededFor.current = null;
                 create.reset();
               }}
             />
@@ -418,6 +439,10 @@ export function AddPlacementDialog({
                       setMode(next);
                       setTargetId(null);
                       setResourceKind(null);
+                      setBindings(
+                        next === "server" ? detail.data.defaultLayout.bindings : [],
+                      );
+                      targetSeededFor.current = null;
                       create.reset();
                     }}
                   />
@@ -430,7 +455,7 @@ export function AddPlacementDialog({
                     <h3 className="text-sm font-medium">Specific target</h3>
                     <p className="text-xs text-muted-foreground">
                       Choose one view inside {detail.data.metadata.name}. Its recommended
-                      widgets will be added automatically.
+                      widgets will be loaded below for review.
                     </p>
                   </div>
                   {subTargets.isPending ? (
@@ -461,9 +486,49 @@ export function AddPlacementDialog({
                       onSelect={(next) => {
                         setTargetId(next);
                         setResourceKind(null);
+                        setBindings([]);
+                        targetSeededFor.current = null;
                         create.reset();
                       }}
                     />
+                  )}
+
+                  {targetId === null ? null : targetDetail.isPending ? (
+                    <div className="flex flex-col gap-2" aria-label="Loading target widgets">
+                      <Skeleton className="h-24 w-full" />
+                      <Skeleton className="h-11 w-32" />
+                    </div>
+                  ) : targetDetail.isError ? (
+                    <Alert variant="destructive">
+                      <AlertCircle aria-hidden="true" />
+                      <AlertTitle>Could not load target widgets</AlertTitle>
+                      <AlertDescription>
+                        {describeConnectorError(targetDetail.error)}
+                      </AlertDescription>
+                    </Alert>
+                  ) : targetDetail.data === undefined ? null : (
+                    <div className="flex flex-col gap-3 border-t pt-4">
+                      <div>
+                        <h3 className="text-sm font-medium">Widgets</h3>
+                        <p className="text-xs text-muted-foreground">
+                          Pre-filled from this target&apos;s suggested layout. You can add,
+                          remove, or change widgets before placing the tile.
+                        </p>
+                      </div>
+                      <PlacementBindingEditor
+                        connectorInstanceId={instanceId}
+                        dataPoints={targetDetail.data.dataPoints}
+                        actions={targetDetail.data.actions}
+                        resourceKinds={resourceKinds.data ?? []}
+                        supportsBrowsableContent={targetDetail.data.supportsBrowsableContent}
+                        supportsMediaSource={targetDetail.data.supportsMediaSource}
+                        supportsMediaTarget={targetDetail.data.supportsMediaTarget}
+                        targetId={targetId}
+                        value={bindings}
+                        onChange={setBindings}
+                        disabled={create.isPending}
+                      />
+                    </div>
                   )}
                 </div>
               ) : (
