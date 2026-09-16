@@ -8,6 +8,7 @@ use sqlx::SqlitePool;
 use crate::auth::rate_limit::LoginRateLimiter;
 use crate::connectors::config_secrets::ConfigEncryptionKey;
 use crate::connectors::{ConnectorRuntime, UpdateCache};
+use crate::media_groups::MediaGroupRegistry;
 
 /// Everything a handler needs, cloned per request.
 ///
@@ -45,6 +46,8 @@ pub struct AppState {
     /// together would make one lock serve two cadences and invite an update
     /// check onto the status path. See `connectors::updates`.
     pub updates: UpdateCache,
+    /// Transient native/fan-out media groups keyed by connector and primary.
+    pub media_groups: MediaGroupRegistry,
 }
 
 impl AppState {
@@ -68,6 +71,7 @@ impl AppState {
             avatars_dir: Arc::new(avatars_dir),
             connectors,
             updates: UpdateCache::new(),
+            media_groups: MediaGroupRegistry::default(),
         }
     }
 }

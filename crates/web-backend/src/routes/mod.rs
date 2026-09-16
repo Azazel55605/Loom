@@ -154,6 +154,14 @@ pub fn routes() -> Router<AppState> {
             post(connectors::media_volume),
         )
         .route(
+            "/connector-instances/{id}/media/join-group",
+            post(connectors::media_join_group),
+        )
+        .route(
+            "/connector-instances/{id}/media/leave-group",
+            post(connectors::media_leave_group),
+        )
+        .route(
             "/connector-instances/{id}/action-log",
             get(connectors::list_action_log),
         )

@@ -6,6 +6,7 @@
 use chrono::Duration;
 use loom_connector_music_assistant::{MusicAssistantClient, MusicAssistantConnector, DEFAULT_PORT};
 use loom_core::connector::Connector;
+use loom_core::media::PlaybackStatus;
 use serde_json::{json, Value};
 
 #[tokio::test]
@@ -110,6 +111,65 @@ async fn a_real_player_can_run_the_full_transport_sequence() {
     target.seek(Duration::seconds(5)).await.expect("seek");
     target.skip_next().await.expect("skip next");
     target.stop().await.expect("stop");
+}
+
+#[tokio::test]
+#[ignore = "groups and audibly controls real players; requires two explicit targets, media URI, and acknowledgement"]
+async fn two_real_compatible_players_group_and_follow_transport_together() {
+    assert_eq!(
+        std::env::var("LOOM_TEST_MUSIC_ASSISTANT_ALLOW_GROUPING").as_deref(),
+        Ok("yes"),
+        "set LOOM_TEST_MUSIC_ASSISTANT_ALLOW_GROUPING=yes to acknowledge real grouping and playback"
+    );
+    let connector =
+        live_connector("two_real_compatible_players_group_and_follow_transport_together")
+            .await
+            .expect("live Music Assistant configuration");
+    let primary_id = std::env::var("LOOM_TEST_MUSIC_ASSISTANT_GROUP_PRIMARY")
+        .expect("set the primary player:<id>");
+    let member_id = std::env::var("LOOM_TEST_MUSIC_ASSISTANT_GROUP_MEMBER")
+        .expect("set the member player:<id>");
+    let item_uri = std::env::var("LOOM_TEST_MUSIC_ASSISTANT_ITEM_URI")
+        .expect("set an intentionally playable MA URI");
+    let primary = connector
+        .as_media_target(Some(&primary_id))
+        .expect("primary target must exist");
+    let member = connector
+        .as_media_target(Some(&member_id))
+        .expect("member target must exist");
+    let playable = connector
+        .as_media_source(None)
+        .expect("host media source")
+        .resolve(&item_uri)
+        .await
+        .expect("resolve selected item");
+
+    let outcome = async {
+        primary.join_group(std::slice::from_ref(&member_id)).await?;
+        primary.play(playable).await?;
+        tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+        assert_eq!(
+            primary.playback_state().await?.status,
+            member.playback_state().await?.status
+        );
+        primary.pause().await?;
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+        assert_eq!(
+            primary.playback_state().await?.status,
+            PlaybackStatus::Paused
+        );
+        assert_eq!(
+            member.playback_state().await?.status,
+            PlaybackStatus::Paused
+        );
+        Ok::<(), loom_core::media::MediaError>(())
+    }
+    .await;
+
+    let _ = primary.stop().await;
+    let leave_result = primary.leave_group().await;
+    outcome.expect("native grouping and shared transport should succeed");
+    leave_result.expect("the native group should be left during cleanup");
 }
 
 async fn live_connector(test_name: &str) -> Option<MusicAssistantConnector> {

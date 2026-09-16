@@ -26,7 +26,7 @@ use loom_core::connector::{
     ConnectorError, ConnectorMetadata, ConnectorStatus, DataPointDescriptor, DisplayField,
     ResourceItem, ResourceKindDescriptor, SetupGuide, WidgetLayout,
 };
-use loom_core::media::{MediaError, RepeatMode};
+use loom_core::media::{MediaError, RepeatMode, ResolvedPlayable};
 use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::Value;
 use std::collections::{BTreeSet, HashMap};
@@ -43,6 +43,7 @@ use crate::connectors::config_secrets::{
 };
 use crate::connectors::runtime::{BuildError, ConnectorStatusSnapshot, PendingOperation};
 use crate::error::{internal_error, ErrorBody};
+use crate::media_groups::MediaGroupMode;
 use crate::state::AppState;
 
 /// The `resource_type` connectors are scoped by in `group_permissions`.
@@ -905,6 +906,26 @@ pub struct MediaVolumeRequest {
     percent: u8,
 }
 
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MediaJoinGroupRequest {
+    target_id: String,
+    member_target_ids: Vec<String>,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MediaLeaveGroupRequest {
+    target_id: String,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct MediaGroupingResponse {
+    grouped: bool,
+    mode: Option<MediaGroupMode>,
+}
+
 fn required_target(target_id: &str) -> RouteResult<&str> {
     let target_id = target_id.trim();
     if target_id.is_empty() {
@@ -915,6 +936,34 @@ fn required_target(target_id: &str) -> RouteResult<&str> {
     } else {
         Ok(target_id)
     }
+}
+
+fn member_targets(target_id: &str, members: &[String]) -> RouteResult<Vec<String>> {
+    if members.is_empty() {
+        return Err(Box::new(ErrorBody::message(
+            StatusCode::BAD_REQUEST,
+            "memberTargetIds must contain at least one target",
+        )));
+    }
+    let mut seen = BTreeSet::new();
+    let mut normalized = Vec::with_capacity(members.len());
+    for member in members {
+        let member = required_target(member)?;
+        if member == target_id {
+            return Err(Box::new(ErrorBody::message(
+                StatusCode::BAD_REQUEST,
+                "targetId cannot also appear in memberTargetIds",
+            )));
+        }
+        if !seen.insert(member.to_owned()) {
+            return Err(Box::new(ErrorBody::message(
+                StatusCode::BAD_REQUEST,
+                format!("memberTargetIds contains duplicate target `{member}`"),
+            )));
+        }
+        normalized.push(member.to_owned());
+    }
+    Ok(normalized)
 }
 
 fn media_error_response(error: MediaError) -> Response {
@@ -974,6 +1023,83 @@ where
             internal_error("recording a media control", error)
         }
         Err(LoggedOperationFailure::Operation(error)) => media_error_response(error),
+    }
+}
+
+#[derive(Clone)]
+enum MediaWrite {
+    Play(ResolvedPlayable),
+    Transport(MediaTransportCommand),
+    Seek(chrono::Duration),
+    Volume(u8),
+}
+
+async fn run_media_write(
+    target: &dyn loom_core::media::MediaTargetCapable,
+    operation: &MediaWrite,
+) -> Result<(), MediaError> {
+    match operation {
+        MediaWrite::Play(playable) => target.play(playable.clone()).await,
+        MediaWrite::Seek(position) => target.seek(*position).await,
+        MediaWrite::Volume(percent) => target.set_volume(*percent).await,
+        MediaWrite::Transport(command) => match command {
+            MediaTransportCommand::Pause => target.pause().await,
+            MediaTransportCommand::Resume => target.resume().await,
+            MediaTransportCommand::Stop => target.stop().await,
+            MediaTransportCommand::SkipNext => target.skip_next().await,
+            MediaTransportCommand::SkipPrevious => target.skip_previous().await,
+            MediaTransportCommand::ToggleShuffle => {
+                let current = target.playback_state().await?;
+                target.set_shuffle(!current.shuffle).await
+            }
+            MediaTransportCommand::ToggleRepeat => {
+                let current = target.playback_state().await?;
+                let next = match current.repeat {
+                    RepeatMode::Off => RepeatMode::One,
+                    RepeatMode::One => RepeatMode::All,
+                    RepeatMode::All => RepeatMode::Off,
+                };
+                target.set_repeat(next).await
+            }
+        },
+    }
+}
+
+/// Dispatches primary first, then each fan-out member, and attempts every
+/// target even when an earlier one fails. A single-target operation preserves
+/// its original structured error; a fan-out failure names every failed target.
+async fn dispatch_media_write(
+    connector: &dyn Connector,
+    target_ids: &[String],
+    operation: MediaWrite,
+) -> Result<(), MediaError> {
+    if target_ids.len() == 1 {
+        let target_id = &target_ids[0];
+        let target = connector
+            .as_media_target(Some(target_id))
+            .ok_or_else(|| MediaError::Unsupported(format!("no media target `{target_id}`")))?;
+        return run_media_write(target, &operation).await;
+    }
+
+    let mut failures = Vec::new();
+    for target_id in target_ids {
+        let result = match connector.as_media_target(Some(target_id)) {
+            Some(target) => run_media_write(target, &operation).await,
+            None => Err(MediaError::Unsupported(format!(
+                "no media target `{target_id}`"
+            ))),
+        };
+        if let Err(error) = result {
+            failures.push(format!("{target_id}: {error}"));
+        }
+    }
+    if failures.is_empty() {
+        Ok(())
+    } else {
+        Err(MediaError::PlaybackFailed(format!(
+            "fan-out failed for {}",
+            failures.join("; ")
+        )))
     }
 }
 
@@ -1056,9 +1182,10 @@ pub async fn media_play_item(
             "this connector instance does not provide a host-level media source",
         );
     };
-    let Some(target) = connector.as_media_target(Some(target_id)) else {
+    if connector.as_media_target(Some(target_id)).is_none() {
         return media_target_unavailable(target_id);
-    };
+    }
+    let target_ids = state.media_groups.dispatch_targets(&id, target_id).await;
     let params = serde_json::to_value(&request).expect("media request serialization cannot fail");
     logged_media_operation(
         MediaOperation {
@@ -1072,7 +1199,7 @@ pub async fn media_play_item(
         },
         async {
             let playable = source.resolve(request.item_id.trim()).await?;
-            target.play(playable).await
+            dispatch_media_write(connector.as_ref(), &target_ids, MediaWrite::Play(playable)).await
         },
     )
     .await
@@ -1100,9 +1227,10 @@ pub async fn media_transport(
         Ok(connector) => connector,
         Err(response) => return *response,
     };
-    let Some(target) = connector.as_media_target(Some(target_id)) else {
+    if connector.as_media_target(Some(target_id)).is_none() {
         return media_target_unavailable(target_id);
-    };
+    }
+    let target_ids = state.media_groups.dispatch_targets(&id, target_id).await;
     let command = request.command;
     let params = serde_json::to_value(&request).expect("media request serialization cannot fail");
     logged_media_operation(
@@ -1115,28 +1243,11 @@ pub async fn media_transport(
             actor_user_id: caller.id(),
             success_message: "Media transport updated.",
         },
-        async move {
-            match command {
-                MediaTransportCommand::Pause => target.pause().await,
-                MediaTransportCommand::Resume => target.resume().await,
-                MediaTransportCommand::Stop => target.stop().await,
-                MediaTransportCommand::SkipNext => target.skip_next().await,
-                MediaTransportCommand::SkipPrevious => target.skip_previous().await,
-                MediaTransportCommand::ToggleShuffle => {
-                    let current = target.playback_state().await?;
-                    target.set_shuffle(!current.shuffle).await
-                }
-                MediaTransportCommand::ToggleRepeat => {
-                    let current = target.playback_state().await?;
-                    let next = match current.repeat {
-                        RepeatMode::Off => RepeatMode::One,
-                        RepeatMode::One => RepeatMode::All,
-                        RepeatMode::All => RepeatMode::Off,
-                    };
-                    target.set_repeat(next).await
-                }
-            }
-        },
+        dispatch_media_write(
+            connector.as_ref(),
+            &target_ids,
+            MediaWrite::Transport(command),
+        ),
     )
     .await
 }
@@ -1163,9 +1274,10 @@ pub async fn media_seek(
         Ok(connector) => connector,
         Err(response) => return *response,
     };
-    let Some(target) = connector.as_media_target(Some(target_id)) else {
+    if connector.as_media_target(Some(target_id)).is_none() {
         return media_target_unavailable(target_id);
-    };
+    }
+    let target_ids = state.media_groups.dispatch_targets(&id, target_id).await;
     let params = serde_json::to_value(&request).expect("media request serialization cannot fail");
     logged_media_operation(
         MediaOperation {
@@ -1177,9 +1289,13 @@ pub async fn media_seek(
             actor_user_id: caller.id(),
             success_message: "Media position updated.",
         },
-        target.seek(chrono::Duration::seconds(
-            i64::try_from(request.position_seconds).unwrap_or(i64::MAX),
-        )),
+        dispatch_media_write(
+            connector.as_ref(),
+            &target_ids,
+            MediaWrite::Seek(chrono::Duration::seconds(
+                i64::try_from(request.position_seconds).unwrap_or(i64::MAX),
+            )),
+        ),
     )
     .await
 }
@@ -1209,9 +1325,10 @@ pub async fn media_volume(
         Ok(connector) => connector,
         Err(response) => return *response,
     };
-    let Some(target) = connector.as_media_target(Some(target_id)) else {
+    if connector.as_media_target(Some(target_id)).is_none() {
         return media_target_unavailable(target_id);
-    };
+    }
+    let target_ids = state.media_groups.dispatch_targets(&id, target_id).await;
     let params = serde_json::to_value(&request).expect("media request serialization cannot fail");
     logged_media_operation(
         MediaOperation {
@@ -1223,9 +1340,164 @@ pub async fn media_volume(
             actor_user_id: caller.id(),
             success_message: "Media volume updated.",
         },
-        target.set_volume(request.percent),
+        dispatch_media_write(
+            connector.as_ref(),
+            &target_ids,
+            MediaWrite::Volume(request.percent),
+        ),
     )
     .await
+}
+
+/// `POST /connector-instances/{id}/media/join-group`
+pub async fn media_join_group(
+    caller: AuthenticatedUser,
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Json(request): Json<MediaJoinGroupRequest>,
+) -> Response {
+    if let Some(denied) = caller.deny_unless(
+        ConnectorsControl::KEY,
+        Some(CONNECTOR_RESOURCE_TYPE),
+        Some(&id),
+    ) {
+        return denied;
+    }
+    let target_id = match required_target(&request.target_id) {
+        Ok(target_id) => target_id,
+        Err(response) => return *response,
+    };
+    let members = match member_targets(target_id, &request.member_target_ids) {
+        Ok(members) => members,
+        Err(response) => return *response,
+    };
+    let connector = match live_connector(&state, &id, "media grouping").await {
+        Ok(connector) => connector,
+        Err(response) => return *response,
+    };
+    let Some(target) = connector.as_media_target(Some(target_id)) else {
+        return media_target_unavailable(target_id);
+    };
+    for member in &members {
+        if connector.as_media_target(Some(member)).is_none() {
+            return media_target_unavailable(member);
+        }
+    }
+
+    let params = serde_json::to_value(&request).expect("media request serialization cannot fail");
+    let result = invoke_logged_operation(
+        LoggedOperation {
+            state: &state,
+            instance_id: &id,
+            action_id: "media.joinGroup",
+            target_id: Some(target_id),
+            params: &params,
+            actor: ActionActor::User(caller.id()),
+            snapshot: None,
+        },
+        async {
+            let mode = match target.join_group(&members).await {
+                Ok(()) => MediaGroupMode::Native,
+                Err(MediaError::Unsupported(_)) => MediaGroupMode::FanOut,
+                Err(error) => return Err(error),
+            };
+            state
+                .media_groups
+                .record(&id, target_id, mode, members)
+                .await;
+            Ok(mode)
+        },
+        |mode| {
+            let description = match mode {
+                MediaGroupMode::Native => "Media targets grouped natively.",
+                MediaGroupMode::FanOut => "Media targets grouped in fan-out mode.",
+            };
+            (true, description.to_owned())
+        },
+    )
+    .await;
+
+    if let Ok(uuid) = Uuid::parse_str(&id) {
+        state.connectors.refresh_now(uuid).await;
+    }
+    match result {
+        Ok(mode) => Json(MediaGroupingResponse {
+            grouped: true,
+            mode: Some(mode),
+        })
+        .into_response(),
+        Err(LoggedOperationFailure::Log(error)) => {
+            internal_error("recording media grouping", error)
+        }
+        Err(LoggedOperationFailure::Operation(error)) => media_error_response(error),
+    }
+}
+
+/// `POST /connector-instances/{id}/media/leave-group`
+pub async fn media_leave_group(
+    caller: AuthenticatedUser,
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Json(request): Json<MediaLeaveGroupRequest>,
+) -> Response {
+    if let Some(denied) = caller.deny_unless(
+        ConnectorsControl::KEY,
+        Some(CONNECTOR_RESOURCE_TYPE),
+        Some(&id),
+    ) {
+        return denied;
+    }
+    let target_id = match required_target(&request.target_id) {
+        Ok(target_id) => target_id,
+        Err(response) => return *response,
+    };
+    let connector = match live_connector(&state, &id, "leaving a media group").await {
+        Ok(connector) => connector,
+        Err(response) => return *response,
+    };
+    let Some(target) = connector.as_media_target(Some(target_id)) else {
+        return media_target_unavailable(target_id);
+    };
+    let group = state.media_groups.get(&id, target_id).await;
+    let params = serde_json::to_value(&request).expect("media request serialization cannot fail");
+    let result = invoke_logged_operation(
+        LoggedOperation {
+            state: &state,
+            instance_id: &id,
+            action_id: "media.leaveGroup",
+            target_id: Some(target_id),
+            params: &params,
+            actor: ActionActor::User(caller.id()),
+            snapshot: None,
+        },
+        async {
+            if group
+                .as_ref()
+                .is_some_and(|value| value.mode == MediaGroupMode::Native)
+            {
+                target.leave_group().await?;
+            }
+            state.media_groups.clear(&id, target_id).await;
+            Ok(group.as_ref().map(|value| value.mode))
+        },
+        |_| (true, "Media group left.".to_owned()),
+    )
+    .await;
+
+    if let Ok(uuid) = Uuid::parse_str(&id) {
+        state.connectors.refresh_now(uuid).await;
+    }
+    match result {
+        Ok(mode) => Json(MediaGroupingResponse {
+            grouped: false,
+            mode,
+        })
+        .into_response(),
+        Err(LoggedOperationFailure::Log(error)) => {
+            internal_error("recording media ungrouping", error)
+        }
+        Err(LoggedOperationFailure::Operation(error)) => media_error_response(error),
+    }
 }
 
 /// Load the same cached connector summary used by the public list endpoint.
@@ -1489,6 +1761,7 @@ pub async fn update_instance(
     }
 
     if let Ok(uuid) = Uuid::parse_str(&row.id) {
+        state.media_groups.forget_instance(&row.id).await;
         state.connectors.insert(uuid, connector.clone()).await;
     }
 
@@ -1548,6 +1821,7 @@ pub async fn delete_instance(
 
     if let Ok(uuid) = Uuid::parse_str(&id) {
         state.connectors.remove(&uuid).await;
+        state.media_groups.forget_instance(&id).await;
         // The update cache is keyed by instance id, and ids are not reused —
         // but a cache that keeps growing with every deleted connector is a
         // leak, and one that outlived a *recreated* instance would report a

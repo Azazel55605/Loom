@@ -31,6 +31,7 @@ mod config;
 mod connectors;
 mod dashboard_access;
 mod error;
+mod media_groups;
 mod routes;
 mod state;
 
@@ -248,6 +249,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::HashMap;
     use std::sync::Arc;
 
     use axum::{
@@ -262,7 +264,10 @@ mod tests {
         ActionResult, Connector, ConnectorAction, ConnectorError, ConnectorMetadata,
         ConnectorStatus, DataPointDescriptor, DisplayField, WidgetLayout,
     };
-    use loom_core::media::{PlaybackState, PlaybackStatus, RepeatMode};
+    use loom_core::media::{
+        MediaError, MediaTargetCapable, PlaybackState, PlaybackStatus, Queue, RepeatMode,
+        ResolvedPlayable,
+    };
     use serde_json::Value;
     use std::net::SocketAddr;
     use std::time::Duration;
@@ -1339,6 +1344,172 @@ mod tests {
         }
     }
 
+    struct FanOutProbeTarget {
+        id: String,
+        calls: Arc<std::sync::Mutex<Vec<String>>>,
+    }
+
+    impl FanOutProbeTarget {
+        fn record(&self, operation: &str) {
+            self.calls
+                .lock()
+                .unwrap()
+                .push(format!("{}:{operation}", self.id));
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl MediaTargetCapable for FanOutProbeTarget {
+        async fn playback_state(&self) -> Result<PlaybackState, MediaError> {
+            Ok(PlaybackState {
+                status: PlaybackStatus::Playing,
+                position: Some(chrono::Duration::zero()),
+                volume_percent: 50,
+                current_item: None,
+                shuffle: false,
+                repeat: RepeatMode::Off,
+            })
+        }
+
+        async fn play(&self, _playable: ResolvedPlayable) -> Result<(), MediaError> {
+            self.record("play");
+            Ok(())
+        }
+
+        async fn pause(&self) -> Result<(), MediaError> {
+            self.record("pause");
+            Ok(())
+        }
+
+        async fn resume(&self) -> Result<(), MediaError> {
+            self.record("resume");
+            Ok(())
+        }
+
+        async fn stop(&self) -> Result<(), MediaError> {
+            self.record("stop");
+            Ok(())
+        }
+
+        async fn seek(&self, _position: chrono::Duration) -> Result<(), MediaError> {
+            self.record("seek");
+            Ok(())
+        }
+
+        async fn set_volume(&self, _percent: u8) -> Result<(), MediaError> {
+            self.record("volume");
+            Ok(())
+        }
+
+        async fn set_shuffle(&self, _enabled: bool) -> Result<(), MediaError> {
+            self.record("shuffle");
+            Ok(())
+        }
+
+        async fn set_repeat(&self, _mode: RepeatMode) -> Result<(), MediaError> {
+            self.record("repeat");
+            Ok(())
+        }
+
+        async fn skip_next(&self) -> Result<(), MediaError> {
+            self.record("next");
+            Ok(())
+        }
+
+        async fn skip_previous(&self) -> Result<(), MediaError> {
+            self.record("previous");
+            Ok(())
+        }
+
+        async fn queue(&self) -> Result<Queue, MediaError> {
+            Ok(Queue {
+                items: Vec::new(),
+                current_index: None,
+            })
+        }
+
+        async fn queue_add(&self, _playable: ResolvedPlayable) -> Result<(), MediaError> {
+            self.record("queueAdd");
+            Ok(())
+        }
+    }
+
+    struct FanOutProbeConnector {
+        targets: HashMap<String, FanOutProbeTarget>,
+    }
+
+    impl FanOutProbeConnector {
+        fn new(ids: &[&str], calls: Arc<std::sync::Mutex<Vec<String>>>) -> Self {
+            Self {
+                targets: ids
+                    .iter()
+                    .map(|id| {
+                        (
+                            (*id).to_owned(),
+                            FanOutProbeTarget {
+                                id: (*id).to_owned(),
+                                calls: calls.clone(),
+                            },
+                        )
+                    })
+                    .collect(),
+            }
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl Connector for FanOutProbeConnector {
+        fn as_media_target(&self, target_id: Option<&str>) -> Option<&dyn MediaTargetCapable> {
+            target_id.and_then(|id| self.targets.get(id).map(|target| target as _))
+        }
+
+        async fn status(&self) -> Result<ConnectorStatus, ConnectorError> {
+            Ok(ConnectorStatus::new(
+                loom_core::connector::HealthState::Healthy,
+                serde_json::json!({}),
+            ))
+        }
+
+        async fn actions(&self) -> Vec<ConnectorAction> {
+            Vec::new()
+        }
+
+        async fn execute_action(
+            &self,
+            action_id: &str,
+            _target_id: Option<&str>,
+            _params: Value,
+        ) -> Result<ActionResult, ConnectorError> {
+            Err(ConnectorError::invalid_action(action_id))
+        }
+
+        fn config_schema(&self) -> Value {
+            serde_json::json!({"type": "object", "properties": {}})
+        }
+
+        fn metadata(&self) -> ConnectorMetadata {
+            ConnectorMetadata {
+                id: "fan-out-probe".to_owned(),
+                name: "Fan-out probe".to_owned(),
+                icon: None,
+                version: "1".to_owned(),
+                min_size: (1, 1),
+            }
+        }
+
+        fn display_fields(&self) -> Vec<DisplayField> {
+            Vec::new()
+        }
+
+        fn data_points(&self) -> Vec<DataPointDescriptor> {
+            Vec::new()
+        }
+
+        fn default_layout(&self) -> WidgetLayout {
+            WidgetLayout::default()
+        }
+    }
+
     /// Creates a debug instance through the real endpoint and returns its id.
     async fn create_debug_instance(app: &Router, token: &str, name: &str) -> String {
         let (status, body) = send(
@@ -2037,6 +2208,81 @@ mod tests {
         assert!(body["error"]
             .as_str()
             .is_some_and(|message| message.contains("no media target")));
+    }
+
+    #[tokio::test]
+    async fn unsupported_native_grouping_falls_back_and_fans_out_sequentially() {
+        let app = test_app().await;
+        let (access, _) = setup_and_login(&app.router).await;
+        let id = create_debug_instance(&app.router, &access, "Fan-out fixture").await;
+        let uuid = uuid::Uuid::parse_str(&id).expect("connector id is a UUID");
+        let calls = Arc::new(std::sync::Mutex::new(Vec::new()));
+        app.connectors
+            .insert(
+                uuid,
+                Arc::new(FanOutProbeConnector::new(
+                    &["primary", "member-a", "member-b"],
+                    calls.clone(),
+                )),
+            )
+            .await;
+
+        let (status, grouped) = send(
+            &app.router,
+            post_json_auth(
+                &format!("/connector-instances/{id}/media/join-group"),
+                &access,
+                serde_json::json!({
+                    "targetId": "primary",
+                    "memberTargetIds": ["member-a", "member-b"]
+                }),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{grouped:#}");
+        assert_eq!(grouped["grouped"], true);
+        assert_eq!(grouped["mode"], "fanOut");
+
+        let (status, body) = send(
+            &app.router,
+            post_json_auth(
+                &format!("/connector-instances/{id}/media/transport"),
+                &access,
+                serde_json::json!({"targetId": "primary", "command": "pause"}),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body:#}");
+        assert_eq!(
+            calls.lock().unwrap().as_slice(),
+            ["primary:pause", "member-a:pause", "member-b:pause"]
+        );
+
+        let (status, left) = send(
+            &app.router,
+            post_json_auth(
+                &format!("/connector-instances/{id}/media/leave-group"),
+                &access,
+                serde_json::json!({"targetId": "primary"}),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{left:#}");
+        assert_eq!(left["grouped"], false);
+        assert_eq!(left["mode"], "fanOut");
+
+        calls.lock().unwrap().clear();
+        let (status, body) = send(
+            &app.router,
+            post_json_auth(
+                &format!("/connector-instances/{id}/media/transport"),
+                &access,
+                serde_json::json!({"targetId": "primary", "command": "pause"}),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body:#}");
+        assert_eq!(calls.lock().unwrap().as_slice(), ["primary:pause"]);
     }
 
     #[tokio::test]

@@ -189,6 +189,30 @@ pub trait MediaSourceCapable: Send + Sync {
 /// playback failure.
 #[async_trait]
 pub trait MediaTargetCapable: Send + Sync {
+    /// Whether this connector can attempt native grouping for this target.
+    ///
+    /// A `true` value means the service has a grouping mechanism; individual
+    /// player combinations may still be incompatible. [`Self::join_group`]
+    /// must report those ordinary compatibility rejections as
+    /// [`MediaError::Unsupported`] so callers can deliberately fall back.
+    fn supports_grouping(&self) -> bool {
+        false
+    }
+
+    /// Adds `member_target_ids` to this target as the intended primary player.
+    ///
+    /// Target ids use the connector's public target-id namespace. Connectors
+    /// must return [`MediaError::Unsupported`] for unsupported or incompatible
+    /// combinations rather than panicking or silently doing nothing.
+    async fn join_group(&self, _member_target_ids: &[String]) -> Result<(), MediaError> {
+        Err(MediaError::Unsupported("grouping not supported".to_owned()))
+    }
+
+    /// Leaves or dissolves the native group led by this target.
+    async fn leave_group(&self) -> Result<(), MediaError> {
+        Err(MediaError::Unsupported("grouping not supported".to_owned()))
+    }
+
     /// Returns the target's current transport, item, volume, and repeat state.
     async fn playback_state(&self) -> Result<PlaybackState, MediaError>;
 

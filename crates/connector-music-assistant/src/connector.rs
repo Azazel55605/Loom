@@ -456,6 +456,39 @@ impl MusicAssistantPlayerTarget {
 
 #[async_trait]
 impl MediaTargetCapable for MusicAssistantPlayerTarget {
+    fn supports_grouping(&self) -> bool {
+        true
+    }
+
+    async fn join_group(&self, member_target_ids: &[String]) -> Result<(), MediaError> {
+        let players = list_players(&self.client).await.map_err(media_error)?;
+        let member_player_ids =
+            grouping_member_player_ids(&players, &self.player_id, member_target_ids)?;
+        self.client
+            .call(
+                "players/cmd/set_members",
+                json!({
+                    "target_player": self.player_id,
+                    "player_ids_to_add": member_player_ids,
+                    "player_ids_to_remove": null
+                }),
+            )
+            .await
+            .map_err(grouping_error)?;
+        Ok(())
+    }
+
+    async fn leave_group(&self) -> Result<(), MediaError> {
+        self.client
+            .call(
+                "players/cmd/ungroup",
+                json!({ "player_id": self.player_id }),
+            )
+            .await
+            .map_err(grouping_error)?;
+        Ok(())
+    }
+
     async fn playback_state(&self) -> Result<PlaybackState, MediaError> {
         let players = list_players(&self.client).await.map_err(media_error)?;
         let player = players
@@ -580,8 +613,67 @@ async fn list_players(client: &MusicAssistantClient) -> Result<Vec<Value>, Music
         .as_array()
         .cloned()
         .ok_or_else(|| MusicAssistantError::CommandError {
+            code: None,
             message: "players/all returned a non-array result".to_owned(),
         })
+}
+
+fn grouping_member_player_ids(
+    players: &[Value],
+    primary_player_id: &str,
+    member_target_ids: &[String],
+) -> Result<Vec<String>, MediaError> {
+    let primary = players
+        .iter()
+        .find(|player| player_id(player) == Some(primary_player_id))
+        .ok_or(MediaError::NotFound)?;
+    if primary
+        .get("supported_features")
+        .and_then(Value::as_array)
+        .is_some_and(|features| !features.iter().any(|feature| feature == "set_members"))
+    {
+        return Err(MediaError::Unsupported(format!(
+            "player `{}` does not advertise Music Assistant's set_members feature",
+            player_name(primary)
+        )));
+    }
+
+    let can_group_with = primary
+        .get("can_group_with")
+        .and_then(Value::as_array)
+        .map(|values| values.iter().filter_map(Value::as_str).collect::<Vec<_>>());
+    let mut members = Vec::with_capacity(member_target_ids.len());
+    for target_id in member_target_ids {
+        let member_id = target_id
+            .strip_prefix(TARGET_PREFIX)
+            .filter(|value| !value.is_empty())
+            .ok_or_else(|| {
+                MediaError::Unsupported(format!(
+                    "`{target_id}` is not a Music Assistant player target"
+                ))
+            })?;
+        if member_id == primary_player_id {
+            return Err(MediaError::Unsupported(
+                "the primary player cannot also be one of its group members".to_owned(),
+            ));
+        }
+        let member = players
+            .iter()
+            .find(|player| player_id(player) == Some(member_id))
+            .ok_or(MediaError::NotFound)?;
+        if can_group_with
+            .as_ref()
+            .is_some_and(|compatible| !compatible.contains(&member_id))
+        {
+            return Err(MediaError::Unsupported(format!(
+                "player `{}` cannot be grouped with `{}`",
+                player_name(primary),
+                player_name(member)
+            )));
+        }
+        members.push(member_id.to_owned());
+    }
+    Ok(members)
 }
 
 fn connector_error(error: MusicAssistantError) -> ConnectorError {
@@ -601,6 +693,19 @@ fn media_error(error: MusicAssistantError) -> MediaError {
         | MusicAssistantError::Disconnected
         | MusicAssistantError::Timeout => MediaError::Unreachable,
         other => MediaError::PlaybackFailed(other.to_string()),
+    }
+}
+
+fn grouping_error(error: MusicAssistantError) -> MediaError {
+    match error {
+        // MA assigns 9 to UnsupportedFeaturedException and 11 to
+        // PlayerCommandFailed. Both are normal compatibility outcomes for
+        // set_members/ungroup, so the backend may deliberately fan out.
+        MusicAssistantError::CommandError {
+            code: Some(9 | 11),
+            message,
+        } => MediaError::Unsupported(message),
+        other => media_error(other),
     }
 }
 
@@ -933,7 +1038,9 @@ mod tests {
             "type": "player",
             "name": "Living room",
             "available": true,
-            "volume_level": 42
+            "volume_level": 42,
+            "supported_features": ["set_members", "volume_set"],
+            "can_group_with": ["kitchen"]
         })
     }
 
@@ -947,6 +1054,53 @@ mod tests {
         assert_eq!(row.id, target.id);
         assert_eq!(row.fields["type"], "sonos / player");
         assert_eq!(row.fields["available"], true);
+    }
+
+    #[test]
+    fn grouping_preflight_uses_current_feature_and_compatibility_fields() {
+        let players = vec![
+            fixture_player(),
+            json!({
+                "player_id": "kitchen", "name": "Kitchen",
+                "supported_features": [], "can_group_with": ["living-room"]
+            }),
+            json!({
+                "player_id": "office", "name": "Office",
+                "supported_features": [], "can_group_with": []
+            }),
+        ];
+        assert_eq!(
+            grouping_member_player_ids(&players, "living-room", &["player:kitchen".to_owned()])
+                .unwrap(),
+            ["kitchen"]
+        );
+        let error =
+            grouping_member_player_ids(&players, "living-room", &["player:office".to_owned()])
+                .unwrap_err();
+        assert!(matches!(error, MediaError::Unsupported(message) if message.contains("Office")));
+    }
+
+    #[test]
+    fn grouping_preflight_rejects_a_primary_without_set_members() {
+        let players = vec![json!({
+            "player_id": "limited", "name": "Limited player",
+            "supported_features": ["volume_set"], "can_group_with": []
+        })];
+        let error = grouping_member_player_ids(&players, "limited", &[]).unwrap_err();
+        assert!(
+            matches!(error, MediaError::Unsupported(message) if message.contains("set_members"))
+        );
+    }
+
+    #[test]
+    fn grouping_command_compatibility_errors_remain_unsupported() {
+        assert_eq!(
+            grouping_error(MusicAssistantError::CommandError {
+                code: Some(9),
+                message: "player does not support group commands".to_owned(),
+            }),
+            MediaError::Unsupported("player does not support group commands".to_owned())
+        );
     }
 
     #[test]

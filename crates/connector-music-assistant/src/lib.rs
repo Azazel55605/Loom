@@ -70,7 +70,11 @@ pub enum MusicAssistantError {
     #[error("connected to Music Assistant, but authentication failed: {0}")]
     AuthFailed(String),
     #[error("Music Assistant command failed: {message}")]
-    CommandError { message: String },
+    CommandError {
+        /// MA's structured error code, when this came from the server.
+        code: Option<i64>,
+        message: String,
+    },
     #[error("Music Assistant command timed out")]
     Timeout,
     #[error("the Music Assistant connection was lost")]
@@ -236,6 +240,7 @@ fn command_request(id: &str, command: &str, params: Value) -> Result<String, Mus
         Value::Object(_) => params,
         _ => {
             return Err(MusicAssistantError::CommandError {
+                code: None,
                 message: "Music Assistant command arguments must be a JSON object".to_owned(),
             })
         }
@@ -246,6 +251,7 @@ fn command_request(id: &str, command: &str, params: Value) -> Result<String, Mus
         "args": args,
     }))
     .map_err(|error| MusicAssistantError::CommandError {
+        code: None,
         message: format!("could not serialize command: {error}"),
     })
 }
@@ -297,7 +303,7 @@ async fn authenticate(socket: &mut Socket, token: &str) -> Result<(), MusicAssis
         if response.get("message_id").and_then(Value::as_str) != Some(&id) {
             continue;
         }
-        if let Some(message) = command_error_message(&response) {
+        if let Some((_, message)) = command_error(&response) {
             return Err(MusicAssistantError::AuthFailed(message));
         }
         if auth_succeeded(response.get("result")) {
@@ -457,6 +463,7 @@ async fn dispatch_response(
             .get("result")
             .and_then(Value::as_array)
             .ok_or_else(|| MusicAssistantError::CommandError {
+                code: None,
                 message: "a partial response did not contain an array result".to_owned(),
             })?;
         if let Some(waiter) = pending.lock().await.get_mut(id) {
@@ -468,8 +475,11 @@ async fn dispatch_response(
     let Some(waiter) = pending.lock().await.remove(id) else {
         return Ok(());
     };
-    let result = if let Some(message) = command_error_message(&message) {
-        Err(MusicAssistantError::CommandError { message })
+    let result = if let Some((code, message)) = command_error(&message) {
+        Err(MusicAssistantError::CommandError {
+            code: Some(code),
+            message,
+        })
     } else if let Some(result) = message.get("result") {
         if waiter.partial.is_empty() {
             Ok(result.clone())
@@ -477,6 +487,7 @@ async fn dispatch_response(
             let final_chunk = result
                 .as_array()
                 .ok_or_else(|| MusicAssistantError::CommandError {
+                    code: None,
                     message: "the final chunk did not contain an array result".to_owned(),
                 });
             final_chunk.map(|chunk| {
@@ -491,6 +502,7 @@ async fn dispatch_response(
         }
     } else {
         Err(MusicAssistantError::CommandError {
+            code: None,
             message: "response contained neither result nor error details".to_owned(),
         })
     };
@@ -498,15 +510,16 @@ async fn dispatch_response(
     Ok(())
 }
 
-fn command_error_message(message: &Value) -> Option<String> {
-    message.get("error_code")?;
-    Some(
+fn command_error(message: &Value) -> Option<(i64, String)> {
+    let code = message.get("error_code")?.as_i64()?;
+    Some((
+        code,
         message
             .get("details")
             .and_then(Value::as_str)
             .unwrap_or("unknown Music Assistant command error")
             .to_owned(),
-    )
+    ))
 }
 
 async fn fail_all_pending(pending: &PendingRequests) {
@@ -664,8 +677,8 @@ mod tests {
     #[test]
     fn command_errors_keep_the_server_details() {
         assert_eq!(
-            command_error_message(&json!({"error_code": 401, "details": "invalid token"})),
-            Some("invalid token".to_owned())
+            command_error(&json!({"error_code": 401, "details": "invalid token"})),
+            Some((401, "invalid token".to_owned()))
         );
     }
 

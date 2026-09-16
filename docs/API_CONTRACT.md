@@ -1144,6 +1144,14 @@ volume uses `players/cmd/volume_set`. Each player default layout combines an
 availability StatusDot with the shared MediaPlayer widget and its embedded host
 library browser.
 
+Music Assistant player responses advertise grouping through
+`supported_features: ["set_members", ...]` and enumerate compatible player ids
+in `can_group_with`. Loom uses those fields for an early compatibility error,
+then treats the real `players/cmd/set_members` response as authoritative.
+Joining adds members to the selected primary with `player_ids_to_remove: null`;
+leaving uses `players/cmd/ungroup`. Loom deliberately uses these dynamic
+session groups rather than creating permanent MA group-player entities.
+
 The Tasmota connector uses the device-local HTTP command endpoint:
 `GET http://<host>/cm?cmnd=<command>`. Its poll sends one `Status 0` command,
 which returns status groups 1 through 11 in one JSON object. Loom maps the
@@ -2631,6 +2639,58 @@ being flattened into a generic playback failure. Logged as `media.seek`.
 
 Requires the same scoped `connectors.control` grant. `percent` must be from 0
 through 100. Logged as `media.setVolume`.
+
+### `POST /connector-instances/{id}/media/join-group`
+
+```json
+{
+  "targetId": "player:living-room",
+  "memberTargetIds": ["player:kitchen", "player:office"]
+}
+```
+
+Requires `connectors.control` scoped to the connector instance. `targetId` is
+the intended primary and every member must be another valid media target on
+the same connector. Empty, duplicate, self-referential, or unknown members are
+rejected before dispatch.
+
+The backend first attempts `MediaTargetCapable::join_group`. Native success
+returns:
+
+```json
+{ "grouped": true, "mode": "native" }
+```
+
+`MediaError::Unsupported` is the expected signal for a connector without
+native grouping or an incompatible target combination. It is not returned as
+an HTTP failure: Loom records a transient fan-out group instead and returns:
+
+```json
+{ "grouped": true, "mode": "fanOut" }
+```
+
+In fan-out mode, play-item, transport, seek, and volume writes run sequentially
+against the primary and every recorded member. Every target is attempted; a
+combined failure names each target that rejected the operation. Playback-state
+and queue reads always come from the primary. Native groups receive each write
+only once because the upstream media service owns member synchronization.
+
+### `POST /connector-instances/{id}/media/leave-group`
+
+```json
+{ "targetId": "player:living-room" }
+```
+
+Requires the same scoped `connectors.control` grant. A recorded native group
+calls `MediaTargetCapable::leave_group`; a fan-out group only clears Loom's
+dispatch record. The response is `{ "grouped": false, "mode": "native" |
+"fanOut" | null }`, where `mode` describes the group that was left and is null
+when this backend process had no recorded group.
+
+Grouping records are deliberately process-local coordination state. Updating
+or deleting a connector clears them; restarting the backend also forgets them.
+The media service may retain a native dynamic group across that restart, but
+Loom will not fan out or claim knowledge of it until a new join request.
 
 All media write endpoints create their pending `connector_action_log` row
 before dispatch and record both success and failure. They therefore appear in
