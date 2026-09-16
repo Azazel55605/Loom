@@ -94,15 +94,19 @@ service implementation.
 The shared Image data-point and display-widget primitive is now complete. It
 accepts stable HTTP(S) image URLs and self-contained `data:` URIs and is proven
 without a network dependency by DebugConnector's cycling synthetic artwork.
-The generic browsable List/Grid primitive remains pending.
+The generic browsable List/Grid primitive is also complete. It deliberately
+sits on `Connector` as the smaller, rendering-oriented `BrowsableItem`
+contract: hierarchy, thumbnails, search, and an optional ordinary connector
+action. `MediaSourceCapable` remains the richer promise that media can be
+resolved for playback; generic browsing does not imply that.
 
 ### Scope of the foundation phase
 
 The original foundation phase was traits and types only. It intentionally added
 no media widget, browsable list/grid primitive, DebugConnector media fixture, or
-real media connector. The Image primitive has since landed as described above;
-the remaining generic browsing surface and media-specific fixtures/integrations
-still follow after that shared rendering surface exists.
+real media connector. The Image and generic browsing primitives have since
+landed as described above; media-specific widgets, fixtures, and real
+integrations still follow on top of those shared rendering surfaces.
 
 ## Consequences
 
@@ -114,6 +118,5 @@ still follow after that shared rendering surface exists.
   live/file distinction required for honest controls.
 - Media values and errors can cross future backend API boundaries without
   coupling the contract crate to Web/backend or to a particular player.
-- The frontend can now render artwork through the generic Image primitive, but
-  a browsable list/grid primitive is still required before a complete media
-  browser or player fixture is added.
+- The frontend can now render artwork and generic hierarchical content without
+  giving the generic browser playback semantics it cannot uphold.

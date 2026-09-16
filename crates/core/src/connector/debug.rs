@@ -80,12 +80,13 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
 
 use super::{
-    details::set_detail, ActionResult, ActionWidgetType, CapabilityRequirement, CapabilityStatus,
-    ChartType, ColumnDescriptor, ColumnValueType, ConnectionTestResult, Connector, ConnectorAction,
-    ConnectorError, ConnectorMetadata, ConnectorStatus, DataPointDescriptor, DataPointValueType,
-    DiscoveredResource, DisplayField, DisplayWidgetType, HealthState, NetworkTarget, ResourceItem,
-    ResourceKindDescriptor, SetupGuide, SetupGuideToggle, SetupGuideVariant, SubTarget,
-    UpdateCheckResult, WidgetBinding, WidgetLayout,
+    details::set_detail, ActionResult, ActionWidgetType, BrowsableItem, BrowsableItemKind,
+    CapabilityRequirement, CapabilityStatus, ChartType, ColumnDescriptor, ColumnValueType,
+    ConnectionTestResult, Connector, ConnectorAction, ConnectorError, ConnectorMetadata,
+    ConnectorStatus, DataPointDescriptor, DataPointValueType, DiscoveredResource, DisplayField,
+    DisplayWidgetType, HealthState, NetworkTarget, ResourceItem, ResourceKindDescriptor,
+    SetupGuide, SetupGuideToggle, SetupGuideVariant, SubTarget, UpdateCheckResult, WidgetBinding,
+    WidgetLayout,
 };
 
 /// The connector type id this fixture registers under.
@@ -109,6 +110,9 @@ pub const ACTION_SET_LABEL: &str = "set-label";
 /// The action id that changes the simulated accent colour. Takes
 /// `{"color": "#RRGGBB"}`.
 pub const ACTION_SET_ACCENT_COLOR: &str = "set-accent-color";
+
+/// Selects one terminal item from the generic content-browser fixture.
+pub const ACTION_SELECT_FIXTURE_ITEM: &str = "select-fixture-item";
 
 /// The resource kind id for the fake browsable "widgets" table.
 pub const RESOURCE_KIND_WIDGETS: &str = "widgets";
@@ -647,6 +651,60 @@ fn synthetic_cover_art(tick: u64) -> String {
     format!("data:image/svg+xml,{encoded}")
 }
 
+/// A deterministic three-level hierarchy for the generic browser primitive.
+fn fixture_browsable_items() -> Vec<BrowsableItem> {
+    vec![
+        BrowsableItem::new(
+            "collection-a",
+            "Fixture collection A",
+            BrowsableItemKind::Container,
+        )
+        .with_thumbnail(synthetic_cover_art(0))
+        .with_metadata("items", 2),
+        BrowsableItem::new(
+            "collection-b",
+            "Fixture collection B",
+            BrowsableItemKind::Container,
+        )
+        .with_thumbnail(synthetic_cover_art(1))
+        .with_metadata("items", 1),
+        BrowsableItem::new("loose-item", "Loose fixture item", BrowsableItemKind::Leaf)
+            .with_thumbnail(synthetic_cover_art(2))
+            .with_metadata("category", "root"),
+        BrowsableItem::new(
+            "collection-a/item-alpha",
+            "Alpha fixture item",
+            BrowsableItemKind::Leaf,
+        )
+        .with_thumbnail(synthetic_cover_art(3))
+        .with_metadata("duration", "3:12"),
+        BrowsableItem::new(
+            "collection-a/deep",
+            "Nested fixture collection",
+            BrowsableItemKind::Container,
+        )
+        .with_metadata("items", 1),
+        BrowsableItem::new(
+            "collection-a/deep/item-beta",
+            "Beta fixture item",
+            BrowsableItemKind::Leaf,
+        )
+        .with_thumbnail(synthetic_cover_art(0))
+        .with_metadata("duration", "4:05"),
+        BrowsableItem::new(
+            "collection-b/item-gamma",
+            "Gamma fixture item",
+            BrowsableItemKind::Leaf,
+        )
+        .with_thumbnail(synthetic_cover_art(1))
+        .with_metadata("duration", "2:48"),
+    ]
+}
+
+fn fixture_parent(id: &str) -> Option<&str> {
+    id.rsplit_once('/').map(|(parent, _)| parent)
+}
+
 /// Rounds to two decimals so the wire values stay readable.
 fn round2(value: f64) -> f64 {
     (value * 100.0).round() / 100.0
@@ -892,6 +950,22 @@ impl Connector for DebugConnector {
                 is_disruptive: false,
                 snapshot_data_point_ids: Vec::new(),
             },
+            ConnectorAction {
+                id: ACTION_SELECT_FIXTURE_ITEM.to_owned(),
+                target_id: None,
+                label: "Select fixture item".to_owned(),
+                description: Some("Selects one leaf from the synthetic browser.".to_owned()),
+                params_schema: json!({
+                    "type": "object",
+                    "properties": {
+                        "itemId": { "type": "string", "minLength": 1 }
+                    },
+                    "required": ["itemId"],
+                    "additionalProperties": false
+                }),
+                is_disruptive: false,
+                snapshot_data_point_ids: Vec::new(),
+            },
         ]
         .into_iter()
         .chain(FIXTURE_TARGETS.into_iter().flat_map(|target| {
@@ -1008,6 +1082,25 @@ impl Connector for DebugConnector {
                 self.lock().accent_color = color.clone();
                 Ok(ActionResult::ok("Simulated accent colour updated.")
                     .with_payload(json!({ DATA_POINT_ACCENT_COLOR: color })))
+            }
+
+            ACTION_SELECT_FIXTURE_ITEM => {
+                let item_id = params
+                    .get("itemId")
+                    .and_then(Value::as_str)
+                    .filter(|id| {
+                        fixture_browsable_items()
+                            .iter()
+                            .any(|item| item.id == *id && item.kind == BrowsableItemKind::Leaf)
+                    })
+                    .ok_or_else(|| ConnectorError::InvalidParams {
+                        action_id: action_id.to_owned(),
+                        reason: "expected `itemId` to name a fixture leaf".to_owned(),
+                    })?;
+                Ok(
+                    ActionResult::ok(format!("Selected fixture item {item_id}."))
+                        .with_payload(json!({ "selectedItemId": item_id })),
+                )
             }
 
             ACTION_RECYCLE => {
@@ -1149,6 +1242,39 @@ impl Connector for DebugConnector {
         Ok(FIXTURE_TARGETS
             .into_iter()
             .map(|id| SubTarget::new(id, id))
+            .collect())
+    }
+
+    fn supports_browsable_content(&self) -> bool {
+        true
+    }
+
+    async fn browse_content(
+        &self,
+        _target_id: Option<&str>,
+        path: Option<&str>,
+    ) -> Result<Vec<BrowsableItem>, ConnectorError> {
+        self.gate().await?;
+        let parent = path.map(str::trim).filter(|value| !value.is_empty());
+        Ok(fixture_browsable_items()
+            .into_iter()
+            .filter(|item| fixture_parent(&item.id) == parent)
+            .collect())
+    }
+
+    async fn search_content(
+        &self,
+        _target_id: Option<&str>,
+        query: &str,
+    ) -> Result<Vec<BrowsableItem>, ConnectorError> {
+        self.gate().await?;
+        let query = query.trim().to_ascii_lowercase();
+        if query.is_empty() {
+            return self.browse_content(None, None).await;
+        }
+        Ok(fixture_browsable_items()
+            .into_iter()
+            .filter(|item| item.label.to_ascii_lowercase().contains(&query))
             .collect())
     }
 
@@ -1491,6 +1617,7 @@ impl Connector for DebugConnector {
             // bindings are: a variant that no fixture exercises is a variant
             // every renderer and validator is free to quietly not handle.
             WidgetBinding::resource_kind_display(RESOURCE_KIND_WIDGETS),
+            WidgetBinding::browsable_list(Some(ACTION_SELECT_FIXTURE_ITEM.to_owned())),
         ])
     }
 
@@ -1540,7 +1667,8 @@ mod tests {
                 ACTION_SET_ENABLED,
                 ACTION_SET_LOAD,
                 ACTION_SET_LABEL,
-                ACTION_SET_ACCENT_COLOR
+                ACTION_SET_ACCENT_COLOR,
+                ACTION_SELECT_FIXTURE_ITEM
             ]
         );
 
@@ -1849,7 +1977,7 @@ mod tests {
             .collect();
 
         let layout = connector.default_layout();
-        assert_eq!(layout.bindings.len(), 15);
+        assert_eq!(layout.bindings.len(), 16);
 
         for binding in &layout.bindings {
             match binding {
@@ -1877,6 +2005,12 @@ mod tests {
                     kind_ids.contains(resource_kind),
                     "layout binds unknown resource kind {resource_kind}"
                 ),
+                WidgetBinding::BrowsableList { action_id } => {
+                    assert!(connector.supports_browsable_content());
+                    assert!(action_id
+                        .as_ref()
+                        .is_none_or(|action_id| action_ids.contains(action_id)));
+                }
             }
         }
     }
@@ -1952,6 +2086,11 @@ mod tests {
         assert!(layout
             .bindings
             .contains(&WidgetBinding::resource_kind_display(RESOURCE_KIND_WIDGETS)));
+        assert!(layout
+            .bindings
+            .contains(&WidgetBinding::browsable_list(Some(
+                ACTION_SELECT_FIXTURE_ITEM.to_owned()
+            ))));
 
         // The bounded widgets must carry the bounds they need to draw.
         for binding in &layout.bindings {
@@ -2711,5 +2850,59 @@ mod tests {
         assert_ne!(host, fixture_a);
         assert_ne!(fixture_a, fixture_b);
         assert_eq!(fixture_a.bindings.len(), 3);
+    }
+
+    #[tokio::test]
+    async fn browsable_fixture_navigates_searches_and_selects_leaves() {
+        let connector = DebugConnector::default();
+        assert!(connector.supports_browsable_content());
+
+        let root = connector.browse_content(None, None).await.unwrap();
+        assert_eq!(root.len(), 3);
+        assert!(root.iter().any(|item| {
+            item.id == "collection-a" && item.kind == BrowsableItemKind::Container
+        }));
+        assert!(root.iter().all(|item| !item.label.is_empty()));
+
+        let first_level = connector
+            .browse_content(None, Some("collection-a"))
+            .await
+            .unwrap();
+        assert_eq!(first_level.len(), 2);
+        let nested = connector
+            .browse_content(None, Some("collection-a/deep"))
+            .await
+            .unwrap();
+        assert_eq!(nested.len(), 1);
+        assert_eq!(nested[0].id, "collection-a/deep/item-beta");
+
+        let search = connector.search_content(None, "ALPHA").await.unwrap();
+        assert_eq!(search.len(), 1);
+        assert_eq!(search[0].id, "collection-a/item-alpha");
+
+        let selected = connector
+            .execute_action(
+                ACTION_SELECT_FIXTURE_ITEM,
+                None,
+                json!({ "itemId": "collection-a/item-alpha" }),
+            )
+            .await
+            .unwrap();
+        assert!(selected.success);
+        assert_eq!(
+            selected.payload.as_ref().unwrap()["selectedItemId"],
+            "collection-a/item-alpha"
+        );
+
+        assert!(matches!(
+            connector
+                .execute_action(
+                    ACTION_SELECT_FIXTURE_ITEM,
+                    None,
+                    json!({ "itemId": "collection-a" }),
+                )
+                .await,
+            Err(ConnectorError::InvalidParams { .. })
+        ));
     }
 }

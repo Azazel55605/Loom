@@ -172,6 +172,20 @@ pub async fn assert_connector_contract(
                     "connector `{connector_id}` layout for target {} binds missing resource kind `{resource_kind}`",
                     target_label(*target)
                 ),
+                WidgetBinding::BrowsableList { action_id } => {
+                    assert!(
+                        connector.supports_browsable_content(),
+                        "connector `{connector_id}` layout for target {} binds browsable content but does not support it",
+                        target_label(*target)
+                    );
+                    if let Some(action_id) = action_id {
+                        assert!(
+                            action_keys.contains(&(action_id.as_str(), *target)),
+                            "connector `{connector_id}` browsable layout for target {} binds missing action `{action_id}`",
+                            target_label(*target)
+                        );
+                    }
+                }
             }
         }
     }

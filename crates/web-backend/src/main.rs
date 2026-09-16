@@ -1785,6 +1785,71 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn generic_browse_and_search_are_served_from_the_live_connector() {
+        let app = test_app().await;
+        let (access, _) = setup_and_login(&app.router).await;
+        let id = create_debug_instance(&app.router, &access, "Content browser").await;
+
+        let (status, root) = send(
+            &app.router,
+            get_with_auth(
+                &format!("/connector-instances/{id}/browse"),
+                &bearer(&access),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{root:#}");
+        assert_eq!(root.as_array().expect("browse rows").len(), 3);
+        assert_eq!(root[0]["kind"], "container");
+        assert!(root[0]["thumbnail"]
+            .as_str()
+            .is_some_and(|value| value.starts_with("data:image/")));
+
+        let (status, nested) = send(
+            &app.router,
+            get_with_auth(
+                &format!("/connector-instances/{id}/browse?path=collection-a%2Fdeep"),
+                &bearer(&access),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{nested:#}");
+        assert_eq!(nested[0]["id"], "collection-a/deep/item-beta");
+
+        let (status, search) = send(
+            &app.router,
+            get_with_auth(
+                &format!("/connector-instances/{id}/search?q=alpha"),
+                &bearer(&access),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{search:#}");
+        assert_eq!(search.as_array().expect("search rows").len(), 1);
+        assert_eq!(search[0]["id"], "collection-a/item-alpha");
+
+        let uuid = uuid::Uuid::parse_str(&id).expect("instance uuid");
+        app.connectors
+            .insert(
+                uuid,
+                Arc::new(NonDiscoverableConnector(DebugConnector::default())),
+            )
+            .await;
+        let (status, body) = send(
+            &app.router,
+            get_with_auth(
+                &format!("/connector-instances/{id}/browse"),
+                &bearer(&access),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{body:#}");
+        assert!(body["error"]
+            .as_str()
+            .is_some_and(|message| message.contains("does not support")));
+    }
+
+    #[tokio::test]
     async fn resource_actions_run_through_the_ordinary_action_endpoint() {
         let app = test_app().await;
         let (access, _) = setup_and_login(&app.router).await;
@@ -2187,6 +2252,7 @@ mod tests {
             .is_empty());
         assert_eq!(created["discoverableType"], "debug");
         assert_eq!(created["supportsSubTargets"], true);
+        assert_eq!(created["supportsBrowsableContent"], true);
 
         // The poller fills status after the response rather than extending the
         // create request until every remote sub-target has been sampled.
@@ -8225,6 +8291,74 @@ mod tests {
                 .is_some_and(|message| message.contains("unknown resource kinds: not-a-kind")),
             "the 400 must name the namespace it failed in: {rejected:#}"
         );
+    }
+
+    #[tokio::test]
+    async fn a_browsable_binding_requires_support_and_a_valid_optional_action() {
+        let app = test_app().await;
+        let (owner, _) = setup_and_login(&app.router).await;
+        let connector_id = create_debug_instance(&app.router, &owner, "Browse binding").await;
+        let dashboard_id = create_dashboard(&app.router, &owner, "Library").await;
+
+        let placement = |action_id: serde_json::Value, position_x: i64| {
+            serde_json::json!({
+                "connectorInstanceId": connector_id,
+                "positionX": position_x,
+                "positionY": 0,
+                "width": 4,
+                "height": 4,
+                "widgetBindings": [{ "browsableList": { "actionId": action_id } }]
+            })
+        };
+
+        let (status, created) = send(
+            &app.router,
+            post_json_auth(
+                &format!("/dashboards/{dashboard_id}/placements"),
+                &owner,
+                placement(
+                    serde_json::json!(loom_core::connector::debug::ACTION_SELECT_FIXTURE_ITEM),
+                    0,
+                ),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED, "{created:#}");
+
+        let (status, invalid_action) = send(
+            &app.router,
+            post_json_auth(
+                &format!("/dashboards/{dashboard_id}/placements"),
+                &owner,
+                placement(serde_json::json!("not-an-action"), 4),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{invalid_action:#}");
+        assert!(invalid_action["error"]
+            .as_str()
+            .is_some_and(|message| message.contains("unknown actions: not-an-action")));
+
+        let uuid = uuid::Uuid::parse_str(&connector_id).expect("instance uuid");
+        app.connectors
+            .insert(
+                uuid,
+                Arc::new(NonDiscoverableConnector(DebugConnector::default())),
+            )
+            .await;
+        let (status, unsupported) = send(
+            &app.router,
+            post_json_auth(
+                &format!("/dashboards/{dashboard_id}/placements"),
+                &owner,
+                placement(serde_json::Value::Null, 8),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{unsupported:#}");
+        assert!(unsupported["error"]
+            .as_str()
+            .is_some_and(|message| message.contains("does not support")));
     }
 
     /// Hiding is presentation, not access control — the list keeps returning

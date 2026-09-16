@@ -400,11 +400,12 @@ export type ActionWidgetType =
  * One widget and the thing it is wired to.
  *
  * Externally tagged — a single-key object, `{ display: … }`, `{ action: … }` or
- * `{ resourceKindDisplay: … }` — because the three kinds bind to different
+ * `{ resourceKindDisplay: … }` or `{ browsableList: … }` — because the kinds bind to different
  * identifier spaces: a display widget reads a `DataPointDescriptor.id` out of
  * `status.details`, a control widget invokes a `ConnectorAction.id`, and a
- * resource-kind widget lists a `ResourceKindDescriptor.kind`. Narrow on the
- * key, not on the widget type.
+ * resource-kind widget lists a `ResourceKindDescriptor.kind`, and a generic
+ * browser loads hierarchy entries directly. Narrow on the key, not on the
+ * widget type.
  */
 export type WidgetBinding =
   | {
@@ -441,6 +442,13 @@ export type WidgetBinding =
         /** A `ResourceKindDescriptor.kind` declared for this placement's
          *  target. */
         resourceKind: string;
+      };
+    }
+  | {
+      /** Generic hierarchical content, optionally making leaves actionable. */
+      browsableList: {
+        /** Action invoked with `{ itemId }`, or null for browse-only leaves. */
+        actionId: string | null;
       };
     };
 
@@ -622,6 +630,8 @@ export type ConnectorInstanceDetail = ConnectorInstanceSummary & {
   defaultLayout: WidgetLayout;
   /** Whether this instance exposes addressable views below its host view. */
   supportsSubTargets: boolean;
+  /** Whether this connector exposes generic hierarchical browse/search data. */
+  supportsBrowsableContent: boolean;
   /** Type id this live instance can discover, or null when unsupported. */
   discoverableType: string | null;
   /** Whether this connector can be asked if what it manages is out of date. */
@@ -1657,6 +1667,50 @@ function getResourceItems(
   return authorizedRequest<ResourceItem[]>(
     runtime,
     `/connector-instances/${encodeURIComponent(id)}/resources/${encodeURIComponent(kind)}${query}`,
+    { signal },
+  );
+}
+
+export type BrowsableItemKind = "container" | "leaf";
+
+export type BrowsableItem = {
+  id: string;
+  label: string;
+  kind: BrowsableItemKind;
+  thumbnail: string | null;
+  metadata: Record<string, unknown>;
+};
+
+function browseConnectorContent(
+  runtime: ApiRuntime,
+  id: string,
+  path?: string | null,
+  targetId?: string | null,
+  signal?: AbortSignal,
+): Promise<BrowsableItem[]> {
+  const query = new URLSearchParams();
+  if (path) query.set("path", path);
+  if (targetId) query.set("targetId", targetId);
+  const suffix = query.size > 0 ? `?${query.toString()}` : "";
+  return authorizedRequest<BrowsableItem[]>(
+    runtime,
+    `/connector-instances/${encodeURIComponent(id)}/browse${suffix}`,
+    { signal },
+  );
+}
+
+function searchConnectorContent(
+  runtime: ApiRuntime,
+  id: string,
+  queryText: string,
+  targetId?: string | null,
+  signal?: AbortSignal,
+): Promise<BrowsableItem[]> {
+  const query = new URLSearchParams({ q: queryText });
+  if (targetId) query.set("targetId", targetId);
+  return authorizedRequest<BrowsableItem[]>(
+    runtime,
+    `/connector-instances/${encodeURIComponent(id)}/search?${query.toString()}`,
     { signal },
   );
 }
@@ -2701,6 +2755,18 @@ export function createApiClient(options: {
       targetId?: string | null,
       signal?: AbortSignal,
     ) => getResourceItems(runtime, id, kind, targetId, signal),
+    browseConnectorContent: (
+      id: string,
+      path?: string | null,
+      targetId?: string | null,
+      signal?: AbortSignal,
+    ) => browseConnectorContent(runtime, id, path, targetId, signal),
+    searchConnectorContent: (
+      id: string,
+      query: string,
+      targetId?: string | null,
+      signal?: AbortSignal,
+    ) => searchConnectorContent(runtime, id, query, targetId, signal),
     discoverConnectorResources: (id: string, signal?: AbortSignal) =>
       discoverConnectorResources(runtime, id, signal),
     discoverForType: (typeId: string, candidateConfig: unknown, signal?: AbortSignal) =>

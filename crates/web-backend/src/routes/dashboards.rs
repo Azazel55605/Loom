@@ -2806,6 +2806,7 @@ async fn validate_widget_bindings(
     let mut unknown_actions: Vec<&str> = Vec::new();
     let mut unknown_resource_kinds: Vec<&str> = Vec::new();
     let mut invalid_linked_data_points: Vec<String> = Vec::new();
+    let mut unsupported_browsable_content = false;
     for binding in bindings {
         match binding {
             WidgetBinding::Display { data_point_id, .. }
@@ -2838,6 +2839,16 @@ async fn validate_widget_bindings(
             {
                 unknown_resource_kinds.push(resource_kind);
             }
+            WidgetBinding::BrowsableList { action_id } => {
+                if !connector.supports_browsable_content() {
+                    unsupported_browsable_content = true;
+                }
+                if let Some(action_id) = action_id {
+                    if !action_ids.contains(&(action_id.clone(), selected_target.clone())) {
+                        unknown_actions.push(action_id);
+                    }
+                }
+            }
             _ => {}
         }
     }
@@ -2856,6 +2867,7 @@ async fn validate_widget_bindings(
         || !unknown_actions.is_empty()
         || !unknown_resource_kinds.is_empty()
         || !invalid_linked_data_points.is_empty()
+        || unsupported_browsable_content
     {
         // Named separately, because "unknown data point restart" would send
         // someone looking in the wrong half of the connector.
@@ -2880,6 +2892,9 @@ async fn validate_widget_bindings(
                 "invalid linked data points for their action controls: {}",
                 invalid_linked_data_points.join(", ")
             ));
+        }
+        if unsupported_browsable_content {
+            problems.push("browsable content on a connector that does not support it".to_owned());
         }
         return Err(Box::new(ErrorBody::message(
             StatusCode::BAD_REQUEST,

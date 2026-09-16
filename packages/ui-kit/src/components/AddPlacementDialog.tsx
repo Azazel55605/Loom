@@ -481,6 +481,7 @@ export function AddPlacementDialog({
                     dataPoints={detail.data.dataPoints}
                     actions={detail.data.actions}
                     resourceKinds={resourceKinds.data ?? []}
+                    supportsBrowsableContent={detail.data.supportsBrowsableContent}
                     targetId={null}
                     value={bindings}
                     onChange={setBindings}

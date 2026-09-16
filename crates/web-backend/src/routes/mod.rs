@@ -122,6 +122,14 @@ pub fn routes() -> Router<AppState> {
             get(connectors::list_resources),
         )
         .route(
+            "/connector-instances/{id}/browse",
+            get(connectors::browse_content),
+        )
+        .route(
+            "/connector-instances/{id}/search",
+            get(connectors::search_content),
+        )
+        .route(
             "/connector-instances/{id}/action-log",
             get(connectors::list_action_log),
         )

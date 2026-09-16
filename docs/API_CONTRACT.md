@@ -1711,7 +1711,8 @@ carries, plus what a dashboard placement UI needs.
     ]
   },
   "discoverableType": "debug",
-  "supportsSubTargets": true
+  "supportsSubTargets": true,
+  "supportsBrowsableContent": true
 }
 ```
 
@@ -1724,6 +1725,7 @@ carries, plus what a dashboard placement UI needs.
 | `defaultLayout` | object | [`WidgetLayout`](#widgetlayout) the connector ships with. | Always present; `bindings` may be empty. |
 | `discoverableType` | string | Type id this live instance can discover. Clients use this to decide whether to offer discovery without guessing from `connectorType`. | **`null`** when unsupported or the stored instance is not loaded. |
 | `supportsSubTargets` | boolean | Whether this live instance exposes addressable views through the sub-target endpoint. | Always present; `false` for unloaded and ordinary single-view connectors. |
+| `supportsBrowsableContent` | boolean | Whether this live instance exposes the generic browse/search endpoints. | Always present; `false` for unloaded and opted-out connectors. |
 
 Sensitive values are never returned, even to `connectors.manage`. An edit form
 uses `sensitiveFieldsSet` to show that a value exists without receiving it.
@@ -2485,6 +2487,44 @@ looking at a service holding nothing or at a typo.
 | 404 | No instance with that id. |
 | 502 | `ConnectorError::Unreachable` or `AuthFailed` — the listing could not be carried out. |
 | 500 | `ConnectorError::Internal`. |
+
+## Generic browsable content
+
+Some connectors expose a hierarchy whose presentation is naturally a reusable
+list or thumbnail grid but which is not necessarily playable media. This is a
+smaller contract than `MediaSourceCapable`: it promises browse/search entries
+and an optional ordinary connector action, but no stream resolution, queue, or
+playback semantics.
+
+```json
+{
+  "id": "collection-a/item-alpha",
+  "label": "Alpha fixture item",
+  "kind": "leaf",
+  "thumbnail": "data:image/svg+xml,...",
+  "metadata": { "duration": "3:12" }
+}
+```
+
+`kind` is `container` or `leaf`. A container's `id` is passed back as `path` to
+open that level. `thumbnail` is null or follows the Image data-point convention:
+a complete HTTP(S) URL or a `data:` URI suitable for `<img src>`. `metadata` is
+connector-specific supplementary display data; clients tolerate unknown keys.
+
+### `GET /connector-instances/{id}/browse`
+
+Requires `connectors.view`. Optional query parameters are `path` and
+`targetId`; an absent/blank path is the root. Returns one level of
+`BrowsableItem` values.
+
+### `GET /connector-instances/{id}/search`
+
+Requires `connectors.view`. `q` is required and must be non-empty; optional
+`targetId` scopes the search. Returns matching `BrowsableItem` values.
+
+Both endpoints return 400 when the live connector does not advertise
+`supportsBrowsableContent`, 404 for a missing instance, 502 for connector
+reachability/authentication errors, and 500 for an internal connector error.
 
 ## Discovery & Setup Guides
 
@@ -3326,6 +3366,9 @@ Each binding is validated against the namespace its own tag names — see
   connector's currently declared resource kinds *for this placement's
   `targetId`* — `resourceKinds` is read per target precisely because a kind can
   be absent at one scope and present at another.
+- a `browsableList` binding requires the connector to advertise generic
+  browsable content. If it names an `actionId`, that action must exist for the
+  placement's target.
 
 A 400 lists every invalid id, and says which kind each one is, so the three are
 never confused: `widget bindings reference unknown data points: nope; unknown
@@ -4610,6 +4653,19 @@ It is display-adjacent rather than a `display` binding because the rows come
 from `list_resource_items` and not from `status.details`; `resourceKind` is a
 third identifier space, and mixing it into `dataPointId` would make the
 binding unvalidatable for the same reason the flat pre-0014 shape was.
+
+`{ "browsableList": … }` — the connector's generic hierarchical content:
+
+| Field | JSON type | Meaning | Nullability |
+| --- | --- | --- | --- |
+| `actionId` | string | Optional connector action invoked for a leaf as `{ "itemId": item.id }`. Containers always navigate. | `null` means browse-only leaves. |
+
+This binding has no widget type or config: its shared list/grid renderer fetches
+[`browse`](#get-connector-instancesidbrowse) or
+[`search`](#get-connector-instancesidsearch) as the user navigates. It remains
+distinct from both resource tables and media-source capability: hierarchy and
+thumbnail rendering are generic UI concerns, while playable media resolution
+is a richer contract.
 
 **A display `widgetType` is not always a string.** Unit variants serialize as a
 bare string; the one variant carrying data serializes as a single-key object:

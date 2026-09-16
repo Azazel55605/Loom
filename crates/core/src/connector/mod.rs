@@ -146,6 +146,39 @@ pub trait Connector: Send + Sync {
         Ok(Vec::new())
     }
 
+    /// Whether this connector exposes generic hierarchical content.
+    ///
+    /// This is intentionally smaller than [`MediaSourceCapable`]. Browsable
+    /// content gives a client labels, optional thumbnails, hierarchy, search,
+    /// and an optional ordinary connector action. It does not promise playable
+    /// media, queues, playback metadata, or resolution into a stream.
+    fn supports_browsable_content(&self) -> bool {
+        false
+    }
+
+    /// Lists one level of the connector's generic content hierarchy.
+    ///
+    /// `path: None` is the root. A container item's id is passed back as
+    /// `path` to open it. The default keeps existing connectors opted out
+    /// without boilerplate; callers should check
+    /// [`Connector::supports_browsable_content`] before invoking it.
+    async fn browse_content(
+        &self,
+        _target_id: Option<&str>,
+        _path: Option<&str>,
+    ) -> Result<Vec<BrowsableItem>, ConnectorError> {
+        Ok(Vec::new())
+    }
+
+    /// Searches the connector's generic browsable content.
+    async fn search_content(
+        &self,
+        _target_id: Option<&str>,
+        _query: &str,
+    ) -> Result<Vec<BrowsableItem>, ConnectorError> {
+        Ok(Vec::new())
+    }
+
     /// The kinds of resource this connector can list as a browsable table.
     ///
     /// Descriptors only — the rows themselves come from
@@ -1210,6 +1243,62 @@ pub struct ResourceItem {
     pub fields: HashMap<String, Value>,
 }
 
+/// Whether a generic browsable item opens another level or is selectable.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum BrowsableItemKind {
+    /// Opens another level by passing this item's id back as the browse path.
+    Container,
+    /// A terminal item that can optionally be passed to a bound action.
+    Leaf,
+}
+
+/// One entry in a connector's generic hierarchical browser.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BrowsableItem {
+    /// Stable id within this connector, and the next path for a container.
+    pub id: String,
+    /// Human-facing item label.
+    pub label: String,
+    /// Whether this item opens another level or is terminal.
+    pub kind: BrowsableItemKind,
+    /// Optional image source using the exact [`DataPointValueType::Image`]
+    /// convention: a fully-qualified HTTP(S) URL or a `data:` URI.
+    #[serde(default)]
+    pub thumbnail: Option<String>,
+    /// Connector-specific scalar display metadata.
+    #[serde(default)]
+    pub metadata: HashMap<String, Value>,
+}
+
+impl BrowsableItem {
+    /// An item with no thumbnail or metadata yet.
+    pub fn new(id: impl Into<String>, label: impl Into<String>, kind: BrowsableItemKind) -> Self {
+        Self {
+            id: id.into(),
+            label: label.into(),
+            kind,
+            thumbnail: None,
+            metadata: HashMap::new(),
+        }
+    }
+
+    /// Attaches an image source using the shared image-value convention.
+    #[must_use]
+    pub fn with_thumbnail(mut self, thumbnail: impl Into<String>) -> Self {
+        self.thumbnail = Some(thumbnail.into());
+        self
+    }
+
+    /// Attaches one connector-specific metadata value.
+    #[must_use]
+    pub fn with_metadata(mut self, key: impl Into<String>, value: impl Into<Value>) -> Self {
+        self.metadata.insert(key.into(), value.into());
+        self
+    }
+}
+
 impl ResourceItem {
     /// A row with an id and no fields yet.
     pub fn new(id: impl Into<String>) -> Self {
@@ -1493,7 +1582,8 @@ pub enum ActionWidgetType {
 /// `docs/adr/0014-widget-binding-model.md`.
 ///
 /// Externally tagged, so each value is a single-key object (`{"display": …}`,
-/// `{"action": …}`, or `{"resourceKindDisplay": …}`) — the same shape as
+/// `{"action": …}`, `{"resourceKindDisplay": …}`, or
+/// `{"browsableList": …}`) — the same shape as
 /// [`ConnectorError`] and [`DisplayWidgetType::MetricChart`].
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", rename_all_fields = "camelCase")]
@@ -1553,6 +1643,14 @@ pub enum WidgetBinding {
         /// [`Connector::resource_kinds`] for the placement's target.
         resource_kind: String,
     },
+    /// A generic hierarchical list/grid supplied by
+    /// [`Connector::browse_content`] and [`Connector::search_content`].
+    BrowsableList {
+        /// Optional action invoked for leaf items with `{ "itemId": id }`.
+        /// Containers always navigate regardless of this setting.
+        #[serde(default)]
+        action_id: Option<String>,
+    },
 }
 
 impl WidgetBinding {
@@ -1581,18 +1679,22 @@ impl WidgetBinding {
         }
     }
 
+    /// A generic hierarchical browser, optionally making leaves actionable.
+    pub fn browsable_list(action_id: Option<String>) -> Self {
+        Self::BrowsableList { action_id }
+    }
+
     /// Attaches widget-specific configuration, for chaining onto
     /// [`WidgetBinding::display`] or [`WidgetBinding::action`].
     ///
-    /// A no-op on [`WidgetBinding::ResourceKindDisplay`], which has no config
-    /// to attach — see that variant's documentation.
+    /// A no-op on binding variants that have no config to attach.
     #[must_use]
     pub fn with_config(mut self, config: Value) -> Self {
         match &mut self {
             Self::Display { config: slot, .. } | Self::Action { config: slot, .. } => {
                 *slot = config;
             }
-            Self::ResourceKindDisplay { .. } => {}
+            Self::ResourceKindDisplay { .. } | Self::BrowsableList { .. } => {}
         }
         self
     }
@@ -1956,6 +2058,12 @@ mod tests {
                         kind_ids.contains(&resource_kind.as_str()),
                         "layout binds unknown resource kind {resource_kind}"
                     ),
+                    WidgetBinding::BrowsableList { action_id } => {
+                        assert!(connector.supports_browsable_content());
+                        if let Some(action_id) = action_id {
+                            assert!(action_ids.contains(&action_id.as_str()));
+                        }
+                    }
                 }
             }
         }
@@ -2078,6 +2186,23 @@ mod tests {
         assert_eq!(
             serde_json::from_value::<ResourceItem>(serde_json::to_value(&item).unwrap()).unwrap(),
             item
+        );
+    }
+
+    #[test]
+    fn browsable_items_use_the_image_and_metadata_wire_contract() {
+        let item = BrowsableItem::new("album/track", "Fixture track", BrowsableItemKind::Leaf)
+            .with_thumbnail("data:image/svg+xml,fixture")
+            .with_metadata("duration", "3:12");
+        assert_eq!(
+            serde_json::to_value(item).unwrap(),
+            json!({
+                "id": "album/track",
+                "label": "Fixture track",
+                "kind": "leaf",
+                "thumbnail": "data:image/svg+xml,fixture",
+                "metadata": { "duration": "3:12" }
+            })
         );
     }
 
@@ -2441,6 +2566,13 @@ mod tests {
                 }
             })
         );
+        assert_eq!(
+            serde_json::to_value(WidgetBinding::browsable_list(Some(
+                "select-item".to_owned()
+            )))
+            .unwrap(),
+            json!({ "browsableList": { "actionId": "select-item" } })
+        );
     }
 
     #[test]
@@ -2449,6 +2581,7 @@ mod tests {
             WidgetBinding::display("load", DisplayWidgetType::Gauge)
                 .with_config(json!({ "min": 0, "max": 100 })),
             WidgetBinding::action("restart", ActionWidgetType::Button),
+            WidgetBinding::browsable_list(None),
         ]);
         let encoded = serde_json::to_string(&layout).unwrap();
         assert_eq!(

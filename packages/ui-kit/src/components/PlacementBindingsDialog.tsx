@@ -207,6 +207,7 @@ export function PlacementBindingsDialog({
                   dataPoints={detail.data.dataPoints}
                   actions={detail.data.actions}
                   resourceKinds={resourceKinds.data ?? []}
+                  supportsBrowsableContent={detail.data.supportsBrowsableContent}
                   targetId={placement.targetId}
                   value={bindings}
                   onChange={setBindings}

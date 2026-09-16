@@ -246,7 +246,12 @@ export function ConnectorDetailModal({
   }, [open]);
 
   const boundActions = new Set(
-    placement.widgetBindings.flatMap((binding) => "action" in binding ? [binding.action.actionId] : []),
+    placement.widgetBindings.flatMap((binding) =>
+      "action" in binding
+        ? [binding.action.actionId]
+        : "browsableList" in binding && binding.browsableList.actionId
+          ? [binding.browsableList.actionId]
+          : []),
   );
 
   return (
@@ -317,7 +322,7 @@ export function ConnectorDetailModal({
                       ? "min-w-0 sm:col-span-2 lg:col-span-3"
                       : "min-w-0"}
                   >
-                    {renderWidget({ binding, statusDetails, dataPoints: targetDataPoints, actions: targetActions, onExecute: runAction, disabled: !canControl, unavailableReason: availability.unavailableReason, size: "expanded", loading: reading.status === null, className: "min-h-[5rem]" })}
+                    {renderWidget({ binding, statusDetails, dataPoints: targetDataPoints, actions: targetActions, resourceKinds: resourceKinds.data, instanceId: instance.id, targetId: placement.targetId, onExecute: runAction, disabled: !canControl, unavailableReason: availability.unavailableReason, size: "expanded", loading: reading.status === null, className: "min-h-[5rem]" })}
                   </div>
                 ))}
               </div>
@@ -467,8 +472,8 @@ function formatChecked(iso: string): string {
  * widgets. Giving them their own row prevents a short StatTile beside one from
  * leaving what looks like a large missing-content hole in the expanded grid. */
 function expandedWidgetSpansRow(binding: DashboardPlacement["widgetBindings"][number]): boolean {
-  return "display" in binding &&
+  return "browsableList" in binding || "resourceKindDisplay" in binding || ("display" in binding &&
     (typeof binding.display.widgetType !== "string" ||
       binding.display.widgetType === "image" ||
-      binding.display.widgetType === "logStream");
+      binding.display.widgetType === "logStream"));
 }

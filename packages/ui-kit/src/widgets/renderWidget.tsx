@@ -10,6 +10,7 @@ import type {
 import { ResourceKindBrowser } from "@loom/ui-kit/components/ResourceKindBrowser";
 import { GaugeSkeleton, GaugeWidget } from "@loom/ui-kit/widgets/Gauge";
 import { ImageDisplaySkeleton, ImageDisplayWidget } from "@loom/ui-kit/widgets/ImageDisplay";
+import { BrowsableListGrid } from "@loom/ui-kit/widgets/BrowsableListGrid";
 import { LogPreviewSkeleton, LogPreviewWidget } from "@loom/ui-kit/widgets/LogPreview";
 import { LogStreamSkeleton, LogStreamWidget } from "@loom/ui-kit/widgets/LogStream";
 import { MetricChartSkeleton, MetricChartWidget } from "@loom/ui-kit/widgets/MetricChart";
@@ -99,8 +100,8 @@ export type RenderWidgetOptions = {
  * neither `DashboardView` nor any widget has to know both. It narrows on the
  * binding's tag first — `display` resolves against `dataPoints` and reads
  * `statusDetails`, `action` resolves against `actions` and gets `onExecute`,
- * `resourceKindDisplay` resolves against `resourceKinds` and becomes a
- * `ResourceKindBrowser` — which is the split the corrected `WidgetBinding` enum
+ * `resourceKindDisplay` resolves against `resourceKinds`, while
+ * `browsableList` loads the connector's generic hierarchy — which is the split the corrected `WidgetBinding` enum
  * exists to make checkable (see `docs/adr/0014-widget-binding-model.md` and
  * `docs/adr/0035-placement-actions-and-hidden-dashboards.md`).
  *
@@ -130,6 +131,22 @@ export function renderWidget({
   onExpand,
 }: RenderWidgetOptions) {
   const revealedClassName = cn("motion-content-reveal", className);
+
+  if ("browsableList" in binding) {
+    if (instanceId === undefined) {
+      return <Skeleton className={className ?? "h-32 w-full"} />;
+    }
+    return (
+      <BrowsableListGrid
+        instanceId={instanceId}
+        targetId={targetId}
+        actionId={binding.browsableList.actionId}
+        onExecute={onExecute}
+        disabled={disabled === true || unavailableReason != null}
+        className={revealedClassName}
+      />
+    );
+  }
 
   if ("resourceKindDisplay" in binding) {
     const { resourceKind } = binding.resourceKindDisplay;

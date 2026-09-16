@@ -232,6 +232,8 @@ pub struct ConnectorInstanceDetail {
     default_layout: WidgetLayout,
     /// Whether this instance exposes addressable views below itself.
     supports_sub_targets: bool,
+    /// Whether this instance exposes generic hierarchical content.
+    supports_browsable_content: bool,
     /// Type id this live instance can discover, or null when unsupported.
     discoverable_type: Option<String>,
     /// Whether this connector can be asked if what it manages is out of date.
@@ -750,6 +752,86 @@ pub async fn list_resources(
     }
 
     match connector.list_resource_items(&kind, target_id).await {
+        Ok(items) => Json(items).into_response(),
+        Err(error) => ErrorBody::connector(status_for(&error), error),
+    }
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BrowseContentQuery {
+    #[serde(default)]
+    path: Option<String>,
+    #[serde(default)]
+    target_id: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SearchContentQuery {
+    q: String,
+    #[serde(default)]
+    target_id: Option<String>,
+}
+
+fn non_blank(value: Option<&str>) -> Option<&str> {
+    value.map(str::trim).filter(|value| !value.is_empty())
+}
+
+/// `GET /connector-instances/{id}/browse` — one level of generic content.
+pub async fn browse_content(
+    _caller: RequirePermission<ConnectorsView>,
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Query(query): Query<BrowseContentQuery>,
+) -> Response {
+    let connector = match live_connector(&state, &id, "browsable content").await {
+        Ok(connector) => connector,
+        Err(response) => return *response,
+    };
+    if !connector.supports_browsable_content() {
+        return ErrorBody::message(
+            StatusCode::BAD_REQUEST,
+            "this connector instance does not support browsable content",
+        );
+    }
+    match connector
+        .browse_content(
+            non_blank(query.target_id.as_deref()),
+            non_blank(query.path.as_deref()),
+        )
+        .await
+    {
+        Ok(items) => Json(items).into_response(),
+        Err(error) => ErrorBody::connector(status_for(&error), error),
+    }
+}
+
+/// `GET /connector-instances/{id}/search` — searches generic content.
+pub async fn search_content(
+    _caller: RequirePermission<ConnectorsView>,
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Query(query): Query<SearchContentQuery>,
+) -> Response {
+    let connector = match live_connector(&state, &id, "browsable content search").await {
+        Ok(connector) => connector,
+        Err(response) => return *response,
+    };
+    if !connector.supports_browsable_content() {
+        return ErrorBody::message(
+            StatusCode::BAD_REQUEST,
+            "this connector instance does not support browsable content",
+        );
+    }
+    let query_text = query.q.trim();
+    if query_text.is_empty() {
+        return ErrorBody::message(StatusCode::BAD_REQUEST, "search query must not be empty");
+    }
+    match connector
+        .search_content(non_blank(query.target_id.as_deref()), query_text)
+        .await
+    {
         Ok(items) => Json(items).into_response(),
         Err(error) => ErrorBody::connector(status_for(&error), error),
     }
@@ -2062,6 +2144,7 @@ async fn detail_for(
         data_points,
         default_layout,
         supports_sub_targets,
+        supports_browsable_content,
         discoverable_type,
         supports_update_checking,
     ) = match live {
@@ -2070,6 +2153,7 @@ async fn detail_for(
             connector.data_points(),
             connector.default_layout(),
             connector.supports_sub_targets(),
+            connector.supports_browsable_content(),
             connector.discoverable_type(),
             connector.supports_update_checking(),
         ),
@@ -2077,6 +2161,7 @@ async fn detail_for(
             Vec::new(),
             Vec::new(),
             WidgetLayout::default(),
+            false,
             false,
             None,
             false,
@@ -2090,6 +2175,7 @@ async fn detail_for(
         data_points,
         default_layout,
         supports_sub_targets,
+        supports_browsable_content,
         discoverable_type,
         supports_update_checking,
         update_status,

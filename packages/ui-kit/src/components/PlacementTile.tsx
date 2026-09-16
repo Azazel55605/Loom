@@ -387,8 +387,10 @@ function ConnectorPlacementTile({
   // in the auto-fit widget grid would put a scrollable table inside a
   // fixed-width column inside a card, which is the awkward embedding this
   // binding exists to avoid.
-  const isResourceKindTile =
-    placement.widgetBindings.length === 1 && bindsResourceKind;
+  const isBrowserTile =
+    placement.widgetBindings.length === 1 &&
+    placement.widgetBindings.some((binding) =>
+      "resourceKindDisplay" in binding || "browsableList" in binding);
 
   if (detail.isPending) {
     return <PlacementTileSkeleton placement={placement} />;
@@ -634,7 +636,7 @@ function ConnectorPlacementTile({
         ) : (
           <div
             className={cn(
-              isResourceKindTile
+              isBrowserTile
                 ? "flex h-full min-h-0 flex-col"
                 : "grid gap-4 [grid-template-columns:repeat(auto-fit,minmax(9rem,1fr))]",
             )}
@@ -668,9 +670,13 @@ function ConnectorPlacementTile({
                     // A resource kind takes the whole footprint: it is the
                     // tile, not a widget sitting inside one.
                     "resourceKindDisplay" in binding
-                      ? isResourceKindTile
+                      ? isBrowserTile
                         ? "min-h-0 flex-1"
                         : "col-span-full min-h-[12rem]"
+                      : "browsableList" in binding
+                        ? isBrowserTile
+                          ? "min-h-0 flex-1"
+                          : "col-span-full min-h-[12rem]"
                       : "display" in binding && typeof binding.display.widgetType !== "string"
                         ? "col-span-full min-h-[8rem]"
                         : "display" in binding && binding.display.widgetType === "image"

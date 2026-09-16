@@ -80,6 +80,7 @@ export function PlacementBindingEditor({
   dataPoints,
   actions,
   resourceKinds,
+  supportsBrowsableContent,
   targetId,
   value,
   onChange,
@@ -90,6 +91,7 @@ export function PlacementBindingEditor({
   dataPoints: DataPointDescriptor[];
   actions: ConnectorAction[];
   resourceKinds: ResourceKindDescriptor[];
+  supportsBrowsableContent: boolean;
   /** The placement view whose descriptors may be bound. */
   targetId: string | null;
   value: WidgetBinding[];
@@ -157,13 +159,16 @@ export function PlacementBindingEditor({
         ...value,
         { resourceKindDisplay: { resourceKind: resourceKind.kind } },
       ]);
+      return;
     }
+    if (supportsBrowsableContent) onChange([...value, { browsableList: { actionId: null } }]);
   }
 
   const canAdd =
     availableDataPoints.length > 0 ||
     availableActions.length > 0 ||
-    resourceKinds.length > 0;
+    resourceKinds.length > 0 ||
+    supportsBrowsableContent;
 
   return (
     <div className={cn("flex flex-col gap-3", className)}>
@@ -183,6 +188,7 @@ export function PlacementBindingEditor({
                 dataPoints={availableDataPoints}
                 actions={availableActions}
                 resourceKinds={resourceKinds}
+                supportsBrowsableContent={supportsBrowsableContent}
                 disabled={disabled}
                 idPrefix={`binding-${index}`}
                 onChange={(next) => replace(index, next)}
@@ -222,6 +228,7 @@ function BindingRow({
   dataPoints,
   actions,
   resourceKinds,
+  supportsBrowsableContent,
   disabled,
   idPrefix,
   onChange,
@@ -233,6 +240,7 @@ function BindingRow({
   dataPoints: DataPointDescriptor[];
   actions: ConnectorAction[];
   resourceKinds: ResourceKindDescriptor[];
+  supportsBrowsableContent: boolean;
   disabled?: boolean;
   idPrefix: string;
   onChange: (next: WidgetBinding) => void;
@@ -243,9 +251,11 @@ function BindingRow({
       ? "display"
       : "action" in binding
         ? "action"
-        : "resource";
+        : "resourceKindDisplay" in binding
+          ? "resource"
+          : "browsable";
 
-  function switchKind(next: "display" | "action" | "resource") {
+  function switchKind(next: "display" | "action" | "resource" | "browsable") {
     if (next === kind) return;
     if (next === "display") {
       const point = dataPoints[0];
@@ -271,10 +281,14 @@ function BindingRow({
       });
       return;
     }
-    const resourceKind = resourceKinds[0];
-    if (resourceKind !== undefined) {
-      onChange({ resourceKindDisplay: { resourceKind: resourceKind.kind } });
+    if (next === "resource") {
+      const resourceKind = resourceKinds[0];
+      if (resourceKind !== undefined) {
+        onChange({ resourceKindDisplay: { resourceKind: resourceKind.kind } });
+      }
+      return;
     }
+    if (supportsBrowsableContent) onChange({ browsableList: { actionId: null } });
   }
 
   return (
@@ -288,13 +302,16 @@ function BindingRow({
             { value: "display" as const, label: "Display" },
             { value: "action" as const, label: "Action" },
             { value: "resource" as const, label: "Resource table" },
+            ...(supportsBrowsableContent
+              ? [{ value: "browsable" as const, label: "Browse" }]
+              : []),
           ]}
           // Switching kinds needs somewhere to switch to. A connector with no
           // actions cannot host an action binding, so the control is disabled
           // rather than offering a choice that would silently do nothing.
           className={
             disabled ||
-            (dataPoints.length === 0 && actions.length === 0 && resourceKinds.length === 0)
+            (dataPoints.length === 0 && actions.length === 0 && resourceKinds.length === 0 && !supportsBrowsableContent)
               ? "pointer-events-none opacity-50"
               : undefined
           }
@@ -333,7 +350,7 @@ function BindingRow({
           idPrefix={idPrefix}
           onChange={(action) => onChange({ action })}
         />
-      ) : (
+      ) : "resourceKindDisplay" in binding ? (
         <Field id={`${idPrefix}-resource-kind`} label="Resource kind">
           <Select
             value={binding.resourceKindDisplay.resourceKind}
@@ -352,6 +369,26 @@ function BindingRow({
                 <SelectItem key={descriptor.kind} value={descriptor.kind}>
                   {descriptor.label}
                 </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+        </Field>
+      ) : (
+        <Field id={`${idPrefix}-browse-action`} label="Leaf action (optional)">
+          <Select
+            value={binding.browsableList.actionId ?? "none"}
+            disabled={disabled}
+            onValueChange={(actionId) => onChange({
+              browsableList: { actionId: actionId === "none" ? null : actionId },
+            })}
+          >
+            <SelectTrigger id={`${idPrefix}-browse-action`}>
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value="none">Browse only</SelectItem>
+              {actions.map((action) => (
+                <SelectItem key={action.id} value={action.id}>{action.label}</SelectItem>
               ))}
             </SelectContent>
           </Select>
