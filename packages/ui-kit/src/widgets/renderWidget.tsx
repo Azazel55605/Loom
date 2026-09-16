@@ -70,6 +70,7 @@ export type RenderWidgetOptions = {
   selectedTargetIds?: string[];
   canConfigurePlacement?: boolean;
   supportsMediaSource?: boolean;
+  supportsLyricsLookup?: boolean;
   supportsMediaTarget?: boolean;
   onExecute: WidgetExecute;
   /** Disables every control. Set for a viewer without `connectors.control`.
@@ -136,6 +137,7 @@ export function renderWidget({
   selectedTargetIds = [],
   canConfigurePlacement = false,
   supportsMediaSource = false,
+  supportsLyricsLookup = false,
   supportsMediaTarget = false,
   onExecute,
   disabled,
@@ -159,6 +161,7 @@ export function renderWidget({
         canConfigurePlacement={canConfigurePlacement}
         showBrowser={binding.mediaPlayer.config.showBrowser === true}
         supportsMediaSource={supportsMediaSource}
+        supportsLyricsLookup={supportsLyricsLookup}
         supportsMediaTarget={supportsMediaTarget}
         disabled={disabled}
         unavailableReason={unavailableReason}

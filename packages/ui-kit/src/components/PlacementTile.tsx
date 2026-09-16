@@ -663,6 +663,7 @@ function ConnectorPlacementTile({
                   selectedTargetIds: placement.selectedTargetIds ?? [],
                   canConfigurePlacement: canEditPlacement,
                   supportsMediaSource: detail.data.supportsMediaSource,
+                  supportsLyricsLookup: detail.data.supportsLyricsLookup,
                   supportsMediaTarget: detail.data.supportsMediaTarget,
                   onExecute: runAction,
                   // Controls are dead while the layout is being rearranged: a

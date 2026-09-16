@@ -60,8 +60,30 @@ pub struct MediaItem {
     /// This crate neither fetches nor embeds the referenced image. The
     /// eventual display surface resolves it.
     pub artwork_ref: Option<String>,
+    /// Plain, non-timestamped lyrics when the source provides them.
+    pub lyrics: Option<String>,
     /// Finite duration, or `None` for live audio and live video.
     pub duration: Option<Duration>,
+}
+
+/// Technical properties of the stream currently reaching a playback target.
+///
+/// This deliberately belongs to [`PlaybackState`] rather than [`MediaItem`]:
+/// one catalog item may resolve to different codecs or qualities on different
+/// plays, while lyrics remain a stable property of the item itself.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AudioInfo {
+    /// Codec or container name reported by the playback service.
+    pub codec: Option<String>,
+    /// Stream sample rate in hertz.
+    pub sample_rate_hz: Option<u32>,
+    /// Bits per audio sample.
+    pub bit_depth: Option<u8>,
+    /// Number of audio channels.
+    pub channels: Option<u8>,
+    /// Encoded stream bitrate in kilobits per second.
+    pub bitrate_kbps: Option<u32>,
 }
 
 /// A browsable item resolved into a stream a target can actually play.
@@ -116,6 +138,9 @@ pub struct PlaybackState {
     pub volume_percent: u8,
     /// Item currently loaded by the target, when one exists.
     pub current_item: Option<MediaItem>,
+    /// Technical properties of the active stream, when stream resolution has
+    /// progressed far enough for the playback service to report them.
+    pub audio_info: Option<AudioInfo>,
     /// Whether queue order is randomized.
     pub shuffle: bool,
     /// Current repeat behavior.
@@ -166,6 +191,11 @@ pub enum MediaError {
 /// implement only the target side.
 #[async_trait]
 pub trait MediaSourceCapable: Send + Sync {
+    /// Whether this source supports an explicit, on-demand lyrics lookup.
+    fn supports_lyrics_lookup(&self) -> bool {
+        false
+    }
+
     /// Lists media at the source root or within an optional source-defined path.
     async fn browse(&self, path: Option<&str>) -> Result<Vec<MediaItem>, MediaError>;
 
@@ -177,6 +207,16 @@ pub trait MediaSourceCapable: Send + Sync {
     /// This may perform real work, including arranging temporary HTTP serving,
     /// which is why resolution is async and fallible rather than a field read.
     async fn resolve(&self, item_id: &str) -> Result<ResolvedPlayable, MediaError>;
+
+    /// Performs an explicit lyrics lookup for one item.
+    ///
+    /// This is intentionally separate from ordinary playback polling so a
+    /// provider lookup only happens after a person asks for it.
+    async fn fetch_lyrics(&self, _item_id: &str) -> Result<Option<String>, MediaError> {
+        Err(MediaError::Unsupported(
+            "on-demand lyrics lookup is not supported".to_owned(),
+        ))
+    }
 }
 
 /// Optional playback-target media capability implemented by a connector.

@@ -1366,6 +1366,7 @@ mod tests {
                 position: Some(chrono::Duration::zero()),
                 volume_percent: 50,
                 current_item: None,
+                audio_info: None,
                 shuffle: false,
                 repeat: RepeatMode::Off,
             })
@@ -2057,6 +2058,7 @@ mod tests {
         .await;
         assert_eq!(status, StatusCode::OK, "{detail:#}");
         assert_eq!(detail["supportsMediaSource"], true);
+        assert_eq!(detail["supportsLyricsLookup"], false);
         assert_eq!(detail["supportsMediaTarget"], true);
 
         let (status, body) = send(
@@ -2078,6 +2080,27 @@ mod tests {
         let playing: PlaybackState = serde_json::from_value(body).unwrap();
         assert_eq!(playing.status, PlaybackStatus::Playing);
         assert!(playing.position.unwrap() >= chrono::Duration::milliseconds(15));
+        assert_eq!(
+            playing.current_item.as_ref().unwrap().lyrics.as_deref(),
+            Some("Synthetic verse\nBuilt for the debug fixture.")
+        );
+        assert_eq!(
+            playing.audio_info.as_ref().unwrap().sample_rate_hz,
+            Some(48_000)
+        );
+
+        let (status, body) = send(
+            &app.router,
+            post_media(
+                "lyrics",
+                serde_json::json!({ "itemId": "collection-a/item-alpha" }),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{body:#}");
+        assert!(body["error"]
+            .as_str()
+            .is_some_and(|message| message.contains("does not support")));
 
         let (status, queue) = send(
             &app.router,

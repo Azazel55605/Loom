@@ -3,6 +3,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   ChevronDown,
   ChevronsUpDown,
+  Info,
   ListMusic,
   Music2,
   Pause,
@@ -70,6 +71,7 @@ type PlayerProps = {
   canConfigurePlacement?: boolean;
   showBrowser: boolean;
   supportsMediaSource: boolean;
+  supportsLyricsLookup: boolean;
   supportsMediaTarget: boolean;
   disabled?: boolean;
   unavailableReason?: string | null;
@@ -87,6 +89,7 @@ export function MediaPlayerWidget({
   canConfigurePlacement = false,
   showBrowser,
   supportsMediaSource,
+  supportsLyricsLookup,
   supportsMediaTarget,
   disabled = false,
   unavailableReason,
@@ -251,6 +254,21 @@ export function MediaPlayerWidget({
     onSuccess: refresh,
     onError: reportError,
   });
+  const lyricsLookup = useMutation({
+    mutationFn: (itemId: string) => api.fetchLyrics(instanceId, itemId),
+    onSuccess: ({ lyrics }) => {
+      queryClient.setQueryData<PlaybackState>(playbackKey, (current) =>
+        current?.currentItem
+          ? {
+              ...current,
+              currentItem: { ...current.currentItem, lyrics },
+            }
+          : current,
+      );
+      if (lyrics === null) toast.info("No lyrics were found for this track.");
+    },
+    onError: reportError,
+  });
 
   const picker = hostPlacement ? (
     <DevicePicker
@@ -322,6 +340,13 @@ export function MediaPlayerWidget({
         volumePending={volume.isPending}
         onCommand={(command) => transport.mutate(command)}
         onVolume={(percent) => volume.mutate(percent)}
+      />
+
+      <LyricsView
+        item={state.currentItem}
+        supportsLookup={supportsLyricsLookup}
+        lookupPending={lyricsLookup.isPending}
+        onLookup={(itemId) => lyricsLookup.mutate(itemId)}
       />
 
       {showBrowser ? (
@@ -511,10 +536,13 @@ export function NowPlayingDisplay({
         showCaption={false}
       />
       <div className="flex min-w-0 flex-col justify-center gap-2">
-        <div>
-          <p className="break-words text-lg font-semibold">{item?.title ?? "Nothing playing"}</p>
-          {item?.artist ? <p className="break-words text-sm text-muted-foreground">{item.artist}</p> : null}
-          {item?.album ? <p className="break-words text-xs text-muted-foreground">{item.album}</p> : null}
+        <div className="flex items-start justify-between gap-2">
+          <div className="min-w-0">
+            <p className="break-words text-lg font-semibold">{item?.title ?? "Nothing playing"}</p>
+            {item?.artist ? <p className="break-words text-sm text-muted-foreground">{item.artist}</p> : null}
+            {item?.album ? <p className="break-words text-xs text-muted-foreground">{item.album}</p> : null}
+          </div>
+          {state.audioInfo ? <AudioInfoPopover audioInfo={state.audioInfo} /> : null}
         </div>
         {item && duration === null ? <Badge className="w-fit">LIVE</Badge> : null}
         {item && duration !== null ? (
@@ -547,6 +575,88 @@ export function NowPlayingDisplay({
         ) : null}
       </div>
     </div>
+  );
+}
+
+function LyricsView({
+  item,
+  supportsLookup,
+  lookupPending,
+  onLookup,
+}: {
+  item: MediaItem | null;
+  supportsLookup: boolean;
+  lookupPending: boolean;
+  onLookup: (itemId: string) => void;
+}) {
+  const [open, setOpen] = React.useState(false);
+  return (
+    <Collapsible open={open} onOpenChange={setOpen} className="border-t pt-3">
+      <CollapsibleTrigger asChild>
+        <Button type="button" variant="ghost" className="w-full justify-between">
+          <span>Lyrics</span>
+          <ChevronDown
+            className={cn("transition-transform", open && "rotate-180")}
+            aria-hidden="true"
+          />
+        </Button>
+      </CollapsibleTrigger>
+      <CollapsibleContent className="pt-2">
+        {item?.lyrics ? (
+          <pre className="max-h-72 overflow-y-auto whitespace-pre-wrap break-words rounded-md bg-muted/40 p-4 font-sans text-sm leading-relaxed">
+            {item.lyrics}
+          </pre>
+        ) : (
+          <div className="flex min-h-24 flex-col items-center justify-center gap-3 rounded-md border border-dashed p-4 text-center">
+            <p className="text-sm text-muted-foreground">No lyrics available</p>
+            {supportsLookup && item ? (
+              <Button
+                type="button"
+                variant="outline"
+                size="sm"
+                disabled={lookupPending}
+                onClick={() => onLookup(item.id)}
+              >
+                {lookupPending ? "Fetching…" : "Try to fetch"}
+              </Button>
+            ) : null}
+          </div>
+        )}
+      </CollapsibleContent>
+    </Collapsible>
+  );
+}
+
+function AudioInfoPopover({ audioInfo }: { audioInfo: PlaybackState["audioInfo"] }) {
+  if (audioInfo === null) return null;
+  const fields = [
+    ["Codec", audioInfo.codec],
+    ["Sample rate", audioInfo.sampleRateHz ? `${audioInfo.sampleRateHz.toLocaleString()} Hz` : null],
+    ["Bit depth", audioInfo.bitDepth ? `${audioInfo.bitDepth}-bit` : null],
+    ["Channels", audioInfo.channels?.toString() ?? null],
+    ["Bitrate", audioInfo.bitrateKbps ? `${audioInfo.bitrateKbps.toLocaleString()} kbps` : null],
+  ].filter((field): field is [string, string] => field[1] !== null);
+  if (fields.length === 0) return null;
+
+  return (
+    <Popover>
+      <PopoverTrigger asChild>
+        <Button type="button" size="icon" variant="ghost" aria-label="Show audio information">
+          <Info aria-hidden="true" />
+        </Button>
+      </PopoverTrigger>
+      <PopoverContent align="end" className="w-64">
+        <p className="mb-3 text-sm font-medium">Audio information</p>
+        <dl className="grid grid-cols-[auto_1fr] gap-x-4 gap-y-2 text-sm">
+          {fields.map(([label, value]) => (
+            <React.Fragment key={label}>
+              <dt className="text-muted-foreground">{label}</dt>
+              <dd className="min-w-0 break-words text-right font-medium">{value}</dd>
+            </React.Fragment>
+          ))}
+        </dl>
+      </PopoverContent>
+    </Popover>
   );
 }
 

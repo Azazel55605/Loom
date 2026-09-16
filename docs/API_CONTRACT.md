@@ -1747,6 +1747,7 @@ carries, plus what a dashboard placement UI needs.
   "supportsSubTargets": true,
   "supportsBrowsableContent": true,
   "supportsMediaSource": true,
+  "supportsLyricsLookup": false,
   "supportsMediaTarget": false
 }
 ```
@@ -1762,6 +1763,7 @@ carries, plus what a dashboard placement UI needs.
 | `supportsSubTargets` | boolean | Whether this live instance exposes addressable views through the sub-target endpoint. | Always present; `false` for unloaded and ordinary single-view connectors. |
 | `supportsBrowsableContent` | boolean | Whether this live instance exposes the generic browse/search endpoints. | Always present; `false` for unloaded and opted-out connectors. |
 | `supportsMediaSource` | boolean | Whether the connector exposes the host-level media library used by a Media Player browser. | Always present; `false` for unloaded and opted-out connectors. |
+| `supportsLyricsLookup` | boolean | Whether that media source supports the explicit on-demand lyrics endpoint. | Always present; `false` for unloaded and opted-out connectors. |
 | `supportsMediaTarget` | boolean | Whether the optional `targetId` query context exposes playback controls. | Always present; `false` without a matching media target. |
 
 Clients editing a target placement request
@@ -2577,8 +2579,11 @@ version, not a permanent restriction: Core's discovery methods are target-aware
 so a future connector may expose independently scoped libraries as well.
 
 `PlaybackState` contains `status` (`playing`, `paused`, or `stopped`),
-`position`, `volumePercent`, `currentItem`, `shuffle`, and `repeat` (`off`,
-`one`, or `all`). Chrono durations use their existing Serde wire form
+`position`, `volumePercent`, `currentItem`, `audioInfo`, `shuffle`, and `repeat`
+(`off`, `one`, or `all`). `MediaItem.lyrics` is stable track metadata;
+`PlaybackState.audioInfo` describes the active stream and may therefore differ
+between plays of the same item. Audio-info fields are independently nullable:
+`codec`, `sampleRateHz`, `bitDepth`, `channels`, and `bitrateKbps`. Chrono durations use their existing Serde wire form
 `[seconds, nanoseconds]`; a null position/duration means live or unavailable
 media.
 
@@ -2594,6 +2599,13 @@ Requires `connectors.view`; `targetId` is required. Returns `{ "items":
 MediaItem[], "currentIndex": number | null }` in playback order. An unsupported
 queue is a clear 400 rather than an empty queue, while an unknown target uses
 the same missing-media-target response as playback state.
+
+### `POST /connector-instances/{id}/media/lyrics`
+
+Requires `connectors.view` and accepts `{ "itemId": "library://track/track-1" }`.
+Returns `{ "lyrics": string | null }`. The endpoint exists for an explicit
+one-off provider lookup and is only offered in the UI when
+`supportsLyricsLookup` is true; ordinary playback polling never invokes it.
 
 ### `POST /connector-instances/{id}/media/play-item`
 

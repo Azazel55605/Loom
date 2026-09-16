@@ -82,8 +82,8 @@ use std::time::Instant;
 use async_trait::async_trait;
 use chrono::{DateTime, Duration, Utc};
 use loom_media::{
-    MediaError, MediaItem, MediaKind, MediaSourceCapable, MediaTargetCapable, PlaybackState,
-    PlaybackStatus, Queue, RepeatMode, ResolvedPlayable,
+    AudioInfo, MediaError, MediaItem, MediaKind, MediaSourceCapable, MediaTargetCapable,
+    PlaybackState, PlaybackStatus, Queue, RepeatMode, ResolvedPlayable,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
@@ -386,6 +386,13 @@ impl SimulatedMediaState {
             position: self.current_item.as_ref().map(|_| self.position),
             volume_percent: self.volume_percent,
             current_item: self.current_item.clone(),
+            audio_info: self.current_item.as_ref().map(|_| AudioInfo {
+                codec: Some("fixture-flac".to_owned()),
+                sample_rate_hz: Some(48_000),
+                bit_depth: Some(24),
+                channels: Some(2),
+                bitrate_kbps: Some(1_152),
+            }),
             shuffle: self.shuffle,
             repeat: self.repeat,
         }
@@ -794,6 +801,7 @@ fn fixture_media_items() -> Vec<MediaItem> {
             artist: Some("Debug fixture".to_owned()),
             album: Some("Synthetic library".to_owned()),
             artwork_ref: item.thumbnail,
+            lyrics: Some("Synthetic verse\nBuilt for the debug fixture.".to_owned()),
             duration: Some(Duration::seconds(
                 150 + i64::try_from(index).unwrap_or(0) * 30,
             )),
@@ -3265,6 +3273,18 @@ mod tests {
         assert_eq!(configured.volume_percent, 73);
         assert!(configured.shuffle);
         assert_eq!(configured.repeat, RepeatMode::One);
+        assert_eq!(
+            configured.current_item.as_ref().unwrap().lyrics.as_deref(),
+            Some("Synthetic verse\nBuilt for the debug fixture.")
+        );
+        assert_eq!(
+            configured.audio_info.as_ref().unwrap().codec.as_deref(),
+            Some("fixture-flac")
+        );
+        assert_eq!(
+            configured.audio_info.as_ref().unwrap().sample_rate_hz,
+            Some(48_000)
+        );
 
         let first_id = configured.current_item.unwrap().id;
         target.skip_next().await.unwrap();

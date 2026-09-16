@@ -239,6 +239,8 @@ pub struct ConnectorInstanceDetail {
     supports_browsable_content: bool,
     /// Whether the selected detail context exposes a playable media source.
     supports_media_source: bool,
+    /// Whether that source supports an explicit lyrics lookup.
+    supports_lyrics_lookup: bool,
     /// Whether the selected detail context exposes a playback target.
     supports_media_target: bool,
     /// Type id this live instance can discover, or null when unsupported.
@@ -919,6 +921,18 @@ pub struct MediaLeaveGroupRequest {
     target_id: String,
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MediaLyricsRequest {
+    item_id: String,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct MediaLyricsResponse {
+    lyrics: Option<String>,
+}
+
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct MediaGroupingResponse {
@@ -1147,6 +1161,39 @@ pub async fn media_queue(
     };
     match target.queue().await {
         Ok(queue) => Json(queue).into_response(),
+        Err(error) => media_error_response(error),
+    }
+}
+
+/// `POST /connector-instances/{id}/media/lyrics`
+pub async fn media_fetch_lyrics(
+    _caller: RequirePermission<ConnectorsView>,
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Json(request): Json<MediaLyricsRequest>,
+) -> Response {
+    let item_id = request.item_id.trim();
+    if item_id.is_empty() {
+        return ErrorBody::message(StatusCode::BAD_REQUEST, "itemId must be a non-empty string");
+    }
+    let connector = match live_connector(&state, &id, "media lyrics lookup").await {
+        Ok(connector) => connector,
+        Err(response) => return *response,
+    };
+    let Some(source) = connector.as_media_source(None) else {
+        return ErrorBody::message(
+            StatusCode::BAD_REQUEST,
+            "this connector instance does not provide a host-level media source",
+        );
+    };
+    if !source.supports_lyrics_lookup() {
+        return ErrorBody::message(
+            StatusCode::BAD_REQUEST,
+            "this connector's media source does not support on-demand lyrics lookup",
+        );
+    }
+    match source.fetch_lyrics(item_id).await {
+        Ok(lyrics) => Json(MediaLyricsResponse { lyrics }).into_response(),
         Err(error) => media_error_response(error),
     }
 }
@@ -2863,6 +2910,7 @@ async fn detail_for(
         supports_sub_targets,
         supports_browsable_content,
         supports_media_source,
+        supports_lyrics_lookup,
         supports_media_target,
         discoverable_type,
         supports_update_checking,
@@ -2881,13 +2929,15 @@ async fn detail_for(
                             .iter()
                             .any(|target| connector.as_media_target(Some(&target.id)).is_some())
                     }));
+            let source = connector.as_media_source(None);
             (
                 connector.actions().await,
                 connector.data_points(),
                 connector.default_layout_for(target_id),
                 connector.supports_sub_targets(),
                 connector.supports_browsable_content(),
-                connector.as_media_source(None).is_some(),
+                source.is_some(),
+                source.is_some_and(loom_core::media::MediaSourceCapable::supports_lyrics_lookup),
                 supports_media_target,
                 connector.discoverable_type(),
                 connector.supports_update_checking(),
@@ -2897,6 +2947,7 @@ async fn detail_for(
             Vec::new(),
             Vec::new(),
             WidgetLayout::default(),
+            false,
             false,
             false,
             false,
@@ -2915,6 +2966,7 @@ async fn detail_for(
         supports_sub_targets,
         supports_browsable_content,
         supports_media_source,
+        supports_lyrics_lookup,
         supports_media_target,
         discoverable_type,
         supports_update_checking,

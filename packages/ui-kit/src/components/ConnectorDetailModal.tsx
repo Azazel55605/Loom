@@ -328,7 +328,7 @@ export function ConnectorDetailModal({
                       ? "min-w-0 sm:col-span-2 lg:col-span-3"
                       : "min-w-0"}
                   >
-                    {renderWidget({ binding, statusDetails, dataPoints: targetDataPoints, actions: targetActions, resourceKinds: resourceKinds.data, instanceId: instance.id, targetId: placement.targetId, dashboardId, placementId: placement.id, selectedTargetIds: placement.selectedTargetIds ?? [], canConfigurePlacement: canEditPlacement, supportsMediaSource: detail.data.supportsMediaSource, supportsMediaTarget: detail.data.supportsMediaTarget, onExecute: runAction, disabled: !canControl, unavailableReason: availability.unavailableReason, size: "expanded", loading: reading.status === null, className: "min-h-[5rem]" })}
+                    {renderWidget({ binding, statusDetails, dataPoints: targetDataPoints, actions: targetActions, resourceKinds: resourceKinds.data, instanceId: instance.id, targetId: placement.targetId, dashboardId, placementId: placement.id, selectedTargetIds: placement.selectedTargetIds ?? [], canConfigurePlacement: canEditPlacement, supportsMediaSource: detail.data.supportsMediaSource, supportsLyricsLookup: detail.data.supportsLyricsLookup, supportsMediaTarget: detail.data.supportsMediaTarget, onExecute: runAction, disabled: !canControl, unavailableReason: availability.unavailableReason, size: "expanded", loading: reading.status === null, className: "min-h-[5rem]" })}
                   </div>
                 ))}
               </div>

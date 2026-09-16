@@ -138,6 +138,10 @@ pub fn routes() -> Router<AppState> {
             get(connectors::media_queue),
         )
         .route(
+            "/connector-instances/{id}/media/lyrics",
+            post(connectors::media_fetch_lyrics),
+        )
+        .route(
             "/connector-instances/{id}/media/play-item",
             post(connectors::media_play_item),
         )

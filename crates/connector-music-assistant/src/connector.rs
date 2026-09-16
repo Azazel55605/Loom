@@ -1,4 +1,7 @@
-use std::{collections::HashMap, sync::RwLock};
+use std::{
+    collections::HashMap,
+    sync::{Arc, Mutex, RwLock},
+};
 
 use async_trait::async_trait;
 use chrono::Duration;
@@ -10,8 +13,8 @@ use loom_core::connector::{
     WidgetBinding, WidgetLayout,
 };
 use loom_media::{
-    MediaError, MediaItem, MediaKind, MediaSourceCapable, MediaTargetCapable, PlaybackState,
-    PlaybackStatus, Queue, RepeatMode, ResolvedPlayable,
+    AudioInfo, MediaError, MediaItem, MediaKind, MediaSourceCapable, MediaTargetCapable,
+    PlaybackState, PlaybackStatus, Queue, RepeatMode, ResolvedPlayable,
 };
 use serde_json::{json, Map, Value};
 
@@ -38,6 +41,7 @@ pub struct MusicAssistantConnector {
     port: u16,
     image_base: String,
     players: RwLock<Vec<Value>>,
+    lyrics_cache: Arc<RwLock<HashMap<String, Option<String>>>>,
     media_targets: HashMap<String, MusicAssistantPlayerTarget>,
 }
 
@@ -51,6 +55,7 @@ impl MusicAssistantConnector {
                 .map_err(connector_error)?;
         let players = list_players(&client).await.map_err(connector_error)?;
         let image_base = http_base(&config.host, config.port);
+        let lyrics_cache = Arc::new(RwLock::new(HashMap::new()));
         let media_targets = players
             .iter()
             .filter_map(|player| player_id(player))
@@ -62,6 +67,8 @@ impl MusicAssistantConnector {
                         client: client.clone(),
                         player_id: id.to_owned(),
                         image_base: image_base.clone(),
+                        lyrics_cache: Arc::clone(&lyrics_cache),
+                        last_item_id: Arc::new(Mutex::new(None)),
                     },
                 )
             })
@@ -72,6 +79,7 @@ impl MusicAssistantConnector {
             port: config.port,
             image_base,
             players: RwLock::new(players),
+            lyrics_cache,
             media_targets,
         })
     }
@@ -348,6 +356,10 @@ impl Connector for MusicAssistantConnector {
 
 #[async_trait]
 impl MediaSourceCapable for MusicAssistantConnector {
+    fn supports_lyrics_lookup(&self) -> bool {
+        true
+    }
+
     async fn browse(&self, path: Option<&str>) -> Result<Vec<MediaItem>, MediaError> {
         self.browse_values(path).await.map(|values| {
             values
@@ -382,6 +394,32 @@ impl MediaSourceCapable for MusicAssistantConnector {
             kind: item.kind.clone(),
             item,
         })
+    }
+
+    async fn fetch_lyrics(&self, item_id: &str) -> Result<Option<String>, MediaError> {
+        let track = self
+            .client
+            .call(
+                "music/item_by_uri",
+                json!({ "uri": item_id, "allow_update_metadata": false }),
+            )
+            .await
+            .map_err(media_error)?;
+        let result = self
+            .client
+            .call("metadata/get_track_lyrics", json!({ "track": track }))
+            .await
+            .map_err(media_error)?;
+        let lyrics = result
+            .as_array()
+            .and_then(|values| values.first())
+            .and_then(Value::as_str)
+            .map(str::to_owned);
+        self.lyrics_cache
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(item_id.to_owned(), lyrics.clone());
+        Ok(lyrics)
     }
 }
 
@@ -419,6 +457,8 @@ struct MusicAssistantPlayerTarget {
     client: MusicAssistantClient,
     player_id: String,
     image_base: String,
+    lyrics_cache: Arc<RwLock<HashMap<String, Option<String>>>>,
+    last_item_id: Arc<Mutex<Option<String>>>,
 }
 
 impl MusicAssistantPlayerTarget {
@@ -451,6 +491,67 @@ impl MusicAssistantPlayerTarget {
             .await
             .map_err(media_error)?;
         Ok(())
+    }
+
+    async fn enrich_current_lyrics(&self, state: &mut PlaybackState) {
+        let Some(item) = state.current_item.as_mut() else {
+            *self
+                .last_item_id
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
+            return;
+        };
+        let item_id = item.id.clone();
+        let changed = {
+            let mut last = self
+                .last_item_id
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if last.as_deref() == Some(item_id.as_str()) {
+                false
+            } else {
+                *last = Some(item_id.clone());
+                true
+            }
+        };
+
+        if let Some(lyrics) = item.lyrics.clone() {
+            self.lyrics_cache
+                .write()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .insert(item_id.clone(), Some(lyrics));
+        } else if changed
+            && !self
+                .lyrics_cache
+                .read()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .contains_key(&item_id)
+        {
+            // Track detail is the one additional read in the regular polling
+            // path, and only happens when the current item changes. A missing
+            // lyric is cached as such; provider lookups remain manual.
+            let lyrics = self
+                .client
+                .call(
+                    "music/item_by_uri",
+                    json!({ "uri": item_id, "allow_update_metadata": false }),
+                )
+                .await
+                .ok()
+                .and_then(|value| lyrics(&value));
+            self.lyrics_cache
+                .write()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .insert(item_id.clone(), lyrics);
+        }
+
+        item.lyrics = self
+            .lyrics_cache
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(&item_id)
+            .cloned()
+            .flatten();
     }
 }
 
@@ -496,7 +597,9 @@ impl MediaTargetCapable for MusicAssistantPlayerTarget {
             .find(|player| player_id(player) == Some(self.player_id.as_str()))
             .ok_or(MediaError::NotFound)?;
         let queue = self.active_queue().await?;
-        Ok(playback_state(player, queue.as_ref(), &self.image_base))
+        let mut state = playback_state(player, queue.as_ref(), &self.image_base);
+        self.enrich_current_lyrics(&mut state).await;
+        Ok(state)
     }
 
     async fn play(&self, playable: ResolvedPlayable) -> Result<(), MediaError> {
@@ -798,6 +901,9 @@ fn playback_state(player: &Value, queue: Option<&Value>, image_base: &str) -> Pl
             .and_then(|value| u8::try_from(value).ok())
             .unwrap_or(0),
         current_item: current,
+        audio_info: queue
+            .and_then(|queue| queue.get("current_item"))
+            .and_then(audio_info),
         shuffle: queue
             .and_then(|queue| queue.get("shuffle_enabled"))
             .and_then(Value::as_bool)
@@ -823,6 +929,7 @@ fn player_media_item(value: &Value, image_base: &str) -> Option<MediaItem> {
         album: string_field(value, "album").map(str::to_owned),
         artwork_ref: string_field(value, "image_url")
             .and_then(|reference| browser_player_artwork_ref(reference, image_base)),
+        lyrics: lyrics(value),
         duration,
     })
 }
@@ -843,6 +950,7 @@ fn queue_media_item(value: &Value, image_base: &str) -> Option<MediaItem> {
                 artist: None,
                 album: None,
                 artwork_ref: artwork_ref(value, image_base),
+                lyrics: lyrics(value),
                 duration: seconds_duration(value.get("duration")),
             })
         })
@@ -873,7 +981,45 @@ fn media_item(value: &Value, image_base: &str) -> Option<MediaItem> {
             .and_then(|album| string_field(album, "name"))
             .map(str::to_owned),
         artwork_ref: artwork_ref(value, image_base),
+        lyrics: lyrics(value),
         duration,
+    })
+}
+
+fn lyrics(value: &Value) -> Option<String> {
+    value
+        .get("metadata")
+        .and_then(|metadata| string_field(metadata, "lyrics"))
+        .filter(|lyrics| !lyrics.trim().is_empty())
+        .map(str::to_owned)
+}
+
+fn audio_info(queue_item: &Value) -> Option<AudioInfo> {
+    let format = queue_item.get("streamdetails")?.get("audio_format")?;
+    let positive_u32 = |field: &str| {
+        format
+            .get(field)
+            .and_then(Value::as_u64)
+            .and_then(|value| u32::try_from(value).ok())
+            .filter(|value| *value > 0)
+    };
+    let positive_u8 = |field: &str| {
+        format
+            .get(field)
+            .and_then(Value::as_u64)
+            .and_then(|value| u8::try_from(value).ok())
+            .filter(|value| *value > 0)
+    };
+    let codec = string_field(format, "codec_type")
+        .filter(|value| *value != "unknown")
+        .or_else(|| string_field(format, "content_type").filter(|value| *value != "unknown"))
+        .map(str::to_owned);
+    Some(AudioInfo {
+        codec,
+        sample_rate_hz: positive_u32("sample_rate"),
+        bit_depth: positive_u8("bit_depth"),
+        channels: positive_u8("channels"),
+        bitrate_kbps: positive_u32("bit_rate"),
     })
 }
 
@@ -1149,10 +1295,18 @@ mod tests {
                 "shuffle_enabled": true, "repeat_mode": "all",
                 "current_item": {
                     "queue_item_id": "queued-1", "name": "A Song", "duration": 180,
+                    "streamdetails": {
+                        "audio_format": {
+                            "content_type": "flac", "codec_type": "flac",
+                            "sample_rate": 96000, "bit_depth": 24,
+                            "channels": 2, "bit_rate": 2304
+                        }
+                    },
                     "media_item": {
                         "item_id": "track-1", "provider": "library", "name": "A Song",
                         "uri": "library://track/track-1", "media_type": "track",
-                        "duration": 180
+                        "duration": 180,
+                        "metadata": { "lyrics": "Fixture lyric" }
                     }
                 }
             })),
@@ -1163,7 +1317,19 @@ mod tests {
         assert_eq!(state.volume_percent, 42);
         assert!(state.shuffle);
         assert_eq!(state.repeat, RepeatMode::All);
-        assert_eq!(state.current_item.unwrap().title, "A Song");
+        let item = state.current_item.unwrap();
+        assert_eq!(item.title, "A Song");
+        assert_eq!(item.lyrics.as_deref(), Some("Fixture lyric"));
+        assert_eq!(
+            state.audio_info,
+            Some(AudioInfo {
+                codec: Some("flac".to_owned()),
+                sample_rate_hz: Some(96_000),
+                bit_depth: Some(24),
+                channels: Some(2),
+                bitrate_kbps: Some(2_304),
+            })
+        );
     }
 
     #[test]
@@ -1229,5 +1395,6 @@ mod tests {
             "http://music.example.com:8095",
         );
         assert_eq!(state.position, None);
+        assert_eq!(state.audio_info, None);
     }
 }

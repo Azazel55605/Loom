@@ -1275,7 +1275,7 @@ dependencies = [
 
 [[package]]
 name = "loom-connector-music-assistant"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "async-trait",
  "chrono",
@@ -1364,7 +1364,7 @@ dependencies = [
 
 [[package]]
 name = "loom-core"
-version = "0.3.5"
+version = "0.4.0"
 dependencies = [
  "async-trait",
  "chrono",
@@ -1378,7 +1378,7 @@ dependencies = [
 
 [[package]]
 name = "loom-media"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "async-trait",
  "chrono",
@@ -1390,7 +1390,7 @@ dependencies = [
 
 [[package]]
 name = "loom-web-backend"
-version = "0.5.0"
+version = "0.5.5"
 dependencies = [
  "aes-gcm",
  "argon2",

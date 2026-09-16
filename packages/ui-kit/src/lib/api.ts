@@ -640,6 +640,8 @@ export type ConnectorInstanceDetail = ConnectorInstanceSummary & {
   supportsBrowsableContent: boolean;
   /** Whether this detail context can browse and resolve playable media. */
   supportsMediaSource: boolean;
+  /** Whether this media source can perform an explicit lyrics lookup. */
+  supportsLyricsLookup: boolean;
   /** Whether this detail context is a media playback target. */
   supportsMediaTarget: boolean;
   /** Type id this live instance can discover, or null when unsupported. */
@@ -1714,7 +1716,16 @@ export type MediaItem = {
   artist: string | null;
   album: string | null;
   artworkRef: string | null;
+  lyrics: string | null;
   duration: MediaDuration | null;
+};
+
+export type AudioInfo = {
+  codec: string | null;
+  sampleRateHz: number | null;
+  bitDepth: number | null;
+  channels: number | null;
+  bitrateKbps: number | null;
 };
 
 export type PlaybackState = {
@@ -1722,6 +1733,7 @@ export type PlaybackState = {
   position: MediaDuration | null;
   volumePercent: number;
   currentItem: MediaItem | null;
+  audioInfo: AudioInfo | null;
   shuffle: boolean;
   repeat: RepeatMode;
 };
@@ -1774,6 +1786,18 @@ function getQueue(
     runtime,
     `/connector-instances/${encodeURIComponent(instanceId)}/media/queue?${mediaTargetQuery(targetId)}`,
     { signal },
+  );
+}
+
+function fetchLyrics(
+  runtime: ApiRuntime,
+  instanceId: string,
+  itemId: string,
+): Promise<{ lyrics: string | null }> {
+  return authorizedRequest<{ lyrics: string | null }>(
+    runtime,
+    `/connector-instances/${encodeURIComponent(instanceId)}/media/lyrics`,
+    { method: "POST", body: { itemId } },
   );
 }
 
@@ -2929,6 +2953,8 @@ export function createApiClient(options: {
       getPlaybackState(runtime, instanceId, targetId, signal),
     getQueue: (instanceId: string, targetId: string, signal?: AbortSignal) =>
       getQueue(runtime, instanceId, targetId, signal),
+    fetchLyrics: (instanceId: string, itemId: string) =>
+      fetchLyrics(runtime, instanceId, itemId),
     playItem: (instanceId: string, targetId: string, itemId: string) =>
       playItem(runtime, instanceId, targetId, itemId),
     sendTransportCommand: (
