@@ -5,6 +5,7 @@ members = [
     "crates/media",
     "crates/connector-docker",
     "crates/connector-govee",
+    "crates/connector-music-assistant",
     "crates/connector-pihole",
     "crates/connector-tasmota",
     "crates/connector-truenas",
@@ -26,6 +27,7 @@ loom-core = { path = "crates/core" }
 loom-media = { path = "crates/media" }
 loom-connector-docker = { path = "crates/connector-docker" }
 loom-connector-govee = { path = "crates/connector-govee" }
+loom-connector-music-assistant = { path = "crates/connector-music-assistant" }
 loom-connector-pihole = { path = "crates/connector-pihole" }
 loom-connector-tasmota = { path = "crates/connector-tasmota" }
 loom-connector-truenas = { path = "crates/connector-truenas" }

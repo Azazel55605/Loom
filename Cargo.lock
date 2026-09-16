@@ -1274,6 +1274,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "loom-connector-music-assistant"
+version = "0.1.0"
+dependencies = [
+ "futures-util",
+ "loom-core",
+ "loom-media",
+ "serde",
+ "serde_json",
+ "thiserror",
+ "tokio",
+ "tokio-tungstenite",
+ "uuid",
+]
+
+[[package]]
 name = "loom-connector-pihole"
 version = "0.4.0"
 dependencies = [

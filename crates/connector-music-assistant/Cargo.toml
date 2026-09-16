@@ -1,0 +1,20 @@
+[package]
+name = "loom-connector-music-assistant"
+description = "Reconnect-capable Music Assistant WebSocket transport for Loom."
+edition.workspace = true
+license.workspace = true
+version = "0.1.0"
+publish = false
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+futures-util = { workspace = true, features = ["sink"] }
+loom-core.workspace = true
+loom-media.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tokio-tungstenite.workspace = true
+uuid.workspace = true
