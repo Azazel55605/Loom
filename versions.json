@@ -1,5 +1,5 @@
 {
-  "core": "0.3.0",
+  "core": "0.3.5",
   "media": "0.1.0",
   "connector-docker": "0.6.0",
   "connector-govee": "0.1.5",

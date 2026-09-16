@@ -212,6 +212,7 @@ export type DataPointValueType =
   | "number"
   | "string"
   | "bool"
+  | "image"
   | "timeSeries"
   | "categoryBreakdown";
 
@@ -249,7 +250,8 @@ export type DisplayWidgetType =
   | "gauge"
   | "statusDot"
   | "logStream"
-  | "colorPicker";
+  | "colorPicker"
+  | "image";
 
 /**
  * How a resource table's cell should be *formatted*.

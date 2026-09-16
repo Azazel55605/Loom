@@ -89,13 +89,20 @@ is a contract used by Core itself, not an integration that talks to a service.
 It contains no network client, listener, runtime owner, permission decision, or
 service implementation.
 
-### Scope of this phase
+### Implementation status
 
-This phase is traits and types only. It intentionally adds no media widget, no
-image primitive, no browsable list/grid primitive, no DebugConnector fixture,
-and no real media connector. The two missing generic primitives are explicitly
-deferred to the next phase; fixtures and integrations follow after the shared
-rendering surface exists.
+The shared Image data-point and display-widget primitive is now complete. It
+accepts stable HTTP(S) image URLs and self-contained `data:` URIs and is proven
+without a network dependency by DebugConnector's cycling synthetic artwork.
+The generic browsable List/Grid primitive remains pending.
+
+### Scope of the foundation phase
+
+The original foundation phase was traits and types only. It intentionally added
+no media widget, browsable list/grid primitive, DebugConnector media fixture, or
+real media connector. The Image primitive has since landed as described above;
+the remaining generic browsing surface and media-specific fixtures/integrations
+still follow after that shared rendering surface exists.
 
 ## Consequences
 
@@ -107,6 +114,6 @@ rendering surface exists.
   live/file distinction required for honest controls.
 - Media values and errors can cross future backend API boundaries without
   coupling the contract crate to Web/backend or to a particular player.
-- The frontend still cannot render this model. Image rendering and browsable
-  list/grid primitives must be designed before a media widget or fixture is
-  added.
+- The frontend can now render artwork through the generic Image primitive, but
+  a browsable list/grid primitive is still required before a complete media
+  browser or player fixture is added.

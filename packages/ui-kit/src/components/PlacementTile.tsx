@@ -673,6 +673,8 @@ function ConnectorPlacementTile({
                         : "col-span-full min-h-[12rem]"
                       : "display" in binding && typeof binding.display.widgetType !== "string"
                         ? "col-span-full min-h-[8rem]"
+                        : "display" in binding && binding.display.widgetType === "image"
+                          ? "col-span-full min-h-[8rem]"
                         : "display" in binding && binding.display.widgetType === "logStream"
                           ? "col-span-full"
                           : undefined,

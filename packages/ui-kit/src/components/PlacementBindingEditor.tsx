@@ -518,6 +518,30 @@ function DisplayBindingFields({
         </Field>
       ) : null}
 
+      {currentKey === "image" ? (
+        <Field id={`${idPrefix}-image-fit`} label="Image fit">
+          <Select
+            value={config.fit === "cover" ? "cover" : "contain"}
+            disabled={disabled}
+            onValueChange={(fit) => {
+              if (fit !== "contain" && fit !== "cover") return;
+              const next = { ...config };
+              if (fit === "contain") delete next.fit;
+              else next.fit = fit;
+              onChange({ ...binding, config: next });
+            }}
+          >
+            <SelectTrigger id={`${idPrefix}-image-fit`}>
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value="contain">Contain — show the full image</SelectItem>
+              <SelectItem value="cover">Cover — fill and crop</SelectItem>
+            </SelectContent>
+          </Select>
+        </Field>
+      ) : null}
+
       {bounded ? (
         <>
           <Field id={`${idPrefix}-min`} label="Minimum">

@@ -463,10 +463,12 @@ function formatChecked(iso: string): string {
   return Number.isNaN(date.getTime()) ? iso : date.toLocaleString();
 }
 
-/** Charts and logs need horizontal room and are much taller than scalar
+/** Charts, images, and logs need horizontal room and are much taller than scalar
  * widgets. Giving them their own row prevents a short StatTile beside one from
  * leaving what looks like a large missing-content hole in the expanded grid. */
 function expandedWidgetSpansRow(binding: DashboardPlacement["widgetBindings"][number]): boolean {
   return "display" in binding &&
-    (typeof binding.display.widgetType !== "string" || binding.display.widgetType === "logStream");
+    (typeof binding.display.widgetType !== "string" ||
+      binding.display.widgetType === "image" ||
+      binding.display.widgetType === "logStream");
 }

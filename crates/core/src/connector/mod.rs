@@ -565,7 +565,9 @@ pub struct ConnectorStatus {
     /// | [`Number`](DataPointValueType::Number) | a JSON number |
     /// | [`String`](DataPointValueType::String) | a JSON string |
     /// | [`Bool`](DataPointValueType::Bool) | a JSON boolean |
+    /// | [`Image`](DataPointValueType::Image) | a JSON string containing a fully-qualified `http(s)://` URL or a `data:` URI |
     /// | [`TimeSeries`](DataPointValueType::TimeSeries) | a JSON array of `{ "timestamp": <ISO 8601>, "value": <number> }` objects, oldest first |
+    /// | [`CategoryBreakdown`](DataPointValueType::CategoryBreakdown) | a JSON array of `{ "label": <string>, "value": <number> }` objects |
     ///
     /// A connector may include extra keys within a target object that are not data points — a version
     /// string, a queue depth — and a client that does not recognise one ignores
@@ -991,6 +993,14 @@ pub enum DataPointValueType {
     String,
     /// A single on/off flag.
     Bool,
+    /// An image source carried as a plain JSON string and usable directly as
+    /// an HTML `<img src>` value.
+    ///
+    /// The string must be either a fully-qualified `http://`/`https://` URL or
+    /// a `data:` URI. Connectors whose native APIs return raw image bytes must
+    /// base64-encode those bytes into a `data:` URI at their boundary; a
+    /// connector with a stable fetchable URL passes that URL through as-is.
+    Image,
     /// An ordered run of recent numeric readings, oldest first.
     TimeSeries,
     /// Several named numeric readings carried by one data point.
@@ -1442,6 +1452,9 @@ pub enum DisplayWidgetType {
     LogStream,
     /// A hexadecimal colour shown as a read-only swatch and text value.
     ColorPicker,
+    /// An image scaled into its available frame. Display-only: editable image
+    /// content is not an action-control primitive.
+    Image,
 }
 
 /// How an action is offered.
@@ -2192,6 +2205,18 @@ mod tests {
         assert_eq!(
             serde_json::to_value(DataPointValueType::CategoryBreakdown).unwrap(),
             json!("categoryBreakdown")
+        );
+    }
+
+    #[test]
+    fn image_types_use_the_documented_wire_name() {
+        assert_eq!(
+            serde_json::to_value(DataPointValueType::Image).unwrap(),
+            json!("image")
+        );
+        assert_eq!(
+            serde_json::to_value(DisplayWidgetType::Image).unwrap(),
+            json!("image")
         );
     }
 

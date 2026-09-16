@@ -28,7 +28,8 @@ export type DisplayWidgetKey =
   | "gauge"
   | "statusDot"
   | "logStream"
-  | "colorPicker";
+  | "colorPicker"
+  | "image";
 
 /** The key of a display widget type, whichever serialized form it arrived in. */
 export function displayWidgetKey(widgetType: DisplayWidgetType): DisplayWidgetKey {
@@ -56,6 +57,7 @@ const DISPLAY_LABELS: Record<DisplayWidgetKey, string> = {
   statusDot: "Status dot",
   logStream: "Log stream",
   colorPicker: "Color picker",
+  image: "Image",
 };
 
 const ACTION_LABELS: Record<ActionWidgetType, string> = {
@@ -87,6 +89,8 @@ const BY_VALUE_TYPE: Record<DataPointValueType, DisplayWidgetKey[]> = {
   // A boolean is a state, and a dot reads faster than the word — but the tile
   // stays available for when the word is what matters.
   bool: ["statusDot", "statTile"],
+  // Image values have one deliberately narrow display contract.
+  image: ["image"],
   // A series has exactly one home.
   timeSeries: ["metricChart"],
   // Named categories are compared as bars or slices by the same chart widget.

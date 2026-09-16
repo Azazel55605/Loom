@@ -2180,7 +2180,7 @@ mod tests {
             .as_array()
             .expect("array")
             .is_empty());
-        assert_eq!(created["dataPoints"].as_array().expect("array").len(), 10);
+        assert_eq!(created["dataPoints"].as_array().expect("array").len(), 11);
         assert!(!created["defaultLayout"]["bindings"]
             .as_array()
             .expect("array")

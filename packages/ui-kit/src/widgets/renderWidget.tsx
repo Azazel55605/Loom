@@ -9,6 +9,7 @@ import type {
 } from "@loom/ui-kit/lib/api";
 import { ResourceKindBrowser } from "@loom/ui-kit/components/ResourceKindBrowser";
 import { GaugeSkeleton, GaugeWidget } from "@loom/ui-kit/widgets/Gauge";
+import { ImageDisplaySkeleton, ImageDisplayWidget } from "@loom/ui-kit/widgets/ImageDisplay";
 import { LogPreviewSkeleton, LogPreviewWidget } from "@loom/ui-kit/widgets/LogPreview";
 import { LogStreamSkeleton, LogStreamWidget } from "@loom/ui-kit/widgets/LogStream";
 import { MetricChartSkeleton, MetricChartWidget } from "@loom/ui-kit/widgets/MetricChart";
@@ -183,6 +184,7 @@ export function renderWidget({
         case "statusDot": return <StatusDotSkeleton className={className} />;
         case "logStream": return size === "expanded" ? <LogStreamSkeleton className={className} expanded /> : <LogPreviewSkeleton className={className} />;
         case "colorPicker": return <ColorPickerSkeleton className={className} />;
+        case "image": return <ImageDisplaySkeleton className={className} expanded={size === "expanded"} />;
       }
     }
 
@@ -213,6 +215,8 @@ export function renderWidget({
         );
       case "colorPicker":
         return <ColorPickerDisplayWidget {...shared} />;
+      case "image":
+        return <ImageDisplayWidget {...shared} expanded={size === "expanded"} />;
       default:
         // Unreachable while the union and this switch agree. Kept because they
         // are updated in different repositories' worth of code — Core adds the

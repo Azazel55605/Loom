@@ -4320,6 +4320,7 @@ without collisions.
 | `"number"` | a JSON number |
 | `"string"` | a JSON string |
 | `"bool"` | a JSON boolean |
+| `"image"` | a JSON string containing either a fully-qualified `http(s)://` URL or a `data:` URI, directly usable as an image source |
 | `"timeSeries"` | a JSON array of `{ "timestamp": <RFC 3339>, "value": <number> }` objects, **oldest first** |
 | `"categoryBreakdown"` | a JSON array of `{ "label": <string>, "value": <number> }` objects, for one bar or pie slice per named category |
 
@@ -4512,7 +4513,7 @@ shell, and stored configuration is exactly where credentials live.
 | `id` | string | Stable machine identifier, and the second-level key under its target in `status.details`. Stored in saved layouts, so it must not change when the label does. | Always present. |
 | `targetId` | string | Addressed sub-target for this descriptor. | `null` for a host/aggregate data point. |
 | `label` | string | Human-facing name for a caption or legend entry. | Always present. |
-| `valueType` | string | One of `"number"`, `"string"`, `"bool"`, `"timeSeries"`, `"categoryBreakdown"`. Constrains which widgets may render it. | Always present. |
+| `valueType` | string | One of `"number"`, `"string"`, `"bool"`, `"image"`, `"timeSeries"`, `"categoryBreakdown"`. Constrains which widgets may render it. Image values are complete `http(s)://` URLs or `data:` URIs; connectors encode raw bytes at their own boundary. | Always present. |
 | `unit` | string | Display unit (`"%"`, `"bytes"`, `"ms"`). A display concern only — the wire value is never scaled. `"bytes"` is rendered in an appropriate binary unit by every numeric widget. | Serialized as **`null`** for a dimensionless value. |
 
 **Descriptors, not readings.** The current values arrive separately, in

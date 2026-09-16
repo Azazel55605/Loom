@@ -13,8 +13,9 @@
 //!
 //! 1. **Auth and shell development**, its original purpose — a connector that
 //!    is reliably there to be listed, permission-checked, and acted on.
-//! 2. **Widget rendering development.** It exposes one data point of every
-//!    [`DataPointValueType`] and ships a [`default_layout`](Connector::default_layout)
+//! 2. **Widget rendering development.** It exposes representative scalar,
+//!    image, and series [`DataPointValueType`] values and ships a
+//!    [`default_layout`](Connector::default_layout)
 //!    spreading them across the display widgets *and* wiring its actions to the
 //!    control widgets, so both halves of every renderer can be built and
 //!    reviewed against something that moves.
@@ -138,6 +139,9 @@ pub const DATA_POINT_ENABLED: &str = "enabled";
 
 /// The data point id for the simulated hexadecimal accent colour.
 pub const DATA_POINT_ACCENT_COLOR: &str = "accentColor";
+
+/// The data point id for the cycling, self-contained synthetic artwork.
+pub const DATA_POINT_COVER_ART: &str = "coverArt";
 
 /// The data point id for the rolling buffer of recent load readings.
 pub const DATA_POINT_LOAD_HISTORY: &str = "loadHistory";
@@ -505,6 +509,7 @@ impl DebugConnector {
             DATA_POINT_LABEL: state.label,
             DATA_POINT_ENABLED: state.enabled,
             DATA_POINT_ACCENT_COLOR: state.accent_color,
+            DATA_POINT_COVER_ART: synthetic_cover_art(state.tick),
             DATA_POINT_LOAD_HISTORY: state.history.iter().collect::<Vec<&HistorySample>>(),
             // Newline-joined rather than an array: the data point's declared
             // value type is `String`, and `LogStream` is the widget that splits
@@ -604,6 +609,42 @@ fn simulated_load(base: f64, tick: u64) -> f64 {
     let wobble = (unit - 0.5) * 4.0;
 
     (base + wave + wobble).clamp(0.0, 100.0)
+}
+
+/// Builds one of four deterministic, network-independent SVG images.
+///
+/// Everything after the `data:` prefix is percent-encoded, including `#` in
+/// colours, so the result is a valid `<img src>` string rather than an SVG
+/// fragment accidentally interpreted as a URI fragment.
+fn synthetic_cover_art(tick: u64) -> String {
+    let (background, foreground, shape) = match tick % 4 {
+        0 => ("#172554", "#60a5fa", r#"<circle cx="80" cy="80" r="44"/>"#),
+        1 => ("#3b0764", "#c084fc", r#"<path d="M80 28 134 126H26Z"/>"#),
+        2 => (
+            "#052e16",
+            "#4ade80",
+            r#"<path d="M80 22 138 80 80 138 22 80Z"/>"#,
+        ),
+        _ => (
+            "#431407",
+            "#fb923c",
+            r#"<path d="M30 112V64h24v48zm38 0V38h24v74zm38 0V76h24v36z"/>"#,
+        ),
+    };
+    let svg = format!(
+        r#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 160 160"><rect width="160" height="160" rx="24" fill="{background}"/><g fill="{foreground}">{shape}</g></svg>"#
+    );
+
+    let mut encoded = String::with_capacity(svg.len() * 3);
+    for byte in svg.bytes() {
+        if byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'.' | b'_' | b'~') {
+            encoded.push(char::from(byte));
+        } else {
+            use std::fmt::Write as _;
+            write!(&mut encoded, "%{byte:02X}").expect("writing to a String cannot fail");
+        }
+    }
+    format!("data:image/svg+xml,{encoded}")
 }
 
 /// Rounds to two decimals so the wire values stay readable.
@@ -1370,6 +1411,11 @@ impl Connector for DebugConnector {
                 DataPointValueType::String,
             ),
             DataPointDescriptor::new(
+                DATA_POINT_COVER_ART,
+                "Synthetic cover art",
+                DataPointValueType::Image,
+            ),
+            DataPointDescriptor::new(
                 DATA_POINT_LOAD_HISTORY,
                 "Load history",
                 DataPointValueType::TimeSeries,
@@ -1435,6 +1481,8 @@ impl Connector for DebugConnector {
                 "linkedDataPointId": DATA_POINT_LOAD
             })),
             WidgetBinding::display(DATA_POINT_ACCENT_COLOR, DisplayWidgetType::ColorPicker),
+            WidgetBinding::display(DATA_POINT_COVER_ART, DisplayWidgetType::Image)
+                .with_config(json!({ "fit": "contain" })),
             WidgetBinding::action(ACTION_SET_ACCENT_COLOR, ActionWidgetType::ColorPicker)
                 .with_config(json!({ "linkedDataPointId": DATA_POINT_ACCENT_COLOR })),
             WidgetBinding::action(ACTION_SET_LABEL, ActionWidgetType::TextField),
@@ -1669,6 +1717,12 @@ mod tests {
                     "{} must be a JSON boolean, got {value}",
                     descriptor.id
                 ),
+                DataPointValueType::Image => {
+                    let source = value
+                        .as_str()
+                        .unwrap_or_else(|| panic!("{} must be a JSON string", descriptor.id));
+                    assert!(source.starts_with("data:image/"));
+                }
                 DataPointValueType::TimeSeries => {
                     let samples = value
                         .as_array()
@@ -1694,9 +1748,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn data_points_cover_every_value_type_and_have_unique_ids() {
+    async fn data_points_cover_fixture_value_types_and_have_unique_ids() {
         let points = DebugConnector::default().data_points();
-        assert_eq!(points.len(), 10);
+        assert_eq!(points.len(), 11);
 
         let ids: HashSet<(&str, Option<&str>)> = points
             .iter()
@@ -1707,11 +1761,36 @@ mod tests {
         let types: HashSet<DataPointValueType> = points.iter().map(|p| p.value_type).collect();
         assert_eq!(
             types.len(),
-            4,
-            "the fixture must exercise its four existing scalar/time-series value types"
+            5,
+            "the fixture must exercise its five scalar/image/time-series value types"
         );
 
         assert!(points.iter().all(|p| !p.label.is_empty()));
+    }
+
+    #[tokio::test]
+    async fn cover_art_cycles_through_four_self_contained_images() {
+        let connector = DebugConnector::default();
+        let mut sources = Vec::new();
+
+        for _ in 0..5 {
+            let status = connector.status().await.unwrap();
+            let source = status
+                .data_point_value(DATA_POINT_COVER_ART)
+                .and_then(Value::as_str)
+                .expect("cover art is a string data URI")
+                .to_owned();
+            assert!(source.starts_with("data:image/svg+xml,"));
+            assert!(!source.contains("http://"));
+            assert!(!source.contains("https://"));
+            sources.push(source);
+        }
+
+        assert_eq!(sources[..4].iter().collect::<HashSet<_>>().len(), 4);
+        assert_eq!(
+            sources[0], sources[4],
+            "the fifth poll starts the cycle again"
+        );
     }
 
     #[tokio::test]
@@ -1770,7 +1849,7 @@ mod tests {
             .collect();
 
         let layout = connector.default_layout();
-        assert_eq!(layout.bindings.len(), 14);
+        assert_eq!(layout.bindings.len(), 15);
 
         for binding in &layout.bindings {
             match binding {
@@ -1829,6 +1908,10 @@ mod tests {
             DATA_POINT_ACCENT_COLOR,
             DisplayWidgetType::ColorPicker
         )));
+        assert!(layout.bindings.contains(
+            &WidgetBinding::display(DATA_POINT_COVER_ART, DisplayWidgetType::Image)
+                .with_config(json!({ "fit": "contain" }))
+        ));
 
         // ...and at least one control, so the action half of the renderer has
         // something to be built against.
