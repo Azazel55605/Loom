@@ -672,7 +672,11 @@ fn playback_state(player: &Value, queue: Option<&Value>, image_base: &str) -> Pl
     let current = queue
         .and_then(|queue| queue.get("current_item"))
         .and_then(|item| queue_media_item(item, image_base))
-        .or_else(|| player.get("current_media").and_then(player_media_item));
+        .or_else(|| {
+            player
+                .get("current_media")
+                .and_then(|item| player_media_item(item, image_base))
+        });
     let position = current.as_ref().and_then(|item| {
         item.duration.and_then(|_| {
             queue
@@ -701,7 +705,7 @@ fn playback_state(player: &Value, queue: Option<&Value>, image_base: &str) -> Pl
     }
 }
 
-fn player_media_item(value: &Value) -> Option<MediaItem> {
+fn player_media_item(value: &Value, image_base: &str) -> Option<MediaItem> {
     let id = string_field(value, "uri")?;
     let duration = seconds_duration(value.get("duration"));
     Some(MediaItem {
@@ -712,7 +716,8 @@ fn player_media_item(value: &Value) -> Option<MediaItem> {
         kind: MediaKind::Audio,
         artist: string_field(value, "artist").map(str::to_owned),
         album: string_field(value, "album").map(str::to_owned),
-        artwork_ref: string_field(value, "image_url").map(str::to_owned),
+        artwork_ref: string_field(value, "image_url")
+            .and_then(|reference| browser_player_artwork_ref(reference, image_base)),
         duration,
     })
 }
@@ -804,6 +809,46 @@ fn artwork_ref(value: &Value, image_base: &str) -> Option<String> {
     let path = string_field(image, "path")?;
     (path.starts_with("http://") || path.starts_with("https://") || path.starts_with("data:"))
         .then(|| path.to_owned())
+}
+
+/// Turns MA's player-facing artwork URL into one the Loom client can fetch.
+///
+/// Current MA builds deliberately publish queue artwork through the stream
+/// server because the physical player must be able to reach it. That absolute
+/// URL can name an internal address or the separate stream-server port, neither
+/// of which is necessarily reachable from a browser using Loom remotely. The
+/// same canonical `/imageproxy/<proxy_id>` route is available on MA's configured
+/// web/API origin, so only that MA-owned path is rebased. Provider-hosted image
+/// URLs stay untouched.
+fn browser_player_artwork_ref(reference: &str, image_base: &str) -> Option<String> {
+    if reference.starts_with("data:") {
+        return Some(reference.to_owned());
+    }
+
+    let path_and_query = if reference.starts_with('/') {
+        return Some(format!("{}{}", image_base.trim_end_matches('/'), reference));
+    } else if let Some(path) = reference.strip_prefix("imageproxy/") {
+        return Some(format!(
+            "{}/imageproxy/{path}",
+            image_base.trim_end_matches('/')
+        ));
+    } else if reference.starts_with("http://") || reference.starts_with("https://") {
+        reference
+            .split_once("://")
+            .and_then(|(_, authority_and_path)| {
+                authority_and_path
+                    .find('/')
+                    .map(|at| &authority_and_path[at..])
+            })
+    } else {
+        None
+    };
+    if let Some(path) = path_and_query.filter(|path| path.starts_with("/imageproxy/")) {
+        return Some(format!("{}{path}", image_base.trim_end_matches('/')));
+    }
+
+    (reference.starts_with("http://") || reference.starts_with("https://"))
+        .then(|| reference.to_owned())
 }
 
 fn flatten_search_results(value: &Value) -> Vec<Value> {
@@ -965,6 +1010,54 @@ mod tests {
         assert!(state.shuffle);
         assert_eq!(state.repeat, RepeatMode::All);
         assert_eq!(state.current_item.unwrap().title, "A Song");
+    }
+
+    #[test]
+    fn player_stream_server_artwork_is_rebased_to_the_configured_web_origin() {
+        // Current MA PlayerMedia wire shape, with documentation-only hosts:
+        // current playback advertises the player-facing stream server rather
+        // than the web/API origin the connector was configured to reach. This
+        // mirrors the upstream queue controller's serialized response.
+        let state = playback_state(
+            &json!({
+                "state": "playing",
+                "volume_level": 34,
+                "current_media": {
+                    "uri": "library://track/fixture-track",
+                    "media_type": "track",
+                    "title": "Fixture track",
+                    "image_url": "http://192.0.2.10:8097/imageproxy/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa?size=512&fmt=jpeg",
+                    "duration": 180
+                }
+            }),
+            None,
+            "https://music.example.com:443",
+        );
+
+        assert_eq!(
+            state.current_item.unwrap().artwork_ref.as_deref(),
+            Some("https://music.example.com:443/imageproxy/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa?size=512&fmt=jpeg")
+        );
+    }
+
+    #[test]
+    fn player_artwork_resolution_keeps_provider_urls_and_resolves_relative_proxy_paths() {
+        assert_eq!(
+            browser_player_artwork_ref(
+                "/imageproxy/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb?size=512",
+                "http://music.example.com:8095",
+            )
+            .as_deref(),
+            Some("http://music.example.com:8095/imageproxy/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb?size=512")
+        );
+        assert_eq!(
+            browser_player_artwork_ref(
+                "https://images.example.org/cover.jpg",
+                "http://music.example.com:8095",
+            )
+            .as_deref(),
+            Some("https://images.example.org/cover.jpg")
+        );
     }
 
     #[test]
