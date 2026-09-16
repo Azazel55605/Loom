@@ -2867,17 +2867,32 @@ async fn detail_for(
         discoverable_type,
         supports_update_checking,
     ) = match live {
-        Some(connector) => (
-            connector.actions().await,
-            connector.data_points(),
-            connector.default_layout_for(target_id),
-            connector.supports_sub_targets(),
-            connector.supports_browsable_content(),
-            connector.as_media_source(None).is_some(),
-            connector.as_media_target(target_id).is_some(),
-            connector.discoverable_type(),
-            connector.supports_update_checking(),
-        ),
+        Some(connector) => {
+            // At host scope this flag also means “can host a device-picker
+            // MediaPlayer”. Binding editors use it to offer the primitive
+            // before a player has been selected, so checking only
+            // `as_media_target(None)` would make the valid host flow
+            // impossible to create through the UI.
+            let supports_media_target = connector.as_media_target(target_id).is_some()
+                || (target_id.is_none()
+                    && connector.supports_sub_targets()
+                    && connector.list_sub_targets().await.is_ok_and(|targets| {
+                        targets
+                            .iter()
+                            .any(|target| connector.as_media_target(Some(&target.id)).is_some())
+                    }));
+            (
+                connector.actions().await,
+                connector.data_points(),
+                connector.default_layout_for(target_id),
+                connector.supports_sub_targets(),
+                connector.supports_browsable_content(),
+                connector.as_media_source(None).is_some(),
+                supports_media_target,
+                connector.discoverable_type(),
+                connector.supports_update_checking(),
+            )
+        }
         None => (
             Vec::new(),
             Vec::new(),

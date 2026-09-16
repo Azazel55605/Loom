@@ -2,6 +2,7 @@ import * as React from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   ChevronDown,
+  ChevronsUpDown,
   ListMusic,
   Music2,
   Pause,
@@ -18,15 +19,28 @@ import { toast } from "sonner";
 
 import { Badge } from "@loom/ui-kit/components/ui/badge";
 import { Button } from "@loom/ui-kit/components/ui/button";
+import { Checkbox } from "@loom/ui-kit/components/ui/checkbox";
 import {
   Collapsible,
   CollapsibleContent,
   CollapsibleTrigger,
 } from "@loom/ui-kit/components/ui/collapsible";
 import { Skeleton } from "@loom/ui-kit/components/ui/skeleton";
+import {
+  Popover,
+  PopoverContent,
+  PopoverTrigger,
+} from "@loom/ui-kit/components/ui/popover";
 import { Slider } from "@loom/ui-kit/components/ui/slider";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@loom/ui-kit/components/ui/tooltip";
-import type { MediaDuration, MediaItem, MediaTransportCommand, PlaybackState } from "@loom/ui-kit/lib/api";
+import type {
+  MediaDuration,
+  MediaGroupMode,
+  MediaItem,
+  MediaTransportCommand,
+  PlaybackState,
+  SubTarget,
+} from "@loom/ui-kit/lib/api";
 import { useApiClient } from "@loom/ui-kit/lib/api-context";
 import { describeConnectorError } from "@loom/ui-kit/lib/connector-error";
 import { cn } from "@loom/ui-kit/lib/utils";
@@ -50,6 +64,10 @@ function formatTime(seconds: number): string {
 type PlayerProps = {
   instanceId: string;
   targetId: string | null;
+  dashboardId?: string;
+  placementId?: string;
+  selectedTargetIds?: string[];
+  canConfigurePlacement?: boolean;
   showBrowser: boolean;
   supportsMediaSource: boolean;
   supportsMediaTarget: boolean;
@@ -63,6 +81,10 @@ type PlayerProps = {
 export function MediaPlayerWidget({
   instanceId,
   targetId,
+  dashboardId,
+  placementId,
+  selectedTargetIds = [],
+  canConfigurePlacement = false,
   showBrowser,
   supportsMediaSource,
   supportsMediaTarget,
@@ -73,53 +95,206 @@ export function MediaPlayerWidget({
 }: PlayerProps) {
   const api = useApiClient();
   const queryClient = useQueryClient();
-  const enabled = targetId !== null && supportsMediaTarget;
-  const playbackKey = ["media-playback", instanceId, targetId] as const;
+  const hostPlacement = targetId === null;
+  const selectedKey = selectedTargetIds.join("\u0000");
+  const [selection, setSelection] = React.useState<string[]>(selectedTargetIds);
+  const appliedSelection = React.useRef<string[]>(selectedTargetIds);
+  const initializedGroupingKey = React.useRef<string | null>(null);
+  const [groupMode, setGroupMode] = React.useState<MediaGroupMode | null>(null);
+  const effectiveTargetId = targetId ?? selection[0] ?? null;
+  const effectiveSupportsMediaTarget =
+    effectiveTargetId !== null && (hostPlacement || supportsMediaTarget);
+  const enabled = effectiveSupportsMediaTarget;
+  const playbackKey = ["media-playback", instanceId, effectiveTargetId] as const;
+
+  const playerTargets = useQuery({
+    queryKey: ["connector-instance-sub-targets", instanceId],
+    queryFn: ({ signal }) => api.getSubTargets(instanceId, signal),
+    enabled: hostPlacement,
+    staleTime: 30_000,
+    select: (targets) => targets.filter((target) => target.kind === "player"),
+  });
+
+  React.useEffect(() => {
+    const next = selectedKey === "" ? [] : selectedKey.split("\u0000");
+    setSelection(next);
+    appliedSelection.current = next;
+  }, [instanceId, placementId, selectedKey]);
+
+  const synchronizeSelection = useMutation({
+    mutationFn: async ({
+      previous,
+      next,
+      persist,
+    }: {
+      previous: string[];
+      next: string[];
+      persist: boolean;
+    }) => {
+      const priorPrimary = previous[0] ?? next[0];
+      let mode: MediaGroupMode | null = null;
+      try {
+        if (priorPrimary !== undefined) {
+          await api.leaveGroup(instanceId, priorPrimary);
+        }
+        if (next.length >= 2) {
+          const grouped = await api.joinGroup(instanceId, next[0], next.slice(1));
+          mode = grouped.mode;
+        }
+        if (persist) {
+          if (dashboardId === undefined || placementId === undefined) {
+            throw new Error("This media-player placement cannot save a device selection.");
+          }
+          await api.updateDashboardPlacement(dashboardId, placementId, {
+            selectedTargetIds: next,
+          });
+        }
+        return { next, mode, persist };
+      } catch (error) {
+        // A failed save must not leave the backend controlling a different
+        // group than the picker shows. Restoration is best-effort; the real
+        // error remains the one reported to the user.
+        const nextPrimary = next[0];
+        if (nextPrimary !== undefined) {
+          await api.leaveGroup(instanceId, nextPrimary).catch(() => undefined);
+        }
+        if (previous.length >= 2) {
+          await api
+            .joinGroup(instanceId, previous[0], previous.slice(1))
+            .catch(() => undefined);
+        }
+        throw error;
+      }
+    },
+    onSuccess: async ({ next, mode, persist }) => {
+      appliedSelection.current = next;
+      initializedGroupingKey.current = `${instanceId}:${next.join("\u0000")}`;
+      setGroupMode(mode);
+      if (persist && dashboardId !== undefined) {
+        await queryClient.invalidateQueries({ queryKey: ["dashboard", dashboardId] });
+      }
+    },
+    onError: (error, { previous }) => {
+      setSelection(previous);
+      setGroupMode(null);
+      toast.error("Could not update media devices", {
+        description: describeConnectorError(error),
+      });
+    },
+  });
+
+  // Grouping state is deliberately transient on the backend. Re-form a saved
+  // selection when its placement mounts after a reload, without rewriting the
+  // unchanged placement row.
+  React.useEffect(() => {
+    if (
+      !hostPlacement ||
+      disabled ||
+      unavailableReason != null ||
+      selection.length === 0 ||
+      synchronizeSelection.isPending
+    ) {
+      return;
+    }
+    const key = `${instanceId}:${selection.join("\u0000")}`;
+    if (initializedGroupingKey.current === key) return;
+    initializedGroupingKey.current = key;
+    synchronizeSelection.mutate({ previous: [], next: selection, persist: false });
+  }, [disabled, hostPlacement, instanceId, selection, synchronizeSelection, unavailableReason]);
+
+  const changeSelection = React.useCallback(
+    (next: string[]) => {
+      const previous = appliedSelection.current;
+      setSelection(next);
+      synchronizeSelection.mutate({ previous, next, persist: true });
+    },
+    [synchronizeSelection],
+  );
+
   const playback = useQuery({
     queryKey: playbackKey,
-    queryFn: ({ signal }) => api.getPlaybackState(instanceId, targetId as string, signal),
+    queryFn: ({ signal }) =>
+      api.getPlaybackState(instanceId, effectiveTargetId as string, signal),
     enabled,
     refetchInterval: PLAYBACK_REFRESH_MS,
   });
   const refresh = React.useCallback(async () => {
     await playback.refetch();
-    await queryClient.invalidateQueries({ queryKey: ["media-queue", instanceId, targetId] });
-  }, [instanceId, playback, queryClient, targetId]);
+    await queryClient.invalidateQueries({
+      queryKey: ["media-queue", instanceId, effectiveTargetId],
+    });
+  }, [effectiveTargetId, instanceId, playback, queryClient]);
   const reportError = React.useCallback((error: unknown) => {
     toast.error("Media control failed", { description: describeConnectorError(error) });
   }, []);
   const transport = useMutation({
     mutationFn: (command: MediaTransportCommand) =>
-      api.sendTransportCommand(instanceId, targetId as string, command),
+      api.sendTransportCommand(instanceId, effectiveTargetId as string, command),
     onSuccess: refresh,
     onError: reportError,
   });
   const seek = useMutation({
-    mutationFn: (seconds: number) => api.seek(instanceId, targetId as string, Math.round(seconds)),
+    mutationFn: (seconds: number) =>
+      api.seek(instanceId, effectiveTargetId as string, Math.round(seconds)),
     onSuccess: refresh,
     onError: reportError,
   });
   const volume = useMutation({
-    mutationFn: (percent: number) => api.setVolume(instanceId, targetId as string, Math.round(percent)),
+    mutationFn: (percent: number) =>
+      api.setVolume(instanceId, effectiveTargetId as string, Math.round(percent)),
     onSuccess: refresh,
     onError: reportError,
   });
   const play = useMutation({
     mutationFn: (item: MediaItem | { id: string }) =>
-      api.playItem(instanceId, targetId as string, item.id),
+      api.playItem(instanceId, effectiveTargetId as string, item.id),
     onSuccess: refresh,
     onError: reportError,
   });
 
-  if (targetId === null) {
-    return <MediaNotice className={className}>Choose a media-player target to use this widget.</MediaNotice>;
+  const picker = hostPlacement ? (
+    <DevicePicker
+      targets={playerTargets.data ?? []}
+      selectedTargetIds={selection}
+      loading={playerTargets.isPending}
+      error={playerTargets.isError ? describeConnectorError(playerTargets.error) : null}
+      disabled={
+        disabled ||
+        unavailableReason != null ||
+        !canConfigurePlacement ||
+        synchronizeSelection.isPending
+      }
+      canConfigure={canConfigurePlacement}
+      onChange={changeSelection}
+    />
+  ) : null;
+
+  if (effectiveTargetId === null) {
+    return (
+      <section className={cn("flex min-w-0 flex-col gap-3", className)}>
+        {picker}
+        <MediaNotice>Select a device to control playback</MediaNotice>
+      </section>
+    );
   }
-  if (!supportsMediaTarget) {
+  if (!effectiveSupportsMediaTarget) {
     return <MediaNotice className={className}>This target does not provide media playback controls.</MediaNotice>;
   }
-  if (playback.isPending) return <MediaPlayerSkeleton className={className} expanded={expanded} />;
+  if (playback.isPending) {
+    return (
+      <section className={cn("flex min-w-0 flex-col gap-3", className)}>
+        {picker}
+        <MediaPlayerSkeleton expanded={expanded} />
+      </section>
+    );
+  }
   if (playback.isError) {
-    return <MediaNotice className={className}>{describeConnectorError(playback.error)}</MediaNotice>;
+    return (
+      <section className={cn("flex min-w-0 flex-col gap-3", className)}>
+        {picker}
+        <MediaNotice>{describeConnectorError(playback.error)}</MediaNotice>
+      </section>
+    );
   }
 
   const state = playback.data;
@@ -127,6 +302,12 @@ export function MediaPlayerWidget({
   const controlReason = unavailableReason ?? (disabled ? "You do not have permission to control this connector." : null);
   return (
     <section className={cn("flex min-w-0 flex-col gap-4", className)}>
+      {picker}
+      {hostPlacement && groupMode === "fanOut" ? (
+        <p className="text-xs text-muted-foreground">
+          These devices may not stay perfectly in sync.
+        </p>
+      ) : null}
       <NowPlayingDisplay
         state={state}
         expanded={expanded}
@@ -160,8 +341,100 @@ export function MediaPlayerWidget({
         )
       ) : null}
 
-      <QueueView instanceId={instanceId} targetId={targetId} />
+      <QueueView instanceId={instanceId} targetId={effectiveTargetId} />
     </section>
+  );
+}
+
+function DevicePicker({
+  targets,
+  selectedTargetIds,
+  loading,
+  error,
+  disabled,
+  canConfigure,
+  onChange,
+}: {
+  targets: SubTarget[];
+  selectedTargetIds: string[];
+  loading: boolean;
+  error: string | null;
+  disabled: boolean;
+  canConfigure: boolean;
+  onChange: (targetIds: string[]) => void;
+}) {
+  const names = selectedTargetIds.map(
+    (id) => targets.find((target) => target.id === id)?.label ?? id,
+  );
+  const triggerLabel =
+    names.length === 0
+      ? "Select devices"
+      : names.length === 1
+        ? names[0]
+        : `${names.length} devices · ${names.join(", ")}`;
+
+  return (
+    <div className="space-y-1.5">
+      <Popover>
+        <PopoverTrigger asChild>
+          <Button
+            type="button"
+            variant="outline"
+            className="w-full justify-between gap-3"
+            disabled={disabled}
+          >
+            <span className="truncate">{triggerLabel}</span>
+            <ChevronsUpDown className="size-4 shrink-0" aria-hidden="true" />
+          </Button>
+        </PopoverTrigger>
+        <PopoverContent align="start" className="w-[min(22rem,calc(100vw-2rem))] p-2">
+          <p className="px-2 pb-1 text-xs font-medium text-muted-foreground">Players</p>
+          {loading ? (
+            <div className="space-y-2 p-2">
+              <Skeleton className="h-11 w-full" />
+              <Skeleton className="h-11 w-full" />
+            </div>
+          ) : error !== null ? (
+            <p className="rounded-md border border-destructive/40 p-3 text-sm text-destructive">
+              {error}
+            </p>
+          ) : targets.length === 0 ? (
+            <p className="p-3 text-sm text-muted-foreground">No media players were found.</p>
+          ) : (
+            <div className="max-h-72 overflow-y-auto">
+              {targets.map((target) => {
+                const checked = selectedTargetIds.includes(target.id);
+                return (
+                  <label
+                    key={target.id}
+                    className="flex min-h-[var(--touch-target-size)] cursor-pointer items-center gap-3 rounded-md px-2 py-1.5 hover:bg-accent/10"
+                  >
+                    <Checkbox
+                      checked={checked}
+                      disabled={disabled}
+                      aria-label={`${checked ? "Remove" : "Add"} ${target.label}`}
+                      onCheckedChange={(next) => {
+                        onChange(
+                          next === true
+                            ? [...selectedTargetIds, target.id]
+                            : selectedTargetIds.filter((id) => id !== target.id),
+                        );
+                      }}
+                    />
+                    <span className="min-w-0 truncate text-sm">{target.label}</span>
+                  </label>
+                );
+              })}
+            </div>
+          )}
+        </PopoverContent>
+      </Popover>
+      {!canConfigure ? (
+        <p className="text-xs text-muted-foreground">
+          Editing access is required to change the saved device selection.
+        </p>
+      ) : null}
+    </div>
   );
 }
 

@@ -63,6 +63,12 @@ export type RenderWidgetOptions = {
    *  Required only when such a binding is present. */
   instanceId?: string;
   targetId?: string | null;
+  /** Dashboard placement identity, present when a host-level media player can
+   *  persist its device picker selection. */
+  dashboardId?: string;
+  placementId?: string;
+  selectedTargetIds?: string[];
+  canConfigurePlacement?: boolean;
   supportsMediaSource?: boolean;
   supportsMediaTarget?: boolean;
   onExecute: WidgetExecute;
@@ -125,6 +131,10 @@ export function renderWidget({
   resourceKinds,
   instanceId,
   targetId = null,
+  dashboardId,
+  placementId,
+  selectedTargetIds = [],
+  canConfigurePlacement = false,
   supportsMediaSource = false,
   supportsMediaTarget = false,
   onExecute,
@@ -143,6 +153,10 @@ export function renderWidget({
       <MediaPlayerWidget
         instanceId={instanceId}
         targetId={targetId}
+        dashboardId={dashboardId}
+        placementId={placementId}
+        selectedTargetIds={selectedTargetIds}
+        canConfigurePlacement={canConfigurePlacement}
         showBrowser={binding.mediaPlayer.config.showBrowser === true}
         supportsMediaSource={supportsMediaSource}
         supportsMediaTarget={supportsMediaTarget}

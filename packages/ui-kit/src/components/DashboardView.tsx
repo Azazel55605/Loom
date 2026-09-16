@@ -916,6 +916,7 @@ export function DashboardView({
                         : undefined
                     }
                     editing={editingLayout}
+                    canEditPlacement={canEdit}
                     onEditBindings={setBindingsFor}
                     onDelete={setRemoving}
                     onNavigateDashboard={onNavigateDashboard}
@@ -951,6 +952,7 @@ export function DashboardView({
                     group={group}
                     live={live}
                     editing={editingLayout}
+                    canEditPlacement={canEdit}
                     onEditBindings={setBindingsFor}
                     onNavigateDashboard={onNavigateDashboard}
                     onChanged={refreshDashboard}

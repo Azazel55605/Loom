@@ -2322,7 +2322,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn media_player_bindings_require_a_media_target_and_optional_source() {
+    async fn media_player_bindings_allow_host_device_selection_and_persist_it() {
         let app = test_app().await;
         let (owner, _) = setup_and_login(&app.router).await;
         let connector_id = create_debug_instance(&app.router, &owner, "Media binding").await;
@@ -2352,12 +2352,52 @@ mod tests {
         .await;
         assert_eq!(status, StatusCode::CREATED, "{created:#}");
 
+        let (status, host) = send(
+            &app.router,
+            post_json_auth(&format!("/dashboards/{dashboard_id}/placements"), &owner, {
+                let mut value = placement(None, false, 4);
+                value["selectedTargetIds"] =
+                    serde_json::json!([loom_core::connector::debug::MEDIA_TARGET_ID]);
+                value
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED, "{host:#}");
+        assert_eq!(
+            host["selectedTargetIds"],
+            serde_json::json!([loom_core::connector::debug::MEDIA_TARGET_ID])
+        );
+
+        let (status, host_detail) = send(
+            &app.router,
+            get_with_auth(
+                &format!("/connector-instances/{connector_id}"),
+                &bearer(&owner),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{host_detail:#}");
+        assert_eq!(host_detail["supportsMediaTarget"], true);
+
+        let placement_id = host["id"].as_str().expect("placement id");
+        let (status, updated) = send(
+            &app.router,
+            patch_json_auth(
+                &format!("/dashboards/{dashboard_id}/placements/{placement_id}"),
+                &owner,
+                serde_json::json!({ "selectedTargetIds": [] }),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{updated:#}");
+        assert_eq!(updated["selectedTargetIds"], serde_json::json!([]));
+
         let (status, rejected) = send(
             &app.router,
-            post_json_auth(
-                &format!("/dashboards/{dashboard_id}/placements"),
+            patch_json_auth(
+                &format!("/dashboards/{dashboard_id}/placements/{placement_id}"),
                 &owner,
-                placement(None, false, 4),
+                serde_json::json!({ "selectedTargetIds": ["not-a-player"] }),
             ),
         )
         .await;

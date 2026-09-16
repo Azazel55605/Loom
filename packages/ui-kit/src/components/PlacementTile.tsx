@@ -110,6 +110,7 @@ export function PlacementTile({
   onSelectedChange,
   onAddToGroup,
   groupMember,
+  canEditPlacement = false,
 }: {
   /** The dashboard this tile lives on. The click endpoint is scoped to it. */
   dashboardId: string;
@@ -121,6 +122,8 @@ export function PlacementTile({
   actionLive?: LiveStatus;
   /** Whether the dashboard is in layout-edit mode. Owner/Editor only. */
   editing: boolean;
+  /** Dashboard Editor/Owner access, required to persist widget-owned state. */
+  canEditPlacement?: boolean;
   onEditBindings: (placement: DashboardPlacement) => void;
   onDelete?: (placement: DashboardPlacement) => void;
   /**
@@ -162,6 +165,7 @@ export function PlacementTile({
     onSelectedChange,
     onAddToGroup,
     groupMember,
+    canEditPlacement,
   };
 
   // A placement with no connector has no status, no instance detail to fetch
@@ -189,6 +193,8 @@ type PlacementTileProps = {
    * different from the connector whose widgets this tile displays. */
   actionLive?: LiveStatus;
   editing: boolean;
+  /** Dashboard Editor/Owner access, required to persist widget-owned state. */
+  canEditPlacement?: boolean;
   onEditBindings: (placement: DashboardPlacement) => void;
   onDelete?: (placement: DashboardPlacement) => void;
   onNavigateDashboard?: (dashboardId: string) => void;
@@ -228,6 +234,7 @@ function ConnectorPlacementTile({
   onSelectedChange,
   onAddToGroup,
   groupMember,
+  canEditPlacement = false,
 }: PlacementTileProps & { connector: ConnectorInstanceSummary }) {
   const api = useApiClient();
   const { user } = useAuth();
@@ -651,6 +658,10 @@ function ConnectorPlacementTile({
                   resourceKinds: resourceKinds.data,
                   instanceId: instance.id,
                   targetId: placement.targetId,
+                  dashboardId,
+                  placementId: placement.id,
+                  selectedTargetIds: placement.selectedTargetIds ?? [],
+                  canConfigurePlacement: canEditPlacement,
                   supportsMediaSource: detail.data.supportsMediaSource,
                   supportsMediaTarget: detail.data.supportsMediaTarget,
                   onExecute: runAction,
@@ -701,6 +712,8 @@ function ConnectorPlacementTile({
       <ConnectorDetailModal
         // Narrowed for the modal, which has no meaning without an instance.
         placement={{ ...placement, connector: instance }}
+        dashboardId={dashboardId}
+        canEditPlacement={canEditPlacement}
         open={detailOpen}
         onOpenChange={setDetailOpen}
         focus={detailFocus}

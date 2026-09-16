@@ -814,6 +814,9 @@ export type DashboardPlacement = {
   connector: ConnectorInstanceSummary | null;
   /** Addressed connector sub-target, or `null` for its host/aggregate view. */
   targetId: string | null;
+  /** Player targets selected by a host-level MediaPlayer widget. The first is
+   *  its primary; the remainder are native-group or fan-out members. */
+  selectedTargetIds?: string[];
   /**
    * The placement's **standalone** geometry.
    *
@@ -957,6 +960,8 @@ export type CreateDashboardPlacementRequest = {
   connectorInstanceId?: string | null;
   /** Omit or send `null` for the connector's host/aggregate view. */
   targetId?: string | null;
+  /** Host-level MediaPlayer selection. Omit for an initially empty picker. */
+  selectedTargetIds?: string[];
   positionX: number;
   positionY: number;
   width: number;
@@ -985,6 +990,8 @@ export type UpdateDashboardPlacementRequest = {
   height?: number;
   /** `null` selects the host view. Existing placement UI keeps this read-only. */
   targetId?: string | null;
+  /** Replaces the host-level MediaPlayer device selection. */
+  selectedTargetIds?: string[];
   widgetBindings?: WidgetBinding[];
   /** Absent leaves the click behaviour alone; `null` removes it. A static tile
    *  may not have it removed — the backend answers 400. */
@@ -1733,6 +1740,13 @@ export type MediaTransportCommand =
   | "toggleShuffle"
   | "toggleRepeat";
 
+export type MediaGroupMode = "native" | "fanOut";
+
+export type MediaGroupingResponse = {
+  grouped: boolean;
+  mode: MediaGroupMode | null;
+};
+
 function mediaTargetQuery(targetId: string): string {
   return `targetId=${encodeURIComponent(targetId)}`;
 }
@@ -1797,6 +1811,31 @@ function setVolume(runtime: ApiRuntime, instanceId: string, targetId: string, pe
     runtime,
     `/connector-instances/${encodeURIComponent(instanceId)}/media/volume`,
     { method: "POST", body: { targetId, percent } },
+  );
+}
+
+function joinGroup(
+  runtime: ApiRuntime,
+  instanceId: string,
+  targetId: string,
+  memberTargetIds: string[],
+): Promise<MediaGroupingResponse> {
+  return authorizedRequest<MediaGroupingResponse>(
+    runtime,
+    `/connector-instances/${encodeURIComponent(instanceId)}/media/join-group`,
+    { method: "POST", body: { targetId, memberTargetIds } },
+  );
+}
+
+function leaveGroup(
+  runtime: ApiRuntime,
+  instanceId: string,
+  targetId: string,
+): Promise<MediaGroupingResponse> {
+  return authorizedRequest<MediaGroupingResponse>(
+    runtime,
+    `/connector-instances/${encodeURIComponent(instanceId)}/media/leave-group`,
+    { method: "POST", body: { targetId } },
   );
 }
 
@@ -2901,6 +2940,10 @@ export function createApiClient(options: {
       seek(runtime, instanceId, targetId, positionSeconds),
     setVolume: (instanceId: string, targetId: string, percent: number) =>
       setVolume(runtime, instanceId, targetId, percent),
+    joinGroup: (instanceId: string, targetId: string, memberTargetIds: string[]) =>
+      joinGroup(runtime, instanceId, targetId, memberTargetIds),
+    leaveGroup: (instanceId: string, targetId: string) =>
+      leaveGroup(runtime, instanceId, targetId),
     discoverConnectorResources: (id: string, signal?: AbortSignal) =>
       discoverConnectorResources(runtime, id, signal),
     discoverForType: (typeId: string, candidateConfig: unknown, signal?: AbortSignal) =>

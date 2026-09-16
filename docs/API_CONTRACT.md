@@ -3298,6 +3298,7 @@ group, never in `placements`.
         "displayFields": []
       },
       "targetId": null,
+      "selectedTargetIds": [],
       "positionX": 0,
       "positionY": 0,
       "width": 2,
@@ -3340,6 +3341,7 @@ Within a placement:
 | Field | JSON type | Meaning | Nullability |
 | --- | --- | --- | --- |
 | `connector` | object | The cached connector summary this tile shows. | **`null` for a static tile** — one created without a `connectorInstanceId`. Such a tile has no `targetId`, an empty `widgetBindings`, and a non-null `placementAction`. |
+| `selectedTargetIds` | array of strings | Saved player selection for a host-level `mediaPlayer` binding. The first id is the primary and later ids are grouping members. | Always present; normally empty outside host-level media placements. |
 | `placementAction` | object | What clicking this tile does. See [`PlacementAction`](#placementaction). | `null` for a tile that only displays. |
 | `label` | string | What a static tile says. | **Always `null` when `connector` is set** — that tile's name is the connector's. May also be `null` on a static tile, which the client then names from its action. |
 | `icon` | string | A static tile's icon, in the same `lucide:`/`brand:` reference convention as `ConnectorMetadata.icon`. An unresolvable reference falls back client-side. | As `label`. |
@@ -3522,6 +3524,11 @@ Editor or Owner.
 
 `targetId` is optional/null for the host view. When present, the connector must
 support sub-targets and the id must appear in a live enumeration.
+`selectedTargetIds` is optional and defaults to `[]`. A non-empty selection is
+valid only for a host-level placement containing a `mediaPlayer` binding; every
+id must resolve to a distinct live media target. The first id is the primary
+used for playback-state/queue reads and the rest are passed to the media
+grouping endpoint.
 `widgetBindings` may be omitted, in which case the connector's target-specific
 default layout is stored. Width and height must each meet the live connector's
 `metadata.minSize`.
@@ -3612,8 +3619,8 @@ Editor or Owner. Any omitted field remains unchanged:
 { "positionX": 2, "positionY": 1, "width": 4, "height": 3 }
 ```
 
-`positionX`, `positionY`, `width`, `height`, `targetId`, `widgetBindings`,
-`placementAction`, `label`, and `icon` are mutable; the connector instance is
+`positionX`, `positionY`, `width`, `height`, `targetId`, `selectedTargetIds`,
+`widgetBindings`, `placementAction`, `label`, and `icon` are mutable; the connector instance is
 fixed. `label` and `icon` follow the same absent/null/value convention as
 `placementAction`, and the same connector-less-only rule as create. Size and binding
 validation is identical to create. Returns the updated placement on 200, 403 for

@@ -52,6 +52,7 @@ export function GroupTile({
   group,
   live,
   editing,
+  canEditPlacement,
   onEditBindings,
   onNavigateDashboard,
   onChanged,
@@ -60,6 +61,7 @@ export function GroupTile({
   group: DashboardPlacementGroup;
   live: Record<string, LiveStatus>;
   editing: boolean;
+  canEditPlacement: boolean;
   onEditBindings: (placement: DashboardPlacement) => void;
   /** Passed through to members: a grouped tile is still clickable if it was
    *  clickable standing alone. See `PlacementTile`. */
@@ -224,6 +226,7 @@ export function GroupTile({
                     : undefined
                 }
                 editing={editing}
+                canEditPlacement={canEditPlacement}
                 onEditBindings={onEditBindings}
                 onNavigateDashboard={onNavigateDashboard}
                 groupMember={

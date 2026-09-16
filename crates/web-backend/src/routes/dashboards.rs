@@ -51,6 +51,8 @@ struct PlacementRow {
     /// target, and an empty `widget_bindings`.
     connector_instance_id: Option<String>,
     target_id: Option<String>,
+    /// JSON-encoded target ids selected by a host-level media-player widget.
+    selected_target_ids: String,
     /// Retained while the placement is grouped, and not read by the renderer
     /// then — the group's bounding box governs instead. This is the geometry
     /// the placement returns to when it is ungrouped, which is what makes
@@ -328,6 +330,9 @@ struct PlacementResponse {
     connector: Option<ConnectorInstanceResponse>,
     /// Addressed connector sub-target, or null for the aggregate view.
     target_id: Option<String>,
+    /// Player targets selected by a host-level media-player widget. Empty for
+    /// ordinary and fixed-target placements.
+    selected_target_ids: Vec<String>,
     /// The placement's *standalone* geometry. Ignored by the grid while this
     /// placement is a group member, and preserved so ungrouping restores it.
     position_x: i64,
@@ -449,6 +454,8 @@ pub(super) struct CreatePlacementRequest {
     /// because a tile that neither shows nor does anything is not a tile.
     connector_instance_id: Option<String>,
     target_id: Option<String>,
+    #[serde(default)]
+    selected_target_ids: Vec<String>,
     position_x: i64,
     position_y: i64,
     width: i64,
@@ -510,6 +517,9 @@ pub(super) struct UpdatePlacementRequest {
     /// Absent leaves the target unchanged; null returns to the aggregate view.
     #[serde(default, deserialize_with = "present_option")]
     target_id: Option<Option<String>>,
+    /// Absent leaves the saved media selection unchanged. An empty array
+    /// clears it without changing the placement's host-level target.
+    selected_target_ids: Option<Vec<String>>,
     position_x: Option<i64>,
     position_y: Option<i64>,
     width: Option<i64>,
@@ -1254,8 +1264,11 @@ pub(super) async fn create_placement(
                 request.target_id.as_deref(),
                 request.width,
                 request.height,
-                request.widget_bindings,
-                None,
+                PlacementBindingInput {
+                    requested: request.widget_bindings,
+                    existing: None,
+                },
+                &request.selected_target_ids,
             )
             .await
             {
@@ -1272,6 +1285,11 @@ pub(super) async fn create_placement(
             if request.target_id.is_some() {
                 return bad_request(
                     "targetId requires a connectorInstanceId: there is no connector to address",
+                );
+            }
+            if !request.selected_target_ids.is_empty() {
+                return bad_request(
+                    "selectedTargetIds requires a connector-backed media-player placement",
                 );
             }
             if request.placement_action.is_none() {
@@ -1299,6 +1317,10 @@ pub(super) async fn create_placement(
         Ok(value) => value,
         Err(response) => return *response,
     };
+    let serialized_selected_targets = match serde_json::to_string(&request.selected_target_ids) {
+        Ok(value) => value,
+        Err(error) => return internal_error("serializing selected media targets", error),
+    };
 
     let label = trimmed_or_none(request.label.as_deref());
     let icon = trimmed_or_none(request.icon.as_deref());
@@ -1308,8 +1330,8 @@ pub(super) async fn create_placement(
     if let Err(error) = sqlx::query(
         "INSERT INTO dashboard_placements \
          (id, dashboard_id, connector_instance_id, position_x, position_y, width, height, \
-          target_id, widget_bindings, placement_action, label, icon, created_at) \
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+          target_id, selected_target_ids, widget_bindings, placement_action, label, icon, created_at) \
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
     )
     .bind(&placement_id)
     .bind(&id)
@@ -1319,6 +1341,7 @@ pub(super) async fn create_placement(
     .bind(request.width)
     .bind(request.height)
     .bind(&request.target_id)
+    .bind(&serialized_selected_targets)
     .bind(&serialized)
     .bind(&serialized_action)
     .bind(&label)
@@ -1334,6 +1357,7 @@ pub(super) async fn create_placement(
         id: placement_id,
         connector_instance_id: request.connector_instance_id,
         target_id: request.target_id,
+        selected_target_ids: serialized_selected_targets,
         position_x: request.position_x,
         position_y: request.position_y,
         width: request.width,
@@ -1386,6 +1410,13 @@ pub(super) async fn update_placement(
     let target_id = request
         .target_id
         .unwrap_or_else(|| existing.target_id.clone());
+    let selected_target_ids = match &request.selected_target_ids {
+        Some(ids) => ids.clone(),
+        None => match decode_selected_target_ids(&existing.selected_target_ids) {
+            Ok(ids) => ids,
+            Err(response) => return *response,
+        },
+    };
 
     // Absent leaves what is stored; `null` clears it; a value replaces it.
     let action = match &request.placement_action {
@@ -1410,8 +1441,11 @@ pub(super) async fn update_placement(
                 target_id.as_deref(),
                 width,
                 height,
-                request.widget_bindings,
-                Some(stored_bindings),
+                PlacementBindingInput {
+                    requested: request.widget_bindings,
+                    existing: Some(stored_bindings),
+                },
+                &selected_target_ids,
             )
             .await
             {
@@ -1426,6 +1460,11 @@ pub(super) async fn update_placement(
             if target_id.is_some() {
                 return bad_request(
                     "targetId requires a connectorInstanceId: there is no connector to address",
+                );
+            }
+            if !selected_target_ids.is_empty() {
+                return bad_request(
+                    "selectedTargetIds requires a connector-backed media-player placement",
                 );
             }
             if action.is_none() {
@@ -1460,6 +1499,10 @@ pub(super) async fn update_placement(
         Ok(value) => value,
         Err(response) => return *response,
     };
+    let serialized_selected_targets = match serde_json::to_string(&selected_target_ids) {
+        Ok(value) => value,
+        Err(error) => return internal_error("serializing selected media targets", error),
+    };
     let label = match &request.label {
         None => existing.label.clone(),
         Some(replacement) => trimmed_or_none(replacement.as_deref()),
@@ -1474,7 +1517,7 @@ pub(super) async fn update_placement(
     if let Err(error) = sqlx::query(
         "UPDATE dashboard_placements \
          SET position_x = ?, position_y = ?, width = ?, height = ?, target_id = ?, \
-             widget_bindings = ?, placement_action = ?, label = ?, icon = ? \
+             selected_target_ids = ?, widget_bindings = ?, placement_action = ?, label = ?, icon = ? \
          WHERE id = ? AND dashboard_id = ?",
     )
     .bind(position_x)
@@ -1482,6 +1525,7 @@ pub(super) async fn update_placement(
     .bind(width)
     .bind(height)
     .bind(&target_id)
+    .bind(&serialized_selected_targets)
     .bind(&serialized)
     .bind(&serialized_action)
     .bind(&label)
@@ -1500,6 +1544,7 @@ pub(super) async fn update_placement(
         width,
         height,
         target_id,
+        selected_target_ids: serialized_selected_targets,
         widget_bindings: serialized,
         placement_action: serialized_action,
         label,
@@ -2405,7 +2450,7 @@ async fn load_placements(
     // `group_order` is the tiebreak for members and is NULL here, so one query
     // serves both: the ordering clause is simply inert for the standalone half.
     let rows = sqlx::query_as::<_, PlacementRow>(
-        "SELECT id, connector_instance_id, target_id, position_x, position_y, width, height, \
+        "SELECT id, connector_instance_id, target_id, selected_target_ids, position_x, position_y, width, height, \
                 widget_bindings, placement_action, label, icon, created_at, group_id \
          FROM dashboard_placements WHERE dashboard_id = ? \
          ORDER BY group_order, position_y, position_x, created_at",
@@ -2474,11 +2519,13 @@ async fn placement_response(state: &AppState, row: PlacementRow) -> RouteResult<
         None => None,
     };
     let placement_action = decode_placement_action(row.placement_action.as_deref())?;
+    let selected_target_ids = decode_selected_target_ids(&row.selected_target_ids)?;
 
     Ok(PlacementResponse {
         id: row.id,
         connector,
         target_id: row.target_id,
+        selected_target_ids,
         position_x: row.position_x,
         position_y: row.position_y,
         width: row.width,
@@ -2515,7 +2562,7 @@ async fn load_placement_row(
     placement_id: &str,
 ) -> RouteResult<Option<PlacementRow>> {
     sqlx::query_as::<_, PlacementRow>(
-        "SELECT id, connector_instance_id, target_id, position_x, position_y, width, height, \
+        "SELECT id, connector_instance_id, target_id, selected_target_ids, position_x, position_y, width, height, \
                 widget_bindings, placement_action, label, icon, created_at, group_id \
          FROM dashboard_placements WHERE id = ? AND dashboard_id = ?",
     )
@@ -2540,6 +2587,11 @@ fn decode_placement_action(stored: Option<&str>) -> RouteResult<Option<Placement
         .map(serde_json::from_str)
         .transpose()
         .map_err(|error| Box::new(internal_error("reading a stored placement action", error)))
+}
+
+fn decode_selected_target_ids(stored: &str) -> RouteResult<Vec<String>> {
+    serde_json::from_str(stored)
+        .map_err(|error| Box::new(internal_error("reading selected media targets", error)))
 }
 
 /// Width and height a placement row would accept.
@@ -2687,14 +2739,19 @@ async fn validate_advertised_placement_action(
     Ok(())
 }
 
+struct PlacementBindingInput {
+    requested: Option<Vec<WidgetBinding>>,
+    existing: Option<Vec<WidgetBinding>>,
+}
+
 async fn validate_placement(
     state: &AppState,
     connector_id: &str,
     target_id: Option<&str>,
     width: i64,
     height: i64,
-    requested_bindings: Option<Vec<WidgetBinding>>,
-    existing_bindings: Option<Vec<WidgetBinding>>,
+    binding_input: PlacementBindingInput,
+    selected_target_ids: &[String],
 ) -> RouteResult<Vec<WidgetBinding>> {
     let connector = resolve_connector_target(state, connector_id, target_id).await?;
 
@@ -2708,11 +2765,58 @@ async fn validate_placement(
         )));
     }
 
-    let bindings = requested_bindings
-        .or(existing_bindings)
+    let bindings = binding_input
+        .requested
+        .or(binding_input.existing)
         .unwrap_or_else(|| connector.default_layout_for(target_id).bindings);
     validate_widget_bindings(connector.as_ref(), target_id, &bindings).await?;
+    validate_selected_media_targets(
+        connector.as_ref(),
+        target_id,
+        &bindings,
+        selected_target_ids,
+    )
+    .await?;
     Ok(bindings)
+}
+
+async fn validate_selected_media_targets(
+    connector: &dyn Connector,
+    placement_target_id: Option<&str>,
+    bindings: &[WidgetBinding],
+    selected_target_ids: &[String],
+) -> RouteResult<()> {
+    if selected_target_ids.is_empty() {
+        return Ok(());
+    }
+    if placement_target_id.is_some() {
+        return Err(Box::new(bad_request(
+            "selectedTargetIds is only valid on a host-level placement",
+        )));
+    }
+    if !bindings
+        .iter()
+        .any(|binding| matches!(binding, WidgetBinding::MediaPlayer { .. }))
+    {
+        return Err(Box::new(bad_request(
+            "selectedTargetIds requires a mediaPlayer widget binding",
+        )));
+    }
+
+    let mut unique = HashSet::new();
+    for target_id in selected_target_ids {
+        if target_id.trim().is_empty() || !unique.insert(target_id) {
+            return Err(Box::new(bad_request(
+                "selectedTargetIds must contain unique, non-empty target ids",
+            )));
+        }
+        if connector.as_media_target(Some(target_id)).is_none() {
+            return Err(Box::new(bad_request(format!(
+                "selectedTargetIds names a target that cannot play media: {target_id}"
+            ))));
+        }
+    }
+    Ok(())
 }
 
 /// Resolves a stored connector reference and, when present, verifies its live
@@ -2775,6 +2879,27 @@ async fn validate_widget_bindings(
     target_id: Option<&str>,
     bindings: &[WidgetBinding],
 ) -> RouteResult<()> {
+    // A host-level MediaPlayer is the device-picker form: it has no fixed
+    // target yet, but is valid when this connector exposes at least one
+    // playable sub-target. Resolve this once rather than once per binding.
+    let has_host_media_player = target_id.is_none()
+        && bindings
+            .iter()
+            .any(|binding| matches!(binding, WidgetBinding::MediaPlayer { .. }));
+    let host_has_media_target = if has_host_media_player && connector.supports_sub_targets() {
+        connector
+            .list_sub_targets()
+            .await
+            .map_err(|error| {
+                Box::new(bad_request(format!(
+                    "could not validate host media targets against the live connector: {error}"
+                )))
+            })?
+            .iter()
+            .any(|target| connector.as_media_target(Some(&target.id)).is_some())
+    } else {
+        false
+    };
     // Each binding kind resolves against its own namespace: a display binding
     // names a data point, an action binding names an action, and a
     // resource-kind binding names a browsable kind. They are all strings and
@@ -2852,7 +2977,7 @@ async fn validate_widget_bindings(
                 }
             }
             WidgetBinding::MediaPlayer { config } => {
-                if connector.as_media_target(target_id).is_none() {
+                if connector.as_media_target(target_id).is_none() && !host_has_media_target {
                     unsupported_media_player = true;
                 }
                 if config
