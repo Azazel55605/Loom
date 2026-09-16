@@ -450,6 +450,12 @@ export type WidgetBinding =
         /** Action invoked with `{ itemId }`, or null for browse-only leaves. */
         actionId: string | null;
       };
+    }
+  | {
+      /** Composite playback surface bound to the placement's media target. */
+      mediaPlayer: {
+        config: { showBrowser?: boolean };
+      };
     };
 
 /**
@@ -632,6 +638,10 @@ export type ConnectorInstanceDetail = ConnectorInstanceSummary & {
   supportsSubTargets: boolean;
   /** Whether this connector exposes generic hierarchical browse/search data. */
   supportsBrowsableContent: boolean;
+  /** Whether this detail context can browse and resolve playable media. */
+  supportsMediaSource: boolean;
+  /** Whether this detail context is a media playback target. */
+  supportsMediaTarget: boolean;
   /** Type id this live instance can discover, or null when unsupported. */
   discoverableType: string | null;
   /** Whether this connector can be asked if what it manages is out of date. */
@@ -1600,11 +1610,13 @@ function getConnectorTags(runtime: ApiRuntime, signal?: AbortSignal): Promise<st
 function getConnectorInstance(
   runtime: ApiRuntime,
   id: string,
+  targetId?: string | null,
   signal?: AbortSignal,
 ): Promise<ConnectorInstanceDetail> {
+  const query = targetId ? `?targetId=${encodeURIComponent(targetId)}` : "";
   return authorizedRequest<ConnectorInstanceDetail>(
     runtime,
-    `/connector-instances/${encodeURIComponent(id)}`,
+    `/connector-instances/${encodeURIComponent(id)}${query}`,
     { signal },
   );
 }
@@ -1680,6 +1692,113 @@ export type BrowsableItem = {
   thumbnail: string | null;
   metadata: Record<string, unknown>;
 };
+
+/** Chrono's stable Serde duration representation: seconds plus nanoseconds. */
+export type MediaDuration = [number, number];
+
+export type PlaybackStatus = "playing" | "paused" | "stopped";
+export type RepeatMode = "off" | "one" | "all";
+export type MediaKind = "audio" | { video: { live: boolean } };
+
+export type MediaItem = {
+  id: string;
+  title: string;
+  kind: MediaKind;
+  artist: string | null;
+  album: string | null;
+  artworkRef: string | null;
+  duration: MediaDuration | null;
+};
+
+export type PlaybackState = {
+  status: PlaybackStatus;
+  position: MediaDuration | null;
+  volumePercent: number;
+  currentItem: MediaItem | null;
+  shuffle: boolean;
+  repeat: RepeatMode;
+};
+
+export type Queue = {
+  items: MediaItem[];
+  currentIndex: number | null;
+};
+
+export type MediaTransportCommand =
+  | "pause"
+  | "resume"
+  | "stop"
+  | "skipNext"
+  | "skipPrevious"
+  | "toggleShuffle"
+  | "toggleRepeat";
+
+function mediaTargetQuery(targetId: string): string {
+  return `targetId=${encodeURIComponent(targetId)}`;
+}
+
+function getPlaybackState(
+  runtime: ApiRuntime,
+  instanceId: string,
+  targetId: string,
+  signal?: AbortSignal,
+): Promise<PlaybackState> {
+  return authorizedRequest<PlaybackState>(
+    runtime,
+    `/connector-instances/${encodeURIComponent(instanceId)}/media/playback-state?${mediaTargetQuery(targetId)}`,
+    { signal },
+  );
+}
+
+function getQueue(
+  runtime: ApiRuntime,
+  instanceId: string,
+  targetId: string,
+  signal?: AbortSignal,
+): Promise<Queue> {
+  return authorizedRequest<Queue>(
+    runtime,
+    `/connector-instances/${encodeURIComponent(instanceId)}/media/queue?${mediaTargetQuery(targetId)}`,
+    { signal },
+  );
+}
+
+function playItem(runtime: ApiRuntime, instanceId: string, targetId: string, itemId: string) {
+  return authorizedRequest<ActionResult>(
+    runtime,
+    `/connector-instances/${encodeURIComponent(instanceId)}/media/play-item`,
+    { method: "POST", body: { targetId, itemId } },
+  );
+}
+
+function sendTransportCommand(
+  runtime: ApiRuntime,
+  instanceId: string,
+  targetId: string,
+  command: MediaTransportCommand,
+) {
+  return authorizedRequest<ActionResult>(
+    runtime,
+    `/connector-instances/${encodeURIComponent(instanceId)}/media/transport`,
+    { method: "POST", body: { targetId, command } },
+  );
+}
+
+function seek(runtime: ApiRuntime, instanceId: string, targetId: string, positionSeconds: number) {
+  return authorizedRequest<ActionResult>(
+    runtime,
+    `/connector-instances/${encodeURIComponent(instanceId)}/media/seek`,
+    { method: "POST", body: { targetId, positionSeconds } },
+  );
+}
+
+function setVolume(runtime: ApiRuntime, instanceId: string, targetId: string, percent: number) {
+  return authorizedRequest<ActionResult>(
+    runtime,
+    `/connector-instances/${encodeURIComponent(instanceId)}/media/volume`,
+    { method: "POST", body: { targetId, percent } },
+  );
+}
 
 function browseConnectorContent(
   runtime: ApiRuntime,
@@ -2744,8 +2863,8 @@ export function createApiClient(options: {
     getConnectorTypes: (signal?: AbortSignal) => getConnectorTypes(runtime, signal),
     getConnectorInstances: (signal?: AbortSignal) => getConnectorInstances(runtime, signal),
     getConnectorTags: (signal?: AbortSignal) => getConnectorTags(runtime, signal),
-    getConnectorInstance: (id: string, signal?: AbortSignal) =>
-      getConnectorInstance(runtime, id, signal),
+    getConnectorInstance: (id: string, targetId?: string | null, signal?: AbortSignal) =>
+      getConnectorInstance(runtime, id, targetId, signal),
     getSubTargets: (id: string, signal?: AbortSignal) => getSubTargets(runtime, id, signal),
     getResourceKinds: (id: string, targetId?: string | null, signal?: AbortSignal) =>
       getResourceKinds(runtime, id, targetId, signal),
@@ -2767,6 +2886,21 @@ export function createApiClient(options: {
       targetId?: string | null,
       signal?: AbortSignal,
     ) => searchConnectorContent(runtime, id, query, targetId, signal),
+    getPlaybackState: (instanceId: string, targetId: string, signal?: AbortSignal) =>
+      getPlaybackState(runtime, instanceId, targetId, signal),
+    getQueue: (instanceId: string, targetId: string, signal?: AbortSignal) =>
+      getQueue(runtime, instanceId, targetId, signal),
+    playItem: (instanceId: string, targetId: string, itemId: string) =>
+      playItem(runtime, instanceId, targetId, itemId),
+    sendTransportCommand: (
+      instanceId: string,
+      targetId: string,
+      command: MediaTransportCommand,
+    ) => sendTransportCommand(runtime, instanceId, targetId, command),
+    seek: (instanceId: string, targetId: string, positionSeconds: number) =>
+      seek(runtime, instanceId, targetId, positionSeconds),
+    setVolume: (instanceId: string, targetId: string, percent: number) =>
+      setVolume(runtime, instanceId, targetId, percent),
     discoverConnectorResources: (id: string, signal?: AbortSignal) =>
       discoverConnectorResources(runtime, id, signal),
     discoverForType: (typeId: string, candidateConfig: unknown, signal?: AbortSignal) =>

@@ -1876,6 +1876,18 @@ mod tests {
             )
         };
 
+        let (status, detail) = send(
+            &app.router,
+            get_with_auth(
+                &format!("/connector-instances/{id}?targetId={target_id}"),
+                &bearer(&access),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{detail:#}");
+        assert_eq!(detail["supportsMediaSource"], true);
+        assert_eq!(detail["supportsMediaTarget"], true);
+
         let (status, body) = send(
             &app.router,
             post_media(
@@ -1895,6 +1907,23 @@ mod tests {
         let playing: PlaybackState = serde_json::from_value(body).unwrap();
         assert_eq!(playing.status, PlaybackStatus::Playing);
         assert!(playing.position.unwrap() >= chrono::Duration::milliseconds(15));
+
+        let (status, queue) = send(
+            &app.router,
+            get_with_auth(
+                &format!("/connector-instances/{id}/media/queue?targetId={target_id}"),
+                &bearer(&access),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{queue:#}");
+        let current_index = queue["currentIndex"]
+            .as_u64()
+            .expect("playing queue has a current index") as usize;
+        assert_eq!(
+            queue["items"][current_index]["id"],
+            "collection-a/item-alpha"
+        );
 
         let transport = |command: &str| {
             post_media(
@@ -2044,6 +2073,52 @@ mod tests {
             send(&app.router, request(&other)).await.0,
             StatusCode::FORBIDDEN
         );
+    }
+
+    #[tokio::test]
+    async fn media_player_bindings_require_a_media_target_and_optional_source() {
+        let app = test_app().await;
+        let (owner, _) = setup_and_login(&app.router).await;
+        let connector_id = create_debug_instance(&app.router, &owner, "Media binding").await;
+        let dashboard_id = create_dashboard(&app.router, &owner, "Listening").await;
+        let placement = |target_id: Option<&str>, show_browser: bool, position_x: i64| {
+            serde_json::json!({
+                "connectorInstanceId": connector_id,
+                "targetId": target_id,
+                "positionX": position_x,
+                "positionY": 0,
+                "width": 4,
+                "height": 4,
+                "widgetBindings": [{
+                    "mediaPlayer": { "config": { "showBrowser": show_browser } }
+                }],
+            })
+        };
+
+        let (status, created) = send(
+            &app.router,
+            post_json_auth(
+                &format!("/dashboards/{dashboard_id}/placements"),
+                &owner,
+                placement(Some(loom_core::connector::debug::MEDIA_TARGET_ID), true, 0),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED, "{created:#}");
+
+        let (status, rejected) = send(
+            &app.router,
+            post_json_auth(
+                &format!("/dashboards/{dashboard_id}/placements"),
+                &owner,
+                placement(None, false, 4),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{rejected:#}");
+        assert!(rejected["error"]
+            .as_str()
+            .is_some_and(|message| message.contains("cannot play media")));
     }
 
     #[tokio::test]

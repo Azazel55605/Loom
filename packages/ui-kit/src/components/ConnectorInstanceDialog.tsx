@@ -81,8 +81,8 @@ export function ConnectorInstanceDialog({
   // fixed and cannot be changed (the backend has no route for it — a different
   // type is a different connector).
   const detail = useQuery({
-    queryKey: ["connector-instance", instance?.id],
-    queryFn: ({ signal }) => api.getConnectorInstance(instance!.id, signal),
+    queryKey: ["connector-instance", instance?.id, null],
+    queryFn: ({ signal }) => api.getConnectorInstance(instance!.id, null, signal),
     enabled: open && isEditing,
     retry: false,
   });

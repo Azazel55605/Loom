@@ -11,6 +11,7 @@ import { ResourceKindBrowser } from "@loom/ui-kit/components/ResourceKindBrowser
 import { GaugeSkeleton, GaugeWidget } from "@loom/ui-kit/widgets/Gauge";
 import { ImageDisplaySkeleton, ImageDisplayWidget } from "@loom/ui-kit/widgets/ImageDisplay";
 import { BrowsableListGrid } from "@loom/ui-kit/widgets/BrowsableListGrid";
+import { MediaPlayerSkeleton, MediaPlayerWidget } from "@loom/ui-kit/widgets/MediaPlayer";
 import { LogPreviewSkeleton, LogPreviewWidget } from "@loom/ui-kit/widgets/LogPreview";
 import { LogStreamSkeleton, LogStreamWidget } from "@loom/ui-kit/widgets/LogStream";
 import { MetricChartSkeleton, MetricChartWidget } from "@loom/ui-kit/widgets/MetricChart";
@@ -62,6 +63,8 @@ export type RenderWidgetOptions = {
    *  Required only when such a binding is present. */
   instanceId?: string;
   targetId?: string | null;
+  supportsMediaSource?: boolean;
+  supportsMediaTarget?: boolean;
   onExecute: WidgetExecute;
   /** Disables every control. Set for a viewer without `connectors.control`.
    *  Visibility only — the backend re-checks each request. */
@@ -122,6 +125,8 @@ export function renderWidget({
   resourceKinds,
   instanceId,
   targetId = null,
+  supportsMediaSource = false,
+  supportsMediaTarget = false,
   onExecute,
   disabled,
   unavailableReason,
@@ -131,6 +136,23 @@ export function renderWidget({
   onExpand,
 }: RenderWidgetOptions) {
   const revealedClassName = cn("motion-content-reveal", className);
+
+  if ("mediaPlayer" in binding) {
+    if (instanceId === undefined) return <MediaPlayerSkeleton className={className} expanded={size === "expanded"} />;
+    return (
+      <MediaPlayerWidget
+        instanceId={instanceId}
+        targetId={targetId}
+        showBrowser={binding.mediaPlayer.config.showBrowser === true}
+        supportsMediaSource={supportsMediaSource}
+        supportsMediaTarget={supportsMediaTarget}
+        disabled={disabled}
+        unavailableReason={unavailableReason}
+        expanded={size === "expanded"}
+        className={revealedClassName}
+      />
+    );
+  }
 
   if ("browsableList" in binding) {
     if (instanceId === undefined) {

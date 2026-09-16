@@ -101,12 +101,15 @@ contract: hierarchy, thumbnails, search, and an optional ordinary connector
 action. `MediaSourceCapable` remains the richer promise that media can be
 resolved for playback; generic browsing does not imply that.
 
-The backend plumbing is now complete: playback-state, play-item, transport,
+The backend plumbing is now complete: playback-state, queue, play-item, transport,
 seek, and volume endpoints enforce the existing connector permission boundary
 and write through the ordinary action-log lifecycle. DebugConnector proves both
 trait facets with its existing synthetic browse hierarchy and a mutex-protected
-fake player whose position advances in real time. A frontend media widget is
-still pending.
+fake player whose position advances in real time. The shared
+`MediaPlayerWidget` is also complete: it composes the existing Image and
+Browsable List/Grid primitives, uses local ticking between periodic server
+reconciliation, and exposes transport, seek, volume, queue, and optional source
+browsing through one target-scoped placement binding.
 
 ### Amendment: target-aware capability discovery
 
@@ -122,9 +125,9 @@ hard-code that limitation.
 ### Scope of the foundation phase
 
 The original foundation phase was traits and types only. The Image and generic
-browsing primitives, backend endpoints, and DebugConnector media fixture have
-since landed as described above. Media-specific frontend widgets and real
-integrations still follow on top of those shared rendering surfaces.
+browsing primitives, backend endpoints, DebugConnector media fixture, and
+shared media-player widget have since landed as described above. Real media
+integrations still follow on top of those shared surfaces.
 
 ## Consequences
 

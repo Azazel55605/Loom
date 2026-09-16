@@ -401,8 +401,9 @@ mod tests {
                 WidgetBinding::Display { data_point_id, .. } =>
                     ids.contains(&data_point_id.as_str()),
                 WidgetBinding::Action { action_id, .. } => action_id == ACTION_SET_POWER,
-                WidgetBinding::ResourceKindDisplay { .. } | WidgetBinding::BrowsableList { .. } =>
-                    false,
+                WidgetBinding::ResourceKindDisplay { .. }
+                | WidgetBinding::BrowsableList { .. }
+                | WidgetBinding::MediaPlayer { .. } => false,
             }));
     }
 

@@ -252,8 +252,8 @@ function ConnectorPlacementTile({
   const canControl = hasPermission(user?.permissions ?? [], PERMISSION_KEYS.connectorsControl);
 
   const detail = useQuery({
-    queryKey: ["connector-instance", instance.id],
-    queryFn: ({ signal }) => api.getConnectorInstance(instance.id, signal),
+    queryKey: ["connector-instance", instance.id, placement.targetId],
+    queryFn: ({ signal }) => api.getConnectorInstance(instance.id, placement.targetId, signal),
     retry: (failureCount, error) =>
       !(error instanceof ApiError && (error.isForbidden || error.status === 404)) &&
       !(error instanceof SessionExpiredError) &&
@@ -390,7 +390,7 @@ function ConnectorPlacementTile({
   const isBrowserTile =
     placement.widgetBindings.length === 1 &&
     placement.widgetBindings.some((binding) =>
-      "resourceKindDisplay" in binding || "browsableList" in binding);
+      "resourceKindDisplay" in binding || "browsableList" in binding || "mediaPlayer" in binding);
 
   if (detail.isPending) {
     return <PlacementTileSkeleton placement={placement} />;
@@ -651,6 +651,8 @@ function ConnectorPlacementTile({
                   resourceKinds: resourceKinds.data,
                   instanceId: instance.id,
                   targetId: placement.targetId,
+                  supportsMediaSource: detail.data.supportsMediaSource,
+                  supportsMediaTarget: detail.data.supportsMediaTarget,
                   onExecute: runAction,
                   // Controls are dead while the layout is being rearranged: a
                   // click meant to grab a card should not restart a service.
@@ -677,6 +679,10 @@ function ConnectorPlacementTile({
                         ? isBrowserTile
                           ? "min-h-0 flex-1"
                           : "col-span-full min-h-[12rem]"
+                        : "mediaPlayer" in binding
+                          ? isBrowserTile
+                            ? "min-h-0 flex-1"
+                            : "col-span-full min-h-[12rem]"
                       : "display" in binding && typeof binding.display.widgetType !== "string"
                         ? "col-span-full min-h-[8rem]"
                         : "display" in binding && binding.display.widgetType === "image"
@@ -917,8 +923,8 @@ function StateAwarePlacementControl({
   const click = usePlacementClick({ dashboardId, placement });
   const instanceId = action?.type === "connectorAction" ? action.connectorInstanceId : "";
   const detail = useQuery({
-    queryKey: ["connector-instance", instanceId],
-    queryFn: ({ signal }) => api.getConnectorInstance(instanceId, signal),
+    queryKey: ["connector-instance", instanceId, null],
+    queryFn: ({ signal }) => api.getConnectorInstance(instanceId, null, signal),
     enabled: instanceId !== "",
     staleTime: 30_000,
   });

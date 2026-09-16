@@ -110,8 +110,8 @@ export function ConnectorCard({
   const canControl = hasPermission(user?.permissions ?? [], PERMISSION_KEYS.connectorsControl);
 
   const detail = useQuery({
-    queryKey: ["connector-instance", id],
-    queryFn: ({ signal }) => api.getConnectorInstance(id, signal),
+    queryKey: ["connector-instance", id, null],
+    queryFn: ({ signal }) => api.getConnectorInstance(id, null, signal),
     // A 403 or a vanished instance is not worth hammering; a transient network
     // failure is worth one retry.
     retry: (failureCount, error) =>

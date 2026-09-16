@@ -33,6 +33,7 @@ export function BrowsableListGrid({
   actionId,
   onExecute,
   disabled = false,
+  onLeafClick,
   className,
 }: {
   instanceId: string;
@@ -40,6 +41,8 @@ export function BrowsableListGrid({
   actionId?: string | null;
   onExecute: WidgetExecute;
   disabled?: boolean;
+  /** Overrides the ordinary binding action for media and other composites. */
+  onLeafClick?: (item: BrowsableItem) => Promise<unknown> | unknown;
   className?: string;
 }) {
   const api = useApiClient();
@@ -62,9 +65,10 @@ export function BrowsableListGrid({
   });
 
   const selection = useMutation({
-    mutationFn: (item: BrowsableItem) => {
+    mutationFn: async (item: BrowsableItem) => {
+      if (onLeafClick) return await onLeafClick(item);
       if (!actionId) throw new Error("This browser has no selection action.");
-      return onExecute(actionId, { itemId: item.id });
+      return await onExecute(actionId, { itemId: item.id });
     },
   });
 
@@ -73,7 +77,7 @@ export function BrowsableListGrid({
       setQueryText("");
       setDebouncedQuery("");
       setPath((current) => [...current, { id: item.id, label: item.label }]);
-    } else if (actionId) {
+    } else if (actionId || onLeafClick) {
       selection.mutate(item);
     }
   };
@@ -132,7 +136,7 @@ export function BrowsableListGrid({
       {result.data && result.data.length > 0 ? (
         <div className={cn(view === "grid" ? "grid grid-cols-[repeat(auto-fill,minmax(9rem,1fr))] gap-3" : "flex flex-col gap-1")}>
           {result.data.map((item) => {
-            const actionable = item.kind === "container" || Boolean(actionId);
+            const actionable = item.kind === "container" || Boolean(actionId) || onLeafClick !== undefined;
             const pending = selection.isPending && selection.variables?.id === item.id;
             const meta = metadataText(item);
             const content = view === "grid" ? (

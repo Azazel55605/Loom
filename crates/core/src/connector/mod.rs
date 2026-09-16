@@ -1583,7 +1583,7 @@ pub enum ActionWidgetType {
 ///
 /// Externally tagged, so each value is a single-key object (`{"display": …}`,
 /// `{"action": …}`, `{"resourceKindDisplay": …}`, or
-/// `{"browsableList": …}`) — the same shape as
+/// `{"browsableList": …}`, or `{"mediaPlayer": …}`) — the same shape as
 /// [`ConnectorError`] and [`DisplayWidgetType::MetricChart`].
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", rename_all_fields = "camelCase")]
@@ -1651,6 +1651,20 @@ pub enum WidgetBinding {
         #[serde(default)]
         action_id: Option<String>,
     },
+    /// A composite media playback surface for a target that implements
+    /// [`MediaTargetCapable`].
+    ///
+    /// `config.showBrowser` optionally embeds the connector's host-level
+    /// [`MediaSourceCapable`] hierarchy beneath the transport controls.
+    MediaPlayer {
+        /// Media-player presentation options. Always an object.
+        #[serde(default = "empty_object")]
+        config: Value,
+    },
+}
+
+fn empty_object() -> Value {
+    Value::Object(Default::default())
 }
 
 impl WidgetBinding {
@@ -1684,6 +1698,13 @@ impl WidgetBinding {
         Self::BrowsableList { action_id }
     }
 
+    /// A media player, optionally with its source browser visible.
+    pub fn media_player(show_browser: bool) -> Self {
+        Self::MediaPlayer {
+            config: serde_json::json!({ "showBrowser": show_browser }),
+        }
+    }
+
     /// Attaches widget-specific configuration, for chaining onto
     /// [`WidgetBinding::display`] or [`WidgetBinding::action`].
     ///
@@ -1691,7 +1712,9 @@ impl WidgetBinding {
     #[must_use]
     pub fn with_config(mut self, config: Value) -> Self {
         match &mut self {
-            Self::Display { config: slot, .. } | Self::Action { config: slot, .. } => {
+            Self::Display { config: slot, .. }
+            | Self::Action { config: slot, .. }
+            | Self::MediaPlayer { config: slot } => {
                 *slot = config;
             }
             Self::ResourceKindDisplay { .. } | Self::BrowsableList { .. } => {}
@@ -2063,6 +2086,9 @@ mod tests {
                         if let Some(action_id) = action_id {
                             assert!(action_ids.contains(&action_id.as_str()));
                         }
+                    }
+                    WidgetBinding::MediaPlayer { .. } => {
+                        assert!(connector.as_media_target(None).is_some());
                     }
                 }
             }

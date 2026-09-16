@@ -140,8 +140,8 @@ export function AddPlacementDialog({
   });
 
   const detail = useQuery({
-    queryKey: ["connector-instance", instanceId],
-    queryFn: ({ signal }) => api.getConnectorInstance(instanceId as string, signal),
+    queryKey: ["connector-instance", instanceId, null],
+    queryFn: ({ signal }) => api.getConnectorInstance(instanceId as string, null, signal),
     enabled: open && instanceId !== null,
   });
 
@@ -482,6 +482,8 @@ export function AddPlacementDialog({
                     actions={detail.data.actions}
                     resourceKinds={resourceKinds.data ?? []}
                     supportsBrowsableContent={detail.data.supportsBrowsableContent}
+                    supportsMediaSource={detail.data.supportsMediaSource}
+                    supportsMediaTarget={detail.data.supportsMediaTarget}
                     targetId={null}
                     value={bindings}
                     onChange={setBindings}

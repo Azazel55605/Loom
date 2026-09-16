@@ -127,9 +127,11 @@ export function PlacementActionEditor({
   const instanceId =
     value?.type === "connectorAction" ? value.connectorInstanceId : null;
 
+  const actionTargetId = value?.type === "connectorAction" ? value.targetId : null;
   const detail = useQuery({
-    queryKey: ["connector-instance", instanceId],
-    queryFn: ({ signal }) => api.getConnectorInstance(instanceId as string, signal),
+    queryKey: ["connector-instance", instanceId, actionTargetId],
+    queryFn: ({ signal }) =>
+      api.getConnectorInstance(instanceId as string, actionTargetId, signal),
     enabled: instanceId !== null,
   });
 
@@ -159,7 +161,6 @@ export function PlacementActionEditor({
     staleTime: 5 * 60_000,
   });
 
-  const actionTargetId = value?.type === "connectorAction" ? value.targetId : null;
   const availableActions: ConnectorAction[] = React.useMemo(() => {
     const direct = (detail.data?.actions ?? []).filter((action) =>
       matchesTarget(action, actionTargetId),

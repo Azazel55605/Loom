@@ -12,6 +12,10 @@ type ImageLoadState = {
 
 type ImageDisplayProps = DisplayWidgetProps & {
   expanded?: boolean;
+  /** Optional domain-specific empty-state icon; failure treatment stays shared. */
+  fallbackIcon?: React.ReactNode;
+  /** Composites that render their own metadata can suppress the caption. */
+  showCaption?: boolean;
 };
 
 /** Accepts only the two source forms promised by `DataPointValueType::Image`. */
@@ -55,6 +59,8 @@ export function ImageDisplayWidget({
   config,
   className,
   expanded = false,
+  fallbackIcon,
+  showCaption = true,
 }: ImageDisplayProps) {
   const source = imageSource(value);
   const fit = configString(config, "fit", "contain") === "cover" ? "cover" : "contain";
@@ -80,7 +86,7 @@ export function ImageDisplayWidget({
             role="img"
             aria-label={`${label}: image unavailable`}
           >
-            <ImageOff className="size-8" aria-hidden="true" />
+            {fallbackIcon ?? <ImageOff className="size-8" aria-hidden="true" />}
             <span className="text-sm">Image unavailable</span>
           </div>
         ) : null}
@@ -99,9 +105,11 @@ export function ImageDisplayWidget({
           />
         ) : null}
       </div>
-      <figcaption className="min-w-0 break-words text-xs text-muted-foreground">
-        {label}
-      </figcaption>
+      {showCaption ? (
+        <figcaption className="min-w-0 break-words text-xs text-muted-foreground">
+          {label}
+        </figcaption>
+      ) : null}
     </figure>
   );
 }

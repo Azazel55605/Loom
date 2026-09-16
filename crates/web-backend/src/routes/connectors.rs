@@ -236,6 +236,10 @@ pub struct ConnectorInstanceDetail {
     supports_sub_targets: bool,
     /// Whether this instance exposes generic hierarchical content.
     supports_browsable_content: bool,
+    /// Whether the selected detail context exposes a playable media source.
+    supports_media_source: bool,
+    /// Whether the selected detail context exposes a playback target.
+    supports_media_target: bool,
     /// Type id this live instance can discover, or null when unsupported.
     discoverable_type: Option<String>,
     /// Whether this connector can be asked if what it manages is out of date.
@@ -394,6 +398,7 @@ pub async fn get_instance(
     _caller: RequirePermission<ConnectorsView>,
     State(state): State<AppState>,
     Path(id): Path<String>,
+    Query(query): Query<ResourceListQuery>,
 ) -> Response {
     let row = match load_row(&state, &id).await {
         Ok(Some(row)) => row,
@@ -426,6 +431,7 @@ pub async fn get_instance(
         live.as_deref(),
         snapshot.as_ref(),
         update_status,
+        query.target(),
     )
     .await
 }
@@ -995,6 +1001,30 @@ pub async fn media_playback_state(
     }
 }
 
+/// `GET /connector-instances/{id}/media/queue?targetId=...`
+pub async fn media_queue(
+    _caller: RequirePermission<ConnectorsView>,
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Query(query): Query<MediaTargetQuery>,
+) -> Response {
+    let target_id = match required_target(&query.target_id) {
+        Ok(target_id) => target_id,
+        Err(response) => return *response,
+    };
+    let connector = match live_connector(&state, &id, "media queue").await {
+        Ok(connector) => connector,
+        Err(response) => return *response,
+    };
+    let Some(target) = connector.as_media_target(Some(target_id)) else {
+        return media_target_unavailable(target_id);
+    };
+    match target.queue().await {
+        Ok(queue) => Json(queue).into_response(),
+        Err(error) => media_error_response(error),
+    }
+}
+
 /// `POST /connector-instances/{id}/media/play-item`
 pub async fn media_play_item(
     caller: AuthenticatedUser,
@@ -1318,6 +1348,7 @@ pub async fn create_instance(
         Some(connector.as_ref()),
         snapshot.as_ref(),
         HashMap::new(),
+        None,
     )
     .await;
     (StatusCode::CREATED, body).into_response()
@@ -1485,6 +1516,7 @@ pub async fn update_instance(
         Some(connector.as_ref()),
         snapshot.as_ref(),
         update_status,
+        None,
     )
     .await
 }
@@ -2545,6 +2577,7 @@ async fn detail_for(
     live: Option<&dyn Connector>,
     snapshot: Option<&ConnectorStatusSnapshot>,
     update_status: HashMap<String, crate::connectors::updates::UpdateStatus>,
+    target_id: Option<&str>,
 ) -> Response {
     let (config, sensitive_fields_set) = redacted_config_for(state, row);
     let instance = entry_for(row, tags, sensitive_fields_set, live, snapshot);
@@ -2555,15 +2588,19 @@ async fn detail_for(
         default_layout,
         supports_sub_targets,
         supports_browsable_content,
+        supports_media_source,
+        supports_media_target,
         discoverable_type,
         supports_update_checking,
     ) = match live {
         Some(connector) => (
             connector.actions().await,
             connector.data_points(),
-            connector.default_layout(),
+            connector.default_layout_for(target_id),
             connector.supports_sub_targets(),
             connector.supports_browsable_content(),
+            connector.as_media_source(None).is_some(),
+            connector.as_media_target(target_id).is_some(),
             connector.discoverable_type(),
             connector.supports_update_checking(),
         ),
@@ -2571,6 +2608,8 @@ async fn detail_for(
             Vec::new(),
             Vec::new(),
             WidgetLayout::default(),
+            false,
+            false,
             false,
             false,
             None,
@@ -2586,6 +2625,8 @@ async fn detail_for(
         default_layout,
         supports_sub_targets,
         supports_browsable_content,
+        supports_media_source,
+        supports_media_target,
         discoverable_type,
         supports_update_checking,
         update_status,

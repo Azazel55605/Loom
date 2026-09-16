@@ -1712,7 +1712,9 @@ carries, plus what a dashboard placement UI needs.
   },
   "discoverableType": "debug",
   "supportsSubTargets": true,
-  "supportsBrowsableContent": true
+  "supportsBrowsableContent": true,
+  "supportsMediaSource": true,
+  "supportsMediaTarget": false
 }
 ```
 
@@ -1726,6 +1728,12 @@ carries, plus what a dashboard placement UI needs.
 | `discoverableType` | string | Type id this live instance can discover. Clients use this to decide whether to offer discovery without guessing from `connectorType`. | **`null`** when unsupported or the stored instance is not loaded. |
 | `supportsSubTargets` | boolean | Whether this live instance exposes addressable views through the sub-target endpoint. | Always present; `false` for unloaded and ordinary single-view connectors. |
 | `supportsBrowsableContent` | boolean | Whether this live instance exposes the generic browse/search endpoints. | Always present; `false` for unloaded and opted-out connectors. |
+| `supportsMediaSource` | boolean | Whether the connector exposes the host-level media library used by a Media Player browser. | Always present; `false` for unloaded and opted-out connectors. |
+| `supportsMediaTarget` | boolean | Whether the optional `targetId` query context exposes playback controls. | Always present; `false` without a matching media target. |
+
+Clients editing a target placement request
+`GET /connector-instances/{id}?targetId={targetId}` so `defaultLayout` and the
+media-target capability reflect that placement's own view.
 
 Sensitive values are never returned, even to `connectors.manage`. An edit form
 uses `sensitiveFieldsSet` to show that a value exists without receiving it.
@@ -2546,6 +2554,13 @@ media.
 Requires `connectors.view`. `targetId` is required and must be non-empty.
 Returns the target's current `PlaybackState`. Returns 400 when that connector
 does not expose `MediaTargetCapable` for the requested target.
+
+### `GET /connector-instances/{id}/media/queue?targetId={targetId}`
+
+Requires `connectors.view`; `targetId` is required. Returns `{ "items":
+MediaItem[], "currentIndex": number | null }` in playback order. An unsupported
+queue is a clear 400 rather than an empty queue, while an unknown target uses
+the same missing-media-target response as playback state.
 
 ### `POST /connector-instances/{id}/media/play-item`
 
@@ -3440,6 +3455,9 @@ Each binding is validated against the namespace its own tag names — see
 - a `browsableList` binding requires the connector to advertise generic
   browsable content. If it names an `actionId`, that action must exist for the
   placement's target.
+- a `mediaPlayer` binding requires `MediaTargetCapable` for the placement's
+  target. If `config.showBrowser` is true, the connector must also expose its
+  host-level `MediaSourceCapable` facet.
 
 A 400 lists every invalid id, and says which kind each one is, so the three are
 never confused: `widget bindings reference unknown data points: nope; unknown
@@ -4678,7 +4696,8 @@ once and re-rendered on every poll without re-reading the schema.
 | `bindings` | array | The widgets, in the connector author's suggested reading order. | Always present; may be empty. |
 
 **Each binding is externally tagged** — a single-key object whose key is
-`"display"`, `"action"`, or `"resourceKindDisplay"`, the same shape as
+`"display"`, `"action"`, `"resourceKindDisplay"`, `"browsableList"`, or
+`"mediaPlayer"`, the same shape as
 `ConnectorError`. Narrow on that key, not on the widget type: the three arms
 carry different id fields because they resolve against different things.
 
@@ -4737,6 +4756,17 @@ This binding has no widget type or config: its shared list/grid renderer fetches
 distinct from both resource tables and media-source capability: hierarchy and
 thumbnail rendering are generic UI concerns, while playable media resolution
 is a richer contract.
+
+`{ "mediaPlayer": … }` — a composite player for the placement's target:
+
+| Field | JSON type | Meaning | Nullability |
+| --- | --- | --- | --- |
+| `config.showBrowser` | boolean | Embeds the connector's media-source hierarchy and plays a selected leaf on this target. | Optional; defaults to `false`. |
+
+Playback state, seek, volume, transport, and queue calls remain server-backed;
+the displayed seek position advances locally between periodic reconciliation
+reads. This binding has no data-point or action id because it composes the
+dedicated media capability contract rather than either ordinary namespace.
 
 **A display `widgetType` is not always a string.** Unit variants serialize as a
 bare string; the one variant carrying data serializes as a single-key object:

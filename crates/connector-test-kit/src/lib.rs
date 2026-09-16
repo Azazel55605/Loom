@@ -186,6 +186,23 @@ pub async fn assert_connector_contract(
                         );
                     }
                 }
+                WidgetBinding::MediaPlayer { config } => {
+                    assert!(
+                        connector.as_media_target(*target).is_some(),
+                        "connector `{connector_id}` layout for target {} binds a media player but does not expose a media target",
+                        target_label(*target)
+                    );
+                    if config
+                        .get("showBrowser")
+                        .and_then(serde_json::Value::as_bool)
+                        .unwrap_or(false)
+                    {
+                        assert!(
+                            connector.as_media_source(None).is_some(),
+                            "connector `{connector_id}` media player requests a browser but has no host media source"
+                        );
+                    }
+                }
             }
         }
     }

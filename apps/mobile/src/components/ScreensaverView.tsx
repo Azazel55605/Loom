@@ -43,9 +43,9 @@ export function ScreensaverView({
   );
   const detailQueries = useQueries({
     queries: instanceIds.map((instanceId) => ({
-      queryKey: ["connector-instance", instanceId],
+      queryKey: ["connector-instance", instanceId, null],
       queryFn: ({ signal }: { signal: AbortSignal }) =>
-        api.getConnectorInstance(instanceId, signal),
+        api.getConnectorInstance(instanceId, null, signal),
     })),
   });
 

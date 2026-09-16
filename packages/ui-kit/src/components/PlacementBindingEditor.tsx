@@ -4,6 +4,7 @@ import { Plus, Trash2, X } from "lucide-react";
 import { Button } from "@loom/ui-kit/components/ui/button";
 import { Input } from "@loom/ui-kit/components/ui/input";
 import { Label } from "@loom/ui-kit/components/ui/label";
+import { Switch } from "@loom/ui-kit/components/ui/switch";
 import {
   Select,
   SelectContent,
@@ -81,6 +82,8 @@ export function PlacementBindingEditor({
   actions,
   resourceKinds,
   supportsBrowsableContent,
+  supportsMediaSource,
+  supportsMediaTarget,
   targetId,
   value,
   onChange,
@@ -92,6 +95,8 @@ export function PlacementBindingEditor({
   actions: ConnectorAction[];
   resourceKinds: ResourceKindDescriptor[];
   supportsBrowsableContent: boolean;
+  supportsMediaSource: boolean;
+  supportsMediaTarget: boolean;
   /** The placement view whose descriptors may be bound. */
   targetId: string | null;
   value: WidgetBinding[];
@@ -162,13 +167,15 @@ export function PlacementBindingEditor({
       return;
     }
     if (supportsBrowsableContent) onChange([...value, { browsableList: { actionId: null } }]);
+    else if (supportsMediaTarget) onChange([...value, { mediaPlayer: { config: {} } }]);
   }
 
   const canAdd =
     availableDataPoints.length > 0 ||
     availableActions.length > 0 ||
     resourceKinds.length > 0 ||
-    supportsBrowsableContent;
+    supportsBrowsableContent ||
+    supportsMediaTarget;
 
   return (
     <div className={cn("flex flex-col gap-3", className)}>
@@ -189,6 +196,8 @@ export function PlacementBindingEditor({
                 actions={availableActions}
                 resourceKinds={resourceKinds}
                 supportsBrowsableContent={supportsBrowsableContent}
+                supportsMediaSource={supportsMediaSource}
+                supportsMediaTarget={supportsMediaTarget}
                 disabled={disabled}
                 idPrefix={`binding-${index}`}
                 onChange={(next) => replace(index, next)}
@@ -229,6 +238,8 @@ function BindingRow({
   actions,
   resourceKinds,
   supportsBrowsableContent,
+  supportsMediaSource,
+  supportsMediaTarget,
   disabled,
   idPrefix,
   onChange,
@@ -241,6 +252,8 @@ function BindingRow({
   actions: ConnectorAction[];
   resourceKinds: ResourceKindDescriptor[];
   supportsBrowsableContent: boolean;
+  supportsMediaSource: boolean;
+  supportsMediaTarget: boolean;
   disabled?: boolean;
   idPrefix: string;
   onChange: (next: WidgetBinding) => void;
@@ -253,9 +266,11 @@ function BindingRow({
         ? "action"
         : "resourceKindDisplay" in binding
           ? "resource"
-          : "browsable";
+          : "browsableList" in binding
+            ? "browsable"
+            : "media";
 
-  function switchKind(next: "display" | "action" | "resource" | "browsable") {
+  function switchKind(next: "display" | "action" | "resource" | "browsable" | "media") {
     if (next === kind) return;
     if (next === "display") {
       const point = dataPoints[0];
@@ -288,7 +303,11 @@ function BindingRow({
       }
       return;
     }
-    if (supportsBrowsableContent) onChange({ browsableList: { actionId: null } });
+    if (next === "browsable" && supportsBrowsableContent) {
+      onChange({ browsableList: { actionId: null } });
+      return;
+    }
+    if (supportsMediaTarget) onChange({ mediaPlayer: { config: {} } });
   }
 
   return (
@@ -305,13 +324,16 @@ function BindingRow({
             ...(supportsBrowsableContent
               ? [{ value: "browsable" as const, label: "Browse" }]
               : []),
+            ...(supportsMediaTarget
+              ? [{ value: "media" as const, label: "Media player" }]
+              : []),
           ]}
           // Switching kinds needs somewhere to switch to. A connector with no
           // actions cannot host an action binding, so the control is disabled
           // rather than offering a choice that would silently do nothing.
           className={
             disabled ||
-            (dataPoints.length === 0 && actions.length === 0 && resourceKinds.length === 0 && !supportsBrowsableContent)
+            (dataPoints.length === 0 && actions.length === 0 && resourceKinds.length === 0 && !supportsBrowsableContent && !supportsMediaTarget)
               ? "pointer-events-none opacity-50"
               : undefined
           }
@@ -373,7 +395,7 @@ function BindingRow({
             </SelectContent>
           </Select>
         </Field>
-      ) : (
+      ) : "browsableList" in binding ? (
         <Field id={`${idPrefix}-browse-action`} label="Leaf action (optional)">
           <Select
             value={binding.browsableList.actionId ?? "none"}
@@ -393,6 +415,21 @@ function BindingRow({
             </SelectContent>
           </Select>
         </Field>
+      ) : (
+        <div className="flex min-h-11 items-center justify-between gap-4 rounded-md border px-3">
+          <div>
+            <Label htmlFor={`${idPrefix}-media-browser`}>Show media browser</Label>
+            <p className="text-xs text-muted-foreground">
+              Browse this connector's media library below the player.
+            </p>
+          </div>
+          <Switch
+            id={`${idPrefix}-media-browser`}
+            checked={binding.mediaPlayer.config.showBrowser === true}
+            disabled={disabled || !supportsMediaSource}
+            onCheckedChange={(showBrowser) => onChange({ mediaPlayer: { config: { showBrowser } } })}
+          />
+        </div>
       )}
     </div>
   );

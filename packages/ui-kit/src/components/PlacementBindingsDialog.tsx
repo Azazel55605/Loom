@@ -77,8 +77,9 @@ export function PlacementBindingsDialog({
   const isStaticTile = placement !== null && placement.connector === null;
 
   const detail = useQuery({
-    queryKey: ["connector-instance", instanceId],
-    queryFn: ({ signal }) => api.getConnectorInstance(instanceId as string, signal),
+    queryKey: ["connector-instance", instanceId, placement?.targetId ?? null],
+    queryFn: ({ signal }) =>
+      api.getConnectorInstance(instanceId as string, placement?.targetId ?? null, signal),
     enabled: instanceId !== null,
   });
   const resourceKinds = useQuery({
@@ -208,6 +209,8 @@ export function PlacementBindingsDialog({
                   actions={detail.data.actions}
                   resourceKinds={resourceKinds.data ?? []}
                   supportsBrowsableContent={detail.data.supportsBrowsableContent}
+                  supportsMediaSource={detail.data.supportsMediaSource}
+                  supportsMediaTarget={detail.data.supportsMediaTarget}
                   targetId={placement.targetId}
                   value={bindings}
                   onChange={setBindings}

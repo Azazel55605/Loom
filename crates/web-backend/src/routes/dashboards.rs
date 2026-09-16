@@ -2807,6 +2807,8 @@ async fn validate_widget_bindings(
     let mut unknown_resource_kinds: Vec<&str> = Vec::new();
     let mut invalid_linked_data_points: Vec<String> = Vec::new();
     let mut unsupported_browsable_content = false;
+    let mut unsupported_media_player = false;
+    let mut unsupported_media_browser = false;
     for binding in bindings {
         match binding {
             WidgetBinding::Display { data_point_id, .. }
@@ -2849,6 +2851,19 @@ async fn validate_widget_bindings(
                     }
                 }
             }
+            WidgetBinding::MediaPlayer { config } => {
+                if connector.as_media_target(target_id).is_none() {
+                    unsupported_media_player = true;
+                }
+                if config
+                    .get("showBrowser")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false)
+                    && connector.as_media_source(None).is_none()
+                {
+                    unsupported_media_browser = true;
+                }
+            }
             _ => {}
         }
     }
@@ -2868,6 +2883,8 @@ async fn validate_widget_bindings(
         || !unknown_resource_kinds.is_empty()
         || !invalid_linked_data_points.is_empty()
         || unsupported_browsable_content
+        || unsupported_media_player
+        || unsupported_media_browser
     {
         // Named separately, because "unknown data point restart" would send
         // someone looking in the wrong half of the connector.
@@ -2895,6 +2912,12 @@ async fn validate_widget_bindings(
         }
         if unsupported_browsable_content {
             problems.push("browsable content on a connector that does not support it".to_owned());
+        }
+        if unsupported_media_player {
+            problems.push("a media player on a target that cannot play media".to_owned());
+        }
+        if unsupported_media_browser {
+            problems.push("a media browser on a connector that has no media source".to_owned());
         }
         return Err(Box::new(ErrorBody::message(
             StatusCode::BAD_REQUEST,

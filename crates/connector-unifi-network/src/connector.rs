@@ -3734,7 +3734,8 @@ mod tests {
                 WidgetBinding::Display { data_point_id, .. } => Some(data_point_id.as_str()),
                 WidgetBinding::Action { .. }
                 | WidgetBinding::ResourceKindDisplay { .. }
-                | WidgetBinding::BrowsableList { .. } => None,
+                | WidgetBinding::BrowsableList { .. }
+                | WidgetBinding::MediaPlayer { .. } => None,
             })
             .collect::<HashSet<_>>();
         for expected in [

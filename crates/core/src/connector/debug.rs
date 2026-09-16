@@ -1741,6 +1741,7 @@ impl Connector for DebugConnector {
     fn default_layout_for(&self, target_id: Option<&str>) -> WidgetLayout {
         match target_id {
             None => self.default_layout(),
+            Some(MEDIA_TARGET_ID) => WidgetLayout::new(vec![WidgetBinding::media_player(true)]),
             Some("fixture-a") => WidgetLayout::new(vec![
                 WidgetBinding::display(DATA_POINT_LOAD, DisplayWidgetType::StatTile),
                 WidgetBinding::display(DATA_POINT_ENABLED, DisplayWidgetType::StatusDot),
@@ -2310,6 +2311,9 @@ mod tests {
                         .as_ref()
                         .is_none_or(|action_id| action_ids.contains(action_id)));
                 }
+                WidgetBinding::MediaPlayer { config } => {
+                    assert!(config.is_object(), "config must always be an object");
+                }
             }
         }
     }
@@ -2390,6 +2394,11 @@ mod tests {
             .contains(&WidgetBinding::browsable_list(Some(
                 ACTION_SELECT_FIXTURE_ITEM.to_owned()
             ))));
+
+        assert_eq!(
+            DebugConnector::default().default_layout_for(Some(MEDIA_TARGET_ID)),
+            WidgetLayout::new(vec![WidgetBinding::media_player(true)])
+        );
 
         // The bounded widgets must carry the bounds they need to draw.
         for binding in &layout.bindings {

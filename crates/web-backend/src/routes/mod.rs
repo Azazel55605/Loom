@@ -134,6 +134,10 @@ pub fn routes() -> Router<AppState> {
             get(connectors::media_playback_state),
         )
         .route(
+            "/connector-instances/{id}/media/queue",
+            get(connectors::media_queue),
+        )
+        .route(
             "/connector-instances/{id}/media/play-item",
             post(connectors::media_play_item),
         )

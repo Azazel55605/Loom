@@ -82,8 +82,8 @@ export function DataPointPicker({
     enabled: fixedContext === undefined,
   });
   const detail = useQuery({
-    queryKey: ["connector-instance", draftInstanceId],
-    queryFn: ({ signal }) => api.getConnectorInstance(draftInstanceId, signal),
+    queryKey: ["connector-instance", draftInstanceId, draftTargetId],
+    queryFn: ({ signal }) => api.getConnectorInstance(draftInstanceId, draftTargetId, signal),
     enabled: fixedContext === undefined && draftInstanceId !== "",
   });
   const subTargets = useQuery({
