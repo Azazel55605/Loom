@@ -130,6 +130,26 @@ pub fn routes() -> Router<AppState> {
             get(connectors::search_content),
         )
         .route(
+            "/connector-instances/{id}/media/playback-state",
+            get(connectors::media_playback_state),
+        )
+        .route(
+            "/connector-instances/{id}/media/play-item",
+            post(connectors::media_play_item),
+        )
+        .route(
+            "/connector-instances/{id}/media/transport",
+            post(connectors::media_transport),
+        )
+        .route(
+            "/connector-instances/{id}/media/seek",
+            post(connectors::media_seek),
+        )
+        .route(
+            "/connector-instances/{id}/media/volume",
+            post(connectors::media_volume),
+        )
+        .route(
             "/connector-instances/{id}/action-log",
             get(connectors::list_action_log),
         )

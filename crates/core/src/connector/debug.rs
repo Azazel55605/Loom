@@ -9,7 +9,7 @@
 //! with a laptop and no homelab can still work on Loom's UI, and Loom's tests
 //! can assert on connector behaviour without depending on a service being up.
 //!
-//! It now carries seven jobs rather than one:
+//! It now carries eight jobs rather than one:
 //!
 //! 1. **Auth and shell development**, its original purpose — a connector that
 //!    is reliably there to be listed, permission-checked, and acted on.
@@ -41,6 +41,10 @@
 //!    action then destroys, and its update check answers whatever
 //!    [`DebugConnectorConfig::simulated_update_available`] says, so both a
 //!    clean instance and an out-of-date one are renderable.
+//! 8. **Media contract reference behaviour.** Its host facet resolves the
+//!    existing synthetic browse hierarchy, while `media-target-1` is a real
+//!    in-memory player whose position, queue, volume, shuffle, and repeat state
+//!    exercise source-to-target backend plumbing without a network service.
 //!
 //! Everything interesting is set at construction through
 //! [`DebugConnectorConfig`]:
@@ -73,9 +77,14 @@
 
 use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
+use std::time::Instant;
 
 use async_trait::async_trait;
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, Duration, Utc};
+use loom_media::{
+    MediaError, MediaItem, MediaKind, MediaSourceCapable, MediaTargetCapable, PlaybackState,
+    PlaybackStatus, Queue, RepeatMode, ResolvedPlayable,
+};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
 
@@ -169,6 +178,9 @@ pub const LOG_CAPACITY: usize = 10;
 
 /// Stable fake targets used to exercise target-aware clients without a service.
 pub const FIXTURE_TARGETS: [&str; 2] = ["fixture-a", "fixture-b"];
+
+/// Stable fake playback target used to prove the optional media-target facet.
+pub const MEDIA_TARGET_ID: &str = "media-target-1";
 
 /// The fake hostname shown in [`Connector::display_fields`].
 ///
@@ -312,6 +324,72 @@ struct SimulatedState {
     accent_color: String,
     /// The last [`LOG_CAPACITY`] fake log lines, oldest first.
     log: VecDeque<String>,
+    /// Mutable playback state for [`MEDIA_TARGET_ID`].
+    media: SimulatedMediaState,
+}
+
+#[derive(Debug)]
+struct SimulatedMediaState {
+    status: PlaybackStatus,
+    position: Duration,
+    position_updated_at: Instant,
+    volume_percent: u8,
+    current_item: Option<MediaItem>,
+    shuffle: bool,
+    repeat: RepeatMode,
+    queue: Vec<MediaItem>,
+    current_index: Option<usize>,
+}
+
+impl SimulatedMediaState {
+    fn new() -> Self {
+        Self {
+            status: PlaybackStatus::Stopped,
+            position: Duration::zero(),
+            position_updated_at: Instant::now(),
+            volume_percent: 50,
+            current_item: None,
+            shuffle: false,
+            repeat: RepeatMode::Off,
+            queue: fixture_media_items(),
+            current_index: None,
+        }
+    }
+
+    fn sync_position(&mut self) {
+        let now = Instant::now();
+        if self.status == PlaybackStatus::Playing {
+            let elapsed_ms =
+                i64::try_from(self.position_updated_at.elapsed().as_millis()).unwrap_or(i64::MAX);
+            self.position += Duration::milliseconds(elapsed_ms);
+            if let Some(duration) = self.current_item.as_ref().and_then(|item| item.duration) {
+                self.position = self.position.min(duration);
+            }
+        }
+        self.position_updated_at = now;
+    }
+
+    fn select_queue_item(&mut self, index: usize) -> Result<(), MediaError> {
+        let item = self.queue.get(index).cloned().ok_or(MediaError::NotFound)?;
+        self.current_index = Some(index);
+        self.current_item = Some(item);
+        self.position = Duration::zero();
+        self.position_updated_at = Instant::now();
+        self.status = PlaybackStatus::Playing;
+        Ok(())
+    }
+
+    fn playback_state(&mut self) -> PlaybackState {
+        self.sync_position();
+        PlaybackState {
+            status: self.status,
+            position: self.current_item.as_ref().map(|_| self.position),
+            volume_percent: self.volume_percent,
+            current_item: self.current_item.clone(),
+            shuffle: self.shuffle,
+            repeat: self.repeat,
+        }
+    }
 }
 
 impl SimulatedState {
@@ -387,6 +465,7 @@ impl DebugConnector {
             enabled: config.enabled,
             label: config.label.clone(),
             accent_color: DEFAULT_ACCENT_COLOR.to_owned(),
+            media: SimulatedMediaState::new(),
         };
 
         Self {
@@ -701,6 +780,33 @@ fn fixture_browsable_items() -> Vec<BrowsableItem> {
     ]
 }
 
+/// Derives the media fixture from the generic browsing fixture so the two
+/// capabilities cannot drift into parallel, contradictory libraries.
+fn fixture_media_items() -> Vec<MediaItem> {
+    fixture_browsable_items()
+        .into_iter()
+        .filter(|item| item.kind == BrowsableItemKind::Leaf)
+        .enumerate()
+        .map(|(index, item)| MediaItem {
+            id: item.id,
+            title: item.label,
+            kind: MediaKind::Audio,
+            artist: Some("Debug fixture".to_owned()),
+            album: Some("Synthetic library".to_owned()),
+            artwork_ref: item.thumbnail,
+            duration: Some(Duration::seconds(
+                150 + i64::try_from(index).unwrap_or(0) * 30,
+            )),
+        })
+        .collect()
+}
+
+fn media_item(item_id: &str) -> Option<MediaItem> {
+    fixture_media_items()
+        .into_iter()
+        .find(|item| item.id == item_id)
+}
+
 fn fixture_parent(id: &str) -> Option<&str> {
     id.rsplit_once('/').map(|(parent, _)| parent)
 }
@@ -765,6 +871,14 @@ fn debug_capabilities(reachable: bool, actions_enabled: bool) -> Vec<CapabilityS
 
 #[async_trait]
 impl Connector for DebugConnector {
+    fn as_media_source(&self, target_id: Option<&str>) -> Option<&dyn MediaSourceCapable> {
+        target_id.is_none().then_some(self)
+    }
+
+    fn as_media_target(&self, target_id: Option<&str>) -> Option<&dyn MediaTargetCapable> {
+        (target_id == Some(MEDIA_TARGET_ID)).then_some(self)
+    }
+
     /// Advances the simulation and reports the configured health alongside the
     /// current data point values.
     ///
@@ -1242,6 +1356,9 @@ impl Connector for DebugConnector {
         Ok(FIXTURE_TARGETS
             .into_iter()
             .map(|id| SubTarget::new(id, id))
+            .chain(std::iter::once(
+                SubTarget::new(MEDIA_TARGET_ID, "Fixture media player").of_kind("mediaPlayer"),
+            ))
             .collect())
     }
 
@@ -1635,6 +1752,188 @@ impl Connector for DebugConnector {
                 WidgetBinding::action(ACTION_RESTART, ActionWidgetType::Button),
             ]),
         }
+    }
+}
+
+#[async_trait]
+impl MediaSourceCapable for DebugConnector {
+    async fn browse(&self, path: Option<&str>) -> Result<Vec<MediaItem>, MediaError> {
+        self.gate().await.map_err(|_| MediaError::Unreachable)?;
+        let parent = path.map(str::trim).filter(|value| !value.is_empty());
+        Ok(fixture_browsable_items()
+            .into_iter()
+            .filter(|item| {
+                item.kind == BrowsableItemKind::Leaf && fixture_parent(&item.id) == parent
+            })
+            .filter_map(|item| media_item(&item.id))
+            .collect())
+    }
+
+    async fn search(&self, query: &str) -> Result<Vec<MediaItem>, MediaError> {
+        self.gate().await.map_err(|_| MediaError::Unreachable)?;
+        let query = query.trim().to_ascii_lowercase();
+        Ok(fixture_media_items()
+            .into_iter()
+            .filter(|item| query.is_empty() || item.title.to_ascii_lowercase().contains(&query))
+            .collect())
+    }
+
+    async fn resolve(&self, item_id: &str) -> Result<ResolvedPlayable, MediaError> {
+        self.gate().await.map_err(|_| MediaError::Unreachable)?;
+        let item = media_item(item_id).ok_or(MediaError::NotFound)?;
+        Ok(ResolvedPlayable {
+            stream_url: format!("https://media.invalid/{}.mp3", item.id.replace('/', "-")),
+            kind: item.kind.clone(),
+            item,
+        })
+    }
+}
+
+#[async_trait]
+impl MediaTargetCapable for DebugConnector {
+    async fn playback_state(&self) -> Result<PlaybackState, MediaError> {
+        self.gate().await.map_err(|_| MediaError::Unreachable)?;
+        Ok(self.lock().media.playback_state())
+    }
+
+    async fn play(&self, playable: ResolvedPlayable) -> Result<(), MediaError> {
+        self.gate().await.map_err(|_| MediaError::Unreachable)?;
+        let mut state = self.lock();
+        let index = state
+            .media
+            .queue
+            .iter()
+            .position(|item| item.id == playable.item.id)
+            .unwrap_or_else(|| {
+                state.media.queue.push(playable.item.clone());
+                state.media.queue.len() - 1
+            });
+        state.media.select_queue_item(index)
+    }
+
+    async fn pause(&self) -> Result<(), MediaError> {
+        self.gate().await.map_err(|_| MediaError::Unreachable)?;
+        let mut state = self.lock();
+        state.media.sync_position();
+        if state.media.current_item.is_none() {
+            return Err(MediaError::PlaybackFailed(
+                "there is no loaded item to pause".to_owned(),
+            ));
+        }
+        state.media.status = PlaybackStatus::Paused;
+        Ok(())
+    }
+
+    async fn resume(&self) -> Result<(), MediaError> {
+        self.gate().await.map_err(|_| MediaError::Unreachable)?;
+        let mut state = self.lock();
+        if state.media.current_item.is_none() {
+            return Err(MediaError::PlaybackFailed(
+                "there is no loaded item to resume".to_owned(),
+            ));
+        }
+        state.media.position_updated_at = Instant::now();
+        state.media.status = PlaybackStatus::Playing;
+        Ok(())
+    }
+
+    async fn stop(&self) -> Result<(), MediaError> {
+        self.gate().await.map_err(|_| MediaError::Unreachable)?;
+        let mut state = self.lock();
+        state.media.sync_position();
+        state.media.status = PlaybackStatus::Stopped;
+        state.media.position = Duration::zero();
+        Ok(())
+    }
+
+    async fn seek(&self, position: Duration) -> Result<(), MediaError> {
+        self.gate().await.map_err(|_| MediaError::Unreachable)?;
+        if position < Duration::zero() {
+            return Err(MediaError::PlaybackFailed(
+                "seek position cannot be negative".to_owned(),
+            ));
+        }
+        let mut state = self.lock();
+        let Some(item) = state.media.current_item.as_ref() else {
+            return Err(MediaError::PlaybackFailed(
+                "there is no loaded item to seek".to_owned(),
+            ));
+        };
+        let Some(duration) = item.duration else {
+            return Err(MediaError::Unsupported(
+                "the loaded item is live and cannot be seeked".to_owned(),
+            ));
+        };
+        state.media.position = position.min(duration);
+        state.media.position_updated_at = Instant::now();
+        Ok(())
+    }
+
+    async fn set_volume(&self, percent: u8) -> Result<(), MediaError> {
+        self.gate().await.map_err(|_| MediaError::Unreachable)?;
+        if percent > 100 {
+            return Err(MediaError::PlaybackFailed(
+                "volume percent must be between 0 and 100".to_owned(),
+            ));
+        }
+        self.lock().media.volume_percent = percent;
+        Ok(())
+    }
+
+    async fn set_shuffle(&self, enabled: bool) -> Result<(), MediaError> {
+        self.gate().await.map_err(|_| MediaError::Unreachable)?;
+        self.lock().media.shuffle = enabled;
+        Ok(())
+    }
+
+    async fn set_repeat(&self, mode: RepeatMode) -> Result<(), MediaError> {
+        self.gate().await.map_err(|_| MediaError::Unreachable)?;
+        self.lock().media.repeat = mode;
+        Ok(())
+    }
+
+    async fn skip_next(&self) -> Result<(), MediaError> {
+        self.gate().await.map_err(|_| MediaError::Unreachable)?;
+        let mut state = self.lock();
+        if state.media.queue.is_empty() {
+            return Err(MediaError::Unsupported("the queue is empty".to_owned()));
+        }
+        let next = state
+            .media
+            .current_index
+            .map_or(0, |index| (index + 1) % state.media.queue.len());
+        state.media.select_queue_item(next)
+    }
+
+    async fn skip_previous(&self) -> Result<(), MediaError> {
+        self.gate().await.map_err(|_| MediaError::Unreachable)?;
+        let mut state = self.lock();
+        if state.media.queue.is_empty() {
+            return Err(MediaError::Unsupported("the queue is empty".to_owned()));
+        }
+        let previous = state.media.current_index.map_or(0, |index| {
+            if index == 0 {
+                state.media.queue.len() - 1
+            } else {
+                index - 1
+            }
+        });
+        state.media.select_queue_item(previous)
+    }
+
+    async fn queue(&self) -> Result<Queue, MediaError> {
+        self.gate().await.map_err(|_| MediaError::Unreachable)?;
+        let state = self.lock();
+        Ok(Queue {
+            items: state.media.queue.clone(),
+            current_index: state.media.current_index,
+        })
+    }
+
+    async fn queue_add(&self, playable: ResolvedPlayable) -> Result<(), MediaError> {
+        self.gate().await.map_err(|_| MediaError::Unreachable)?;
+        self.lock().media.queue.push(playable.item);
+        Ok(())
     }
 }
 
@@ -2833,16 +3132,13 @@ mod tests {
             vec![
                 SubTarget::new("fixture-a", "fixture-a"),
                 SubTarget::new("fixture-b", "fixture-b"),
+                SubTarget::new(MEDIA_TARGET_ID, "Fixture media player").of_kind("mediaPlayer"),
             ]
         );
-        // A connector with nothing to distinguish leaves every target the
-        // default kind, which is what `SubTarget::new` gives it.
-        assert!(connector
-            .list_sub_targets()
-            .await
-            .unwrap()
-            .iter()
-            .all(|target| target.kind == crate::connector::SUB_TARGET_KIND_DEFAULT));
+        assert_eq!(
+            connector.list_sub_targets().await.unwrap()[2].kind,
+            "mediaPlayer"
+        );
 
         let host = connector.default_layout_for(None);
         let fixture_a = connector.default_layout_for(Some("fixture-a"));
@@ -2904,5 +3200,88 @@ mod tests {
                 .await,
             Err(ConnectorError::InvalidParams { .. })
         ));
+    }
+
+    #[tokio::test]
+    async fn media_fixture_browses_resolves_and_runs_a_real_transport_sequence() {
+        let connector = DebugConnector::default();
+        assert!(connector.as_media_source(None).is_some());
+        assert!(connector.as_media_source(Some(MEDIA_TARGET_ID)).is_none());
+        assert!(connector.as_media_target(None).is_none());
+        let target = connector.as_media_target(Some(MEDIA_TARGET_ID)).unwrap();
+        let source = connector.as_media_source(None).unwrap();
+
+        let collection = source.browse(Some("collection-a")).await.unwrap();
+        assert!(collection
+            .iter()
+            .any(|item| item.id == "collection-a/item-alpha"));
+        let search = source.search("BETA").await.unwrap();
+        assert_eq!(search.len(), 1);
+        assert_eq!(search[0].id, "collection-a/deep/item-beta");
+
+        let playable = source.resolve("collection-a/item-alpha").await.unwrap();
+        assert!(playable.stream_url.starts_with("https://media.invalid/"));
+        target.play(playable).await.unwrap();
+        let queue_len = target.queue().await.unwrap().items.len();
+        let queued_again = source.resolve("collection-b/item-gamma").await.unwrap();
+        target.queue_add(queued_again).await.unwrap();
+        assert_eq!(target.queue().await.unwrap().items.len(), queue_len + 1);
+        assert_eq!(
+            target.playback_state().await.unwrap().status,
+            PlaybackStatus::Playing
+        );
+
+        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+        let advanced = target.playback_state().await.unwrap().position.unwrap();
+        assert!(advanced >= Duration::milliseconds(15));
+
+        target.pause().await.unwrap();
+        let paused = target.playback_state().await.unwrap().position.unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        assert_eq!(
+            target.playback_state().await.unwrap().position,
+            Some(paused)
+        );
+
+        target.resume().await.unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        assert!(target.playback_state().await.unwrap().position.unwrap() > paused);
+
+        target.seek(Duration::seconds(30)).await.unwrap();
+        assert!(target.playback_state().await.unwrap().position.unwrap() >= Duration::seconds(30));
+        target.set_volume(73).await.unwrap();
+        target.set_shuffle(true).await.unwrap();
+        target.set_repeat(RepeatMode::One).await.unwrap();
+        let configured = target.playback_state().await.unwrap();
+        assert_eq!(configured.volume_percent, 73);
+        assert!(configured.shuffle);
+        assert_eq!(configured.repeat, RepeatMode::One);
+
+        let first_id = configured.current_item.unwrap().id;
+        target.skip_next().await.unwrap();
+        let second_id = target
+            .playback_state()
+            .await
+            .unwrap()
+            .current_item
+            .unwrap()
+            .id;
+        assert_ne!(first_id, second_id);
+        target.skip_previous().await.unwrap();
+        assert_eq!(
+            target
+                .playback_state()
+                .await
+                .unwrap()
+                .current_item
+                .unwrap()
+                .id,
+            first_id
+        );
+
+        target.stop().await.unwrap();
+        let stopped = target.playback_state().await.unwrap();
+        assert_eq!(stopped.status, PlaybackStatus::Stopped);
+        assert_eq!(stopped.position, Some(Duration::zero()));
     }
 }

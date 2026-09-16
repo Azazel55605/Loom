@@ -54,7 +54,7 @@ pub trait Connector: Send + Sync {
     /// this and return themselves (or a contained implementation). The default
     /// is `None`, so existing connectors and connectors with only playback
     /// target behavior opt out without boilerplate.
-    fn as_media_source(&self) -> Option<&dyn MediaSourceCapable> {
+    fn as_media_source(&self, _target_id: Option<&str>) -> Option<&dyn MediaSourceCapable> {
         None
     }
 
@@ -63,7 +63,7 @@ pub trait Connector: Send + Sync {
     /// Connectors that control a player override this and return themselves (or
     /// a contained implementation). The default is `None`, so existing
     /// connectors and source-only connectors remain unaffected.
-    fn as_media_target(&self) -> Option<&dyn MediaTargetCapable> {
+    fn as_media_target(&self, _target_id: Option<&str>) -> Option<&dyn MediaTargetCapable> {
         None
     }
 
@@ -2282,8 +2282,8 @@ mod tests {
             id: "stub-media",
             health: HealthState::Healthy,
         };
-        assert!(stub.as_media_source().is_none());
-        assert!(stub.as_media_target().is_none());
+        assert!(stub.as_media_source(None).is_none());
+        assert!(stub.as_media_target(Some("fixture-target")).is_none());
     }
 
     #[test]

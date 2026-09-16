@@ -26,9 +26,11 @@ use loom_core::connector::{
     ConnectorError, ConnectorMetadata, ConnectorStatus, DataPointDescriptor, DisplayField,
     ResourceItem, ResourceKindDescriptor, SetupGuide, WidgetLayout,
 };
+use loom_core::media::{MediaError, RepeatMode};
 use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::Value;
 use std::collections::{BTreeSet, HashMap};
+use std::future::Future;
 use uuid::Uuid;
 
 use crate::auth::extract::{
@@ -837,6 +839,365 @@ pub async fn search_content(
     }
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MediaTargetQuery {
+    target_id: String,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PlayMediaItemRequest {
+    target_id: String,
+    item_id: String,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum MediaTransportCommand {
+    Pause,
+    Resume,
+    Stop,
+    SkipNext,
+    SkipPrevious,
+    ToggleShuffle,
+    ToggleRepeat,
+}
+
+impl MediaTransportCommand {
+    fn action_id(self) -> &'static str {
+        match self {
+            Self::Pause => "media.pause",
+            Self::Resume => "media.resume",
+            Self::Stop => "media.stop",
+            Self::SkipNext => "media.skipNext",
+            Self::SkipPrevious => "media.skipPrevious",
+            Self::ToggleShuffle => "media.toggleShuffle",
+            Self::ToggleRepeat => "media.toggleRepeat",
+        }
+    }
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MediaTransportRequest {
+    target_id: String,
+    command: MediaTransportCommand,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MediaSeekRequest {
+    target_id: String,
+    position_seconds: u64,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MediaVolumeRequest {
+    target_id: String,
+    percent: u8,
+}
+
+fn required_target(target_id: &str) -> RouteResult<&str> {
+    let target_id = target_id.trim();
+    if target_id.is_empty() {
+        Err(Box::new(ErrorBody::message(
+            StatusCode::BAD_REQUEST,
+            "targetId must be a non-empty string",
+        )))
+    } else {
+        Ok(target_id)
+    }
+}
+
+fn media_error_response(error: MediaError) -> Response {
+    let status = match error {
+        MediaError::NotFound => StatusCode::NOT_FOUND,
+        MediaError::Unsupported(_) => StatusCode::BAD_REQUEST,
+        MediaError::Unreachable
+        | MediaError::ResolutionFailed(_)
+        | MediaError::PlaybackFailed(_) => StatusCode::BAD_GATEWAY,
+    };
+    ErrorBody::message(status, error.to_string())
+}
+
+fn media_target_unavailable(target_id: &str) -> Response {
+    ErrorBody::message(
+        StatusCode::BAD_REQUEST,
+        format!("this connector instance has no media target `{target_id}`"),
+    )
+}
+
+struct MediaOperation<'a> {
+    state: &'a AppState,
+    instance_id: &'a str,
+    target_id: &'a str,
+    action_id: &'a str,
+    params: Value,
+    actor_user_id: &'a str,
+    success_message: &'static str,
+}
+
+async fn logged_media_operation<F>(context: MediaOperation<'_>, operation: F) -> Response
+where
+    F: Future<Output = Result<(), MediaError>>,
+{
+    let result = invoke_logged_operation(
+        LoggedOperation {
+            state: context.state,
+            instance_id: context.instance_id,
+            action_id: context.action_id,
+            target_id: Some(context.target_id),
+            params: &context.params,
+            actor: ActionActor::User(context.actor_user_id),
+            snapshot: None,
+        },
+        operation,
+        |()| (true, context.success_message.to_owned()),
+    )
+    .await;
+
+    if let Ok(uuid) = Uuid::parse_str(context.instance_id) {
+        context.state.connectors.refresh_now(uuid).await;
+    }
+
+    match result {
+        Ok(()) => Json(ActionResult::ok(context.success_message)).into_response(),
+        Err(LoggedOperationFailure::Log(error)) => {
+            internal_error("recording a media control", error)
+        }
+        Err(LoggedOperationFailure::Operation(error)) => media_error_response(error),
+    }
+}
+
+/// `GET /connector-instances/{id}/media/playback-state?targetId=...`
+pub async fn media_playback_state(
+    _caller: RequirePermission<ConnectorsView>,
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Query(query): Query<MediaTargetQuery>,
+) -> Response {
+    let target_id = match required_target(&query.target_id) {
+        Ok(target_id) => target_id,
+        Err(response) => return *response,
+    };
+    let connector = match live_connector(&state, &id, "media playback state").await {
+        Ok(connector) => connector,
+        Err(response) => return *response,
+    };
+    let Some(target) = connector.as_media_target(Some(target_id)) else {
+        return media_target_unavailable(target_id);
+    };
+    match target.playback_state().await {
+        Ok(playback_state) => Json(playback_state).into_response(),
+        Err(error) => media_error_response(error),
+    }
+}
+
+/// `POST /connector-instances/{id}/media/play-item`
+pub async fn media_play_item(
+    caller: AuthenticatedUser,
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Json(request): Json<PlayMediaItemRequest>,
+) -> Response {
+    if let Some(denied) = caller.deny_unless(
+        ConnectorsControl::KEY,
+        Some(CONNECTOR_RESOURCE_TYPE),
+        Some(&id),
+    ) {
+        return denied;
+    }
+    let target_id = match required_target(&request.target_id) {
+        Ok(target_id) => target_id,
+        Err(response) => return *response,
+    };
+    if request.item_id.trim().is_empty() {
+        return ErrorBody::message(StatusCode::BAD_REQUEST, "itemId must be a non-empty string");
+    }
+    let connector = match live_connector(&state, &id, "media playback").await {
+        Ok(connector) => connector,
+        Err(response) => return *response,
+    };
+    let Some(source) = connector.as_media_source(None) else {
+        return ErrorBody::message(
+            StatusCode::BAD_REQUEST,
+            "this connector instance does not provide a host-level media source",
+        );
+    };
+    let Some(target) = connector.as_media_target(Some(target_id)) else {
+        return media_target_unavailable(target_id);
+    };
+    let params = serde_json::to_value(&request).expect("media request serialization cannot fail");
+    logged_media_operation(
+        MediaOperation {
+            state: &state,
+            instance_id: &id,
+            target_id,
+            action_id: "media.playItem",
+            params,
+            actor_user_id: caller.id(),
+            success_message: "Media item started.",
+        },
+        async {
+            let playable = source.resolve(request.item_id.trim()).await?;
+            target.play(playable).await
+        },
+    )
+    .await
+}
+
+/// `POST /connector-instances/{id}/media/transport`
+pub async fn media_transport(
+    caller: AuthenticatedUser,
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Json(request): Json<MediaTransportRequest>,
+) -> Response {
+    if let Some(denied) = caller.deny_unless(
+        ConnectorsControl::KEY,
+        Some(CONNECTOR_RESOURCE_TYPE),
+        Some(&id),
+    ) {
+        return denied;
+    }
+    let target_id = match required_target(&request.target_id) {
+        Ok(target_id) => target_id,
+        Err(response) => return *response,
+    };
+    let connector = match live_connector(&state, &id, "media transport").await {
+        Ok(connector) => connector,
+        Err(response) => return *response,
+    };
+    let Some(target) = connector.as_media_target(Some(target_id)) else {
+        return media_target_unavailable(target_id);
+    };
+    let command = request.command;
+    let params = serde_json::to_value(&request).expect("media request serialization cannot fail");
+    logged_media_operation(
+        MediaOperation {
+            state: &state,
+            instance_id: &id,
+            target_id,
+            action_id: command.action_id(),
+            params,
+            actor_user_id: caller.id(),
+            success_message: "Media transport updated.",
+        },
+        async move {
+            match command {
+                MediaTransportCommand::Pause => target.pause().await,
+                MediaTransportCommand::Resume => target.resume().await,
+                MediaTransportCommand::Stop => target.stop().await,
+                MediaTransportCommand::SkipNext => target.skip_next().await,
+                MediaTransportCommand::SkipPrevious => target.skip_previous().await,
+                MediaTransportCommand::ToggleShuffle => {
+                    let current = target.playback_state().await?;
+                    target.set_shuffle(!current.shuffle).await
+                }
+                MediaTransportCommand::ToggleRepeat => {
+                    let current = target.playback_state().await?;
+                    let next = match current.repeat {
+                        RepeatMode::Off => RepeatMode::One,
+                        RepeatMode::One => RepeatMode::All,
+                        RepeatMode::All => RepeatMode::Off,
+                    };
+                    target.set_repeat(next).await
+                }
+            }
+        },
+    )
+    .await
+}
+
+/// `POST /connector-instances/{id}/media/seek`
+pub async fn media_seek(
+    caller: AuthenticatedUser,
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Json(request): Json<MediaSeekRequest>,
+) -> Response {
+    if let Some(denied) = caller.deny_unless(
+        ConnectorsControl::KEY,
+        Some(CONNECTOR_RESOURCE_TYPE),
+        Some(&id),
+    ) {
+        return denied;
+    }
+    let target_id = match required_target(&request.target_id) {
+        Ok(target_id) => target_id,
+        Err(response) => return *response,
+    };
+    let connector = match live_connector(&state, &id, "media seeking").await {
+        Ok(connector) => connector,
+        Err(response) => return *response,
+    };
+    let Some(target) = connector.as_media_target(Some(target_id)) else {
+        return media_target_unavailable(target_id);
+    };
+    let params = serde_json::to_value(&request).expect("media request serialization cannot fail");
+    logged_media_operation(
+        MediaOperation {
+            state: &state,
+            instance_id: &id,
+            target_id,
+            action_id: "media.seek",
+            params,
+            actor_user_id: caller.id(),
+            success_message: "Media position updated.",
+        },
+        target.seek(chrono::Duration::seconds(
+            i64::try_from(request.position_seconds).unwrap_or(i64::MAX),
+        )),
+    )
+    .await
+}
+
+/// `POST /connector-instances/{id}/media/volume`
+pub async fn media_volume(
+    caller: AuthenticatedUser,
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Json(request): Json<MediaVolumeRequest>,
+) -> Response {
+    if let Some(denied) = caller.deny_unless(
+        ConnectorsControl::KEY,
+        Some(CONNECTOR_RESOURCE_TYPE),
+        Some(&id),
+    ) {
+        return denied;
+    }
+    if request.percent > 100 {
+        return ErrorBody::message(StatusCode::BAD_REQUEST, "percent must be between 0 and 100");
+    }
+    let target_id = match required_target(&request.target_id) {
+        Ok(target_id) => target_id,
+        Err(response) => return *response,
+    };
+    let connector = match live_connector(&state, &id, "media volume").await {
+        Ok(connector) => connector,
+        Err(response) => return *response,
+    };
+    let Some(target) = connector.as_media_target(Some(target_id)) else {
+        return media_target_unavailable(target_id);
+    };
+    let params = serde_json::to_value(&request).expect("media request serialization cannot fail");
+    logged_media_operation(
+        MediaOperation {
+            state: &state,
+            instance_id: &id,
+            target_id,
+            action_id: "media.setVolume",
+            params,
+            actor_user_id: caller.id(),
+            success_message: "Media volume updated.",
+        },
+        target.set_volume(request.percent),
+    )
+    .await
+}
+
 /// Load the same cached connector summary used by the public list endpoint.
 ///
 /// Dashboard placements embed this value. Keeping construction here prevents
@@ -1287,6 +1648,64 @@ pub(crate) enum ActionFailure {
     Connector(ConnectorError),
 }
 
+#[derive(Debug)]
+enum LoggedOperationFailure<E> {
+    Log(sqlx::Error),
+    Operation(E),
+}
+
+struct LoggedOperation<'a> {
+    state: &'a AppState,
+    instance_id: &'a str,
+    action_id: &'a str,
+    target_id: Option<&'a str>,
+    params: &'a Value,
+    actor: ActionActor<'a>,
+    snapshot: Option<&'a Value>,
+}
+
+/// Records, dispatches, and completes one auditable connector operation.
+///
+/// Ordinary connector actions and media controls share this exact boundary so
+/// neither can execute without first creating its pending audit row. The
+/// caller supplies how a successful return value maps to the log's boolean and
+/// message because [`ActionResult`] may represent a service-level failure,
+/// while a media trait call uses `Ok` exclusively for success.
+async fn invoke_logged_operation<T, E, F, Describe>(
+    context: LoggedOperation<'_>,
+    operation: F,
+    describe: Describe,
+) -> Result<T, LoggedOperationFailure<E>>
+where
+    E: std::fmt::Display,
+    F: Future<Output = Result<T, E>>,
+    Describe: FnOnce(&T) -> (bool, String),
+{
+    let log_id = record_invocation(
+        context.state,
+        context.instance_id,
+        context.action_id,
+        context.target_id,
+        context.params,
+        context.actor,
+        context.snapshot,
+    )
+    .await
+    .map_err(LoggedOperationFailure::Log)?;
+
+    match operation.await {
+        Ok(result) => {
+            let (success, message) = describe(&result);
+            complete_invocation(context.state, &log_id, success, &message).await;
+            Ok(result)
+        }
+        Err(error) => {
+            complete_invocation(context.state, &log_id, false, &error.to_string()).await;
+            Err(LoggedOperationFailure::Operation(error))
+        }
+    }
+}
+
 /// Runs one connector action: snapshot, record, dispatch, complete.
 ///
 /// **The single path every action takes**, whoever asked for it. The HTTP route
@@ -1358,56 +1777,47 @@ pub(crate) async fn invoke_action(
         Some(uuid) => snapshot_for(state, uuid, target_id, &snapshot_ids).await,
         None => None,
     };
-    // Fail closed. An action Loom cannot record is an action Loom does not
-    // perform: a control plane whose audit trail is best-effort is one where
-    // the interesting invocation is the one that went missing.
-    let log_id = record_invocation(
-        state,
-        instance_id,
-        action_id,
-        target_id,
-        &params,
-        actor,
-        snapshot.as_ref(),
+    let params_for_log = params.clone();
+    let operation = async {
+        if let (Some(uuid), Some(label)) = (uuid, disruptive.as_ref()) {
+            state.connectors.begin_operation(uuid, label).await;
+        }
+
+        let outcome = connector.execute_action(action_id, target_id, params).await;
+
+        if let Some(uuid) = uuid {
+            if disruptive.is_some() {
+                // Cleared whatever happened: a restart that failed is not still
+                // being performed. The safety net in the runtime covers the case
+                // where `execute_action` never returns at all.
+                state.connectors.end_operation(uuid).await;
+            }
+            // Every action, not only disruptive ones — pressing a button is the
+            // strongest signal available that the state is about to change and
+            // that somebody is watching. This also undoes any poll backoff.
+            state.connectors.refresh_now(uuid).await;
+        }
+        outcome
+    };
+
+    invoke_logged_operation(
+        LoggedOperation {
+            state,
+            instance_id,
+            action_id,
+            target_id,
+            params: &params_for_log,
+            actor,
+            snapshot: snapshot.as_ref(),
+        },
+        operation,
+        |result: &ActionResult| (result.success, result.message.clone()),
     )
     .await
-    .map_err(ActionFailure::Log)?;
-
-    if let (Some(uuid), Some(label)) = (uuid, disruptive.as_ref()) {
-        state.connectors.begin_operation(uuid, label).await;
-    }
-
-    let outcome = connector.execute_action(action_id, target_id, params).await;
-
-    if let Some(uuid) = uuid {
-        if disruptive.is_some() {
-            // Cleared whatever happened: a restart that failed is not still
-            // being performed. The safety net in the runtime covers the case
-            // where `execute_action` never returns at all.
-            state.connectors.end_operation(uuid).await;
-        }
-        // Every action, not only disruptive ones — pressing a button is the
-        // strongest signal available that the state is about to change and
-        // that somebody is watching. This also undoes any poll backoff, so a
-        // connector that had drifted out to a two-minute interval reports its
-        // new state immediately rather than when its turn next comes round.
-        state.connectors.refresh_now(uuid).await;
-    }
-
-    // Both arms are recorded, and they are recorded as different things. A
-    // service that was reached and declined is `success: false` with its own
-    // words; a request that never got there is `success: false` with the
-    // transport's. Neither is an absence.
-    match outcome {
-        Ok(result) => {
-            complete_invocation(state, &log_id, result.success, &result.message).await;
-            Ok(result)
-        }
-        Err(error) => {
-            complete_invocation(state, &log_id, false, &error.to_string()).await;
-            Err(ActionFailure::Connector(error))
-        }
-    }
+    .map_err(|error| match error {
+        LoggedOperationFailure::Log(error) => ActionFailure::Log(error),
+        LoggedOperationFailure::Operation(error) => ActionFailure::Connector(error),
+    })
 }
 
 /* ------------------------------------------------------------------ */

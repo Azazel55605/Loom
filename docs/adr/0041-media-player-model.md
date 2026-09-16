@@ -69,8 +69,9 @@ attempt at a supported operation.
 
 ### Core discovers optional facets explicitly
 
-`Connector` gains `as_media_source()` and `as_media_target()`, both defaulting
-to `None`. Implementations opt in by returning the appropriate trait object.
+`Connector` gains `as_media_source(target_id)` and
+`as_media_target(target_id)`, both defaulting to `None`. Implementations opt in
+by returning the appropriate trait object.
 This avoids trait-object downcasting and follows the existing Connector pattern
 where optional sub-target and resource-kind capabilities have harmless empty
 defaults. Existing connectors change neither behavior nor implementation.
@@ -100,12 +101,29 @@ contract: hierarchy, thumbnails, search, and an optional ordinary connector
 action. `MediaSourceCapable` remains the richer promise that media can be
 resolved for playback; generic browsing does not imply that.
 
+The backend plumbing is now complete: playback-state, play-item, transport,
+seek, and volume endpoints enforce the existing connector permission boundary
+and write through the ordinary action-log lifecycle. DebugConnector proves both
+trait facets with its existing synthetic browse hierarchy and a mutex-protected
+fake player whose position advances in real time. A frontend media widget is
+still pending.
+
+### Amendment: target-aware capability discovery
+
+The original trait-foundation wording omitted `target_id` from
+`as_media_source` and `as_media_target`. Both discovery methods now accept
+`Option<&str>`, matching other optional connector capabilities. Multi-zone
+connectors such as a speaker orchestrator must be able to expose independent
+playback targets, and a future connector may also expose a source scoped to a
+sub-target. The first backend API uses a host-level source and per-sub-target
+playback targets as a practical v1 convention, but the Core contract does not
+hard-code that limitation.
+
 ### Scope of the foundation phase
 
-The original foundation phase was traits and types only. It intentionally added
-no media widget, browsable list/grid primitive, DebugConnector media fixture, or
-real media connector. The Image and generic browsing primitives have since
-landed as described above; media-specific widgets, fixtures, and real
+The original foundation phase was traits and types only. The Image and generic
+browsing primitives, backend endpoints, and DebugConnector media fixture have
+since landed as described above. Media-specific frontend widgets and real
 integrations still follow on top of those shared rendering surfaces.
 
 ## Consequences

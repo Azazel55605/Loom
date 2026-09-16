@@ -212,6 +212,12 @@ pub trait MediaTargetCapable: Send + Sync {
     /// Sets target volume as a percentage.
     async fn set_volume(&self, percent: u8) -> Result<(), MediaError>;
 
+    /// Enables or disables randomized queue order.
+    async fn set_shuffle(&self, enabled: bool) -> Result<(), MediaError>;
+
+    /// Sets how the target repeats its current item or queue.
+    async fn set_repeat(&self, mode: RepeatMode) -> Result<(), MediaError>;
+
     /// Advances to the next queued item.
     async fn skip_next(&self) -> Result<(), MediaError>;
 

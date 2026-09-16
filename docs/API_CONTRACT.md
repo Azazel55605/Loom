@@ -2526,6 +2526,77 @@ Both endpoints return 400 when the live connector does not advertise
 `supportsBrowsableContent`, 404 for a missing instance, 502 for connector
 reachability/authentication errors, and 500 for an internal connector error.
 
+## Media playback
+
+Media sources and playback targets are optional connector facets. In the v1
+HTTP shape, source resolution is requested from the connector's host-level
+facet (`as_media_source(None)`), representing one shared library, while a
+playback target is selected by its sub-target id. This is a simplifying first
+version, not a permanent restriction: Core's discovery methods are target-aware
+so a future connector may expose independently scoped libraries as well.
+
+`PlaybackState` contains `status` (`playing`, `paused`, or `stopped`),
+`position`, `volumePercent`, `currentItem`, `shuffle`, and `repeat` (`off`,
+`one`, or `all`). Chrono durations use their existing Serde wire form
+`[seconds, nanoseconds]`; a null position/duration means live or unavailable
+media.
+
+### `GET /connector-instances/{id}/media/playback-state?targetId={targetId}`
+
+Requires `connectors.view`. `targetId` is required and must be non-empty.
+Returns the target's current `PlaybackState`. Returns 400 when that connector
+does not expose `MediaTargetCapable` for the requested target.
+
+### `POST /connector-instances/{id}/media/play-item`
+
+Requires `connectors.control` for the connector instance, using the same
+resource-scoped permission check as an ordinary target action.
+
+```json
+{ "targetId": "living-room", "itemId": "library/track-1" }
+```
+
+The backend resolves `itemId` through the host-level media source, then passes
+the resulting playable to the selected media target. A missing source or target
+capability is 400. The invocation is recorded as `media.playItem` in the
+connector action log.
+
+### `POST /connector-instances/{id}/media/transport`
+
+Requires the same scoped `connectors.control` grant.
+
+```json
+{ "targetId": "living-room", "command": "pause" }
+```
+
+`command` is one of `pause`, `resume`, `stop`, `skipNext`, `skipPrevious`,
+`toggleShuffle`, or `toggleRepeat`. Repeat cycles `off` → `one` → `all` →
+`off`. Each command is logged under its corresponding `media.*` action id.
+
+### `POST /connector-instances/{id}/media/seek`
+
+```json
+{ "targetId": "living-room", "positionSeconds": 90 }
+```
+
+Requires the same scoped `connectors.control` grant. A target's structured
+`MediaError::Unsupported` is returned as a clear 400 response, rather than
+being flattened into a generic playback failure. Logged as `media.seek`.
+
+### `POST /connector-instances/{id}/media/volume`
+
+```json
+{ "targetId": "living-room", "percent": 65 }
+```
+
+Requires the same scoped `connectors.control` grant. `percent` must be from 0
+through 100. Logged as `media.setVolume`.
+
+All media write endpoints create their pending `connector_action_log` row
+before dispatch and record both success and failure. They therefore appear in
+the same per-instance History and global Audit Log views as ordinary connector
+actions.
+
 ## Discovery & Setup Guides
 
 Discovery has two complementary entry points. Instance-scoped discovery runs

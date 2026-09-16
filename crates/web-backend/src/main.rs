@@ -262,6 +262,7 @@ mod tests {
         ActionResult, Connector, ConnectorAction, ConnectorError, ConnectorMetadata,
         ConnectorStatus, DataPointDescriptor, DisplayField, WidgetLayout,
     };
+    use loom_core::media::{PlaybackState, PlaybackStatus, RepeatMode};
     use serde_json::Value;
     use std::net::SocketAddr;
     use std::time::Duration;
@@ -1644,6 +1645,11 @@ mod tests {
                 // at the default, which is what a client sees here.
                 { "id": "fixture-a", "label": "fixture-a", "kind": "target" },
                 { "id": "fixture-b", "label": "fixture-b", "kind": "target" },
+                {
+                    "id": "media-target-1",
+                    "label": "Fixture media player",
+                    "kind": "mediaPlayer",
+                },
             ])
         );
 
@@ -1847,6 +1853,197 @@ mod tests {
         assert!(body["error"]
             .as_str()
             .is_some_and(|message| message.contains("does not support")));
+    }
+
+    #[tokio::test]
+    async fn media_endpoints_control_the_debug_target_and_audit_every_write() {
+        let app = test_app().await;
+        let (access, _) = setup_and_login(&app.router).await;
+        let id = create_debug_instance(&app.router, &access, "Media fixture").await;
+        let target_id = loom_core::connector::debug::MEDIA_TARGET_ID;
+
+        let post_media = |suffix: &str, body: Value| {
+            post_json_auth(
+                &format!("/connector-instances/{id}/media/{suffix}"),
+                &access,
+                body,
+            )
+        };
+        let read_state = || {
+            get_with_auth(
+                &format!("/connector-instances/{id}/media/playback-state?targetId={target_id}"),
+                &bearer(&access),
+            )
+        };
+
+        let (status, body) = send(
+            &app.router,
+            post_media(
+                "play-item",
+                serde_json::json!({
+                    "targetId": target_id,
+                    "itemId": "collection-a/item-alpha",
+                }),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body:#}");
+
+        tokio::time::sleep(Duration::from_millis(25)).await;
+        let (status, body) = send(&app.router, read_state()).await;
+        assert_eq!(status, StatusCode::OK, "{body:#}");
+        let playing: PlaybackState = serde_json::from_value(body).unwrap();
+        assert_eq!(playing.status, PlaybackStatus::Playing);
+        assert!(playing.position.unwrap() >= chrono::Duration::milliseconds(15));
+
+        let transport = |command: &str| {
+            post_media(
+                "transport",
+                serde_json::json!({ "targetId": target_id, "command": command }),
+            )
+        };
+        assert_eq!(
+            send(&app.router, transport("pause")).await.0,
+            StatusCode::OK
+        );
+        let paused: PlaybackState =
+            serde_json::from_value(send(&app.router, read_state()).await.1).expect("paused state");
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        let still_paused: PlaybackState =
+            serde_json::from_value(send(&app.router, read_state()).await.1)
+                .expect("still-paused state");
+        assert_eq!(paused.position, still_paused.position);
+
+        assert_eq!(
+            send(&app.router, transport("resume")).await.0,
+            StatusCode::OK
+        );
+        assert_eq!(
+            send(
+                &app.router,
+                post_media(
+                    "seek",
+                    serde_json::json!({
+                        "targetId": target_id,
+                        "positionSeconds": 30,
+                    }),
+                ),
+            )
+            .await
+            .0,
+            StatusCode::OK
+        );
+        assert_eq!(
+            send(&app.router, transport("skipNext")).await.0,
+            StatusCode::OK
+        );
+        assert_eq!(
+            send(
+                &app.router,
+                post_media(
+                    "volume",
+                    serde_json::json!({ "targetId": target_id, "percent": 72 }),
+                ),
+            )
+            .await
+            .0,
+            StatusCode::OK
+        );
+        assert_eq!(
+            send(&app.router, transport("toggleShuffle")).await.0,
+            StatusCode::OK
+        );
+        assert_eq!(
+            send(&app.router, transport("toggleRepeat")).await.0,
+            StatusCode::OK
+        );
+        let configured: PlaybackState =
+            serde_json::from_value(send(&app.router, read_state()).await.1)
+                .expect("configured state");
+        assert_eq!(configured.volume_percent, 72);
+        assert!(configured.shuffle);
+        assert_eq!(configured.repeat, RepeatMode::One);
+
+        assert_eq!(send(&app.router, transport("stop")).await.0, StatusCode::OK);
+        let stopped: PlaybackState =
+            serde_json::from_value(send(&app.router, read_state()).await.1).expect("stopped state");
+        assert_eq!(stopped.status, PlaybackStatus::Stopped);
+
+        let entries = action_log(&app, &access, &id, "").await;
+        let action_ids: Vec<&str> = entries
+            .iter()
+            .filter_map(|entry| entry["actionId"].as_str())
+            .collect();
+        for expected in [
+            "media.playItem",
+            "media.pause",
+            "media.resume",
+            "media.seek",
+            "media.skipNext",
+            "media.setVolume",
+            "media.toggleShuffle",
+            "media.toggleRepeat",
+            "media.stop",
+        ] {
+            assert!(
+                action_ids.contains(&expected),
+                "missing {expected}: {entries:#?}"
+            );
+        }
+        assert!(entries.iter().all(|entry| {
+            entry["targetId"] == target_id
+                && entry["success"] == true
+                && entry["completedAt"].is_string()
+        }));
+
+        let (status, body) = send(
+            &app.router,
+            get_with_auth(
+                &format!("/connector-instances/{id}/media/playback-state?targetId=not-a-player"),
+                &bearer(&access),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{body:#}");
+        assert!(body["error"]
+            .as_str()
+            .is_some_and(|message| message.contains("no media target")));
+    }
+
+    #[tokio::test]
+    async fn media_control_uses_the_existing_instance_scoped_permission_boundary() {
+        let app = test_app().await;
+        let (admin, _) = setup_and_login(&app.router).await;
+        let id = create_debug_instance(&app.router, &admin, "Allowed media").await;
+        let other = create_debug_instance(&app.router, &admin, "Denied media").await;
+        let scoped = user_with_grants(
+            &app.router,
+            &admin,
+            "media-controller",
+            serde_json::json!([{
+                "key": "connectors.control",
+                "resourceType": "connector",
+                "resourceId": id,
+            }]),
+        )
+        .await;
+        let request = |instance: &str| {
+            post_json_auth(
+                &format!("/connector-instances/{instance}/media/play-item"),
+                &scoped,
+                serde_json::json!({
+                    "targetId": loom_core::connector::debug::MEDIA_TARGET_ID,
+                    "itemId": "loose-item",
+                }),
+            )
+        };
+
+        let (status, body) = send(&app.router, request(&id)).await;
+        assert_eq!(status, StatusCode::OK, "{body:#}");
+        assert_eq!(
+            send(&app.router, request(&other)).await.0,
+            StatusCode::FORBIDDEN
+        );
     }
 
     #[tokio::test]
