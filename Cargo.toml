@@ -2,6 +2,7 @@
 resolver = "2"
 members = [
     "crates/core",
+    "crates/media",
     "crates/connector-docker",
     "crates/connector-govee",
     "crates/connector-pihole",
@@ -20,6 +21,9 @@ rust-version = "1.82"
 
 [workspace.dependencies]
 loom-core = { path = "crates/core" }
+# Shared, transport-neutral media source/target contracts. This stays below
+# Core in the dependency graph so Connector can expose optional media facets.
+loom-media = { path = "crates/media" }
 loom-connector-docker = { path = "crates/connector-docker" }
 loom-connector-govee = { path = "crates/connector-govee" }
 loom-connector-pihole = { path = "crates/connector-pihole" }

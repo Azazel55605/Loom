@@ -31,6 +31,14 @@
 /// fixture for developing and testing clients with no real services around.
 pub mod connector;
 
+/// Shared media source/target traits and their transport-neutral data types.
+///
+/// The definitions live in the dependency-leaf `loom-media` crate so the base
+/// [`connector::Connector`] trait can expose optional media facets without a
+/// crate cycle. Re-exporting the crate here gives connector implementations one
+/// stable `loom_core::media` path for the complete contract.
+pub use loom_media as media;
+
 /// Returns the version of `loom-core` this binary was built against.
 ///
 /// This is the crate's `CARGO_PKG_VERSION`, baked in at compile time. It exists

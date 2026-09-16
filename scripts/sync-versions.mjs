@@ -33,6 +33,7 @@ const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 // string.
 const TARGETS = {
   core: [{ path: "crates/core/Cargo.toml", kind: "cargo" }],
+  media: [{ path: "crates/media/Cargo.toml", kind: "cargo" }],
   // A connector versions independently of the platform on purpose: its
   // `ConnectorMetadata.version` is published in the API so a client can tell
   // which revision of an integration produced a reading, and an integration is

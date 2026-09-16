@@ -52,6 +52,12 @@ standalone mode. It is linked into whatever needs it. This is deliberate — Cor
 gets linked into clients that run on a user's machine, so it must never be the
 thing deciding whether an action is permitted.
 
+The transport-neutral media capability contract lives one layer below Core in
+`crates/media` (`loom-media`). Core depends on and re-exports its source/target
+traits so `Connector` can expose optional media facets without a dependency
+cycle. The media crate contains no service implementation or network surface;
+see [ADR 0041](./adr/0041-media-player-model.md).
+
 ## Web/backend
 
 The **one running server** (`crates/web-backend`). It depends on Core and owns:

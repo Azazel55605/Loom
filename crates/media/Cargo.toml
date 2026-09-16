@@ -1,0 +1,26 @@
+[package]
+name = "loom-media"
+description = "Shared media source and playback-target contracts for Loom connectors."
+edition.workspace = true
+license.workspace = true
+version = "0.1.0"
+publish = false
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+# Keeps async media contracts dyn-compatible on Loom's pinned Rust toolchain.
+async-trait.workspace = true
+# Media durations use a signed, serialization-aware domain type rather than
+# transport-specific integer units.
+chrono.workspace = true
+# Media contracts cross crate and, later, API boundaries as stable wire types.
+serde.workspace = true
+# Media failures remain structured on the wire and readable in diagnostics.
+thiserror.workspace = true
+
+[dev-dependencies]
+# Type-level contract tests execute async trait objects under Loom's runtime.
+tokio.workspace = true
+# Wire-shape sanity tests ensure the shared serde contract stays round-trippable.
+serde_json.workspace = true

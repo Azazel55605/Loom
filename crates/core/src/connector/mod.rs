@@ -24,6 +24,7 @@
 
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
+use loom_media::{MediaSourceCapable, MediaTargetCapable};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::HashMap;
@@ -47,6 +48,25 @@ pub mod details;
 /// form for it without shipping per-connector UI code.
 #[async_trait]
 pub trait Connector: Send + Sync {
+    /// Exposes this connector's optional media-source facet.
+    ///
+    /// Connectors that can browse, search, and resolve playable media override
+    /// this and return themselves (or a contained implementation). The default
+    /// is `None`, so existing connectors and connectors with only playback
+    /// target behavior opt out without boilerplate.
+    fn as_media_source(&self) -> Option<&dyn MediaSourceCapable> {
+        None
+    }
+
+    /// Exposes this connector's optional media-playback-target facet.
+    ///
+    /// Connectors that control a player override this and return themselves (or
+    /// a contained implementation). The default is `None`, so existing
+    /// connectors and source-only connectors remain unaffected.
+    fn as_media_target(&self) -> Option<&dyn MediaTargetCapable> {
+        None
+    }
+
     /// Checks in on the service and reports how it is doing right now.
     ///
     /// This is expected to be called repeatedly on a polling interval by
@@ -2114,6 +2134,18 @@ mod tests {
             stub.check_for_updates(None).await.unwrap(),
             UpdateCheckResult::up_to_date()
         );
+    }
+
+    /// Media is an optional connector facet. Existing connectors discover as
+    /// neither a source nor a target until they explicitly opt in.
+    #[test]
+    fn a_connector_defaults_to_no_media_capabilities() {
+        let stub = StubConnector {
+            id: "stub-media",
+            health: HealthState::Healthy,
+        };
+        assert!(stub.as_media_source().is_none());
+        assert!(stub.as_media_target().is_none());
     }
 
     #[test]

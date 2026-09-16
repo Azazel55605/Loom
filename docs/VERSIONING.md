@@ -6,6 +6,7 @@ truth** for every product's version. It has one entry per product:
 ```json
 {
   "core": "0.1.0",
+  "media": "0.1.0",
   "connector-docker": "0.1.0",
   "connector-govee": "0.1.0",
   "connector-pihole": "0.1.0",
@@ -91,6 +92,7 @@ reject it.
 | Product | Files |
 | --- | --- |
 | `core` | `crates/core/Cargo.toml` → `package.version` |
+| `media` | `crates/media/Cargo.toml` → `package.version` |
 | `connector-docker` | `crates/connector-docker/Cargo.toml` → `package.version` |
 | `connector-govee` | `crates/connector-govee/Cargo.toml` → `package.version` |
 | `connector-pihole` | `crates/connector-pihole/Cargo.toml` → `package.version` |
