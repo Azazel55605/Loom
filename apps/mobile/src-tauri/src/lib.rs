@@ -36,6 +36,38 @@ pub fn run() {
             Ok(())
         })
         .plugin(tauri_plugin_store::Builder::default().build())
-        .run(tauri::generate_context!())
-        .expect("error while running Loom mobile");
+        .build(tauri::generate_context!())
+        .expect("error while building Loom mobile")
+        .run(|app, event| {
+            if matches!(event, tauri::RunEvent::Resumed) {
+                restore_missing_webviews(app);
+            }
+        });
+}
+
+/// Rebuilds the configured webview when an Activity comes back without one.
+///
+/// Android may destroy the Activity while keeping this process alive — which is
+/// routine for a home app, whose Activity is started and torn down far more
+/// often than an ordinary app's. The Activity that comes back then has no
+/// webview attached and no frontend is ever loaded, so the app draws an empty
+/// window and no JavaScript runs at all (tauri-apps/tauri#15671). Rebuilding
+/// from the same window config `setup` would have used restores the UI.
+///
+/// A no-op whenever a webview is present, which is every ordinary resume.
+fn restore_missing_webviews<R: tauri::Runtime>(app: &tauri::AppHandle<R>) {
+    if !app.webview_windows().is_empty() {
+        return;
+    }
+    for window in app.config().app.windows.clone() {
+        let label = window.label.clone();
+        match tauri::WebviewWindowBuilder::from_config(app, &window)
+            .and_then(|builder| builder.build())
+        {
+            Ok(_) => {}
+            // Reported rather than fatal: the alternative to an empty window is
+            // not a crash on the user's wall-mounted display.
+            Err(error) => eprintln!("could not restore the webview for {label}: {error}"),
+        }
+    }
 }

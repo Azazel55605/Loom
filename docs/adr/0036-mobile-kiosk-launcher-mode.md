@@ -155,6 +155,16 @@ Kiosk mode decides how Loom presents dashboards once open; the home role
 decides what opens when the Home button is pressed. Either is useful alone, and
 a wall-mounted tablet typically wants both.
 
+A home app's Activity is created and destroyed far more often than an ordinary
+app's, and Android may destroy it while keeping the process alive. Tauri leaves
+the returning Activity without a webview in that case, so the window comes back
+empty and no frontend ever loads (tauri-apps/tauri#15671). Mobile therefore
+rebuilds the configured webview on `Resumed` whenever none is attached. For the
+same reason every waiting state in the mobile tree renders a visible boot or
+reconnect screen rather than nothing: a device that boots straight into Loom has
+no other UI behind it, so a silent empty render is indistinguishable from a
+broken install.
+
 Back behaviour is the one thing that changes with the home role, and it changes
 only at the last tier of the back-handler stack. A launch is classified per
 instance by asking the Activity's own start Intent whether it carried

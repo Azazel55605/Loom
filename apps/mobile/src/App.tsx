@@ -216,7 +216,7 @@ function MobileRuntime({
       tokenStorage={mobileTokenStorage}
       webSocketTransport={mobileWebSocketTransport}
     >
-      <React.Suspense fallback={null}>
+      <React.Suspense fallback={<BootScreen baseUrl={server.connection.baseUrl} />}>
         <MobileKioskModeProvider>
           <MobileRoutes />
         </MobileKioskModeProvider>
@@ -294,7 +294,9 @@ function MobileExperience({ children }: { children: React.ReactNode }) {
   const { isAuthenticated, isRestoring, sessionRecovery, serverBaseUrl, user } = useAuth();
   const navigate = useNavigate();
 
-  if (kiosk.isLoading || kiosk.isTransitioning || isRestoring) return null;
+  if (kiosk.isLoading || kiosk.isTransitioning || isRestoring) {
+    return <BootScreen baseUrl={serverBaseUrl} />;
+  }
   if (!kiosk.enabled) return <>{children}</>;
   // Only a cleared session — which nothing but a genuine 401 or a deliberate
   // sign-out produces — reaches the credential prompt.
@@ -304,7 +306,9 @@ function MobileExperience({ children }: { children: React.ReactNode }) {
   if (user === null) {
     return sessionRecovery === "reconnecting" ? (
       <KioskReconnectingScreen serverBaseUrl={serverBaseUrl} />
-    ) : null;
+    ) : (
+      <KioskReconnectingScreen serverBaseUrl={serverBaseUrl} verifying />
+    );
   }
   if (user.id !== kiosk.accountId) {
     return <KioskRecoveryScreen expectedAccountId={kiosk.accountId} />;
@@ -314,8 +318,9 @@ function MobileExperience({ children }: { children: React.ReactNode }) {
 
 function RequireSetup({ children }: { children: React.ReactNode }) {
   const setup = useSetupStatus();
+  const { serverBaseUrl } = useAuth();
   const location = useLocation();
-  if (setup.isPending) return null;
+  if (setup.isPending) return <BootScreen baseUrl={serverBaseUrl} />;
   if (setup.isError) return <>{children}</>;
   if (setup.data.setupComplete === false && location.pathname !== "/setup") {
     return <Navigate to="/setup" replace />;
@@ -326,7 +331,7 @@ function RequireSetup({ children }: { children: React.ReactNode }) {
 function RequireAuth({ children }: { children: React.ReactNode }) {
   const { isAuthenticated, isRestoring, sessionRecovery, serverBaseUrl, user } = useAuth();
   const location = useLocation();
-  if (isRestoring) return null;
+  if (isRestoring) return <BootScreen baseUrl={serverBaseUrl} />;
   // A session held but not yet verifiable because the server is unreachable:
   // wait for it rather than sending a signed-in user to the login screen.
   if (isAuthenticated && user === null && sessionRecovery === "reconnecting") {
