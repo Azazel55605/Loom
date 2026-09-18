@@ -126,18 +126,21 @@
   width: 0.5rem;
   height: 0.5rem;
   border-radius: 9999px;
-  background: hsl(var(--muted-foreground) / 0.7);
-  transition: width var(--motion-base) var(--motion-ease-standard);
+  background: hsl(var(--muted-foreground));
+  transition:
+    width var(--motion-base) var(--motion-ease-standard),
+    background-color var(--motion-base) var(--motion-ease-standard);
 }
 
 /* The active dot is styled here rather than with a `bg-primary` utility: this
    rule's two-class selector outranks a single-class Tailwind utility, so the
    inactive background above would always win and every dot would look alike.
    It also lengthens, because colour alone was not enough to read at a glance
-   from across a room. */
+   from across a room. The colour is `--accent` rather than `--primary`, so the
+   current position follows the accent the user picked. */
 .mobile-platform .mobile-kiosk-dot[data-active="true"] {
   width: 1.25rem;
-  background: hsl(var(--primary));
+  background: hsl(var(--accent));
 }
 
 /* The name of the dashboard on screen. Dots give the position in the rotation;
