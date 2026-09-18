@@ -83,6 +83,33 @@ if (!manifest.includes("android:screenOrientation=")) {
     '<activity\n            android:screenOrientation="fullUser"',
   );
 }
+
+// Offer Loom in Android's home-app chooser. Tauri's `tauri.conf.json` has no
+// manifest customization of its own — its Android config covers only
+// minSdkVersion and the version code — so the generated manifest is patched
+// here, alongside every other Loom-specific attribute above. The filter only
+// makes Loom selectable: Android decides who holds the home role, the user
+// selects it, and it stays revocable in Settings.
+if (!manifest.includes("android.intent.category.HOME")) {
+  manifest = manifest.replace(
+    /<\/intent-filter>/,
+    `</intent-filter>
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.HOME" />
+                <category android:name="android.intent.category.DEFAULT" />
+            </intent-filter>`,
+  );
+}
+// A home app must be startable without restored state: the system may launch it
+// before it would normally restore one. `launchMode="singleTask"` is already on
+// the generated activity, which is what keeps Home from stacking instances.
+if (!manifest.includes("android:stateNotNeeded=")) {
+  manifest = manifest.replace(
+    /<activity\b/,
+    '<activity\n            android:stateNotNeeded="true"',
+  );
+}
 await writeFile(manifestPath, manifest, "utf8");
 
 await mkdir(dirname(generatedPolicyPath), { recursive: true });
@@ -97,5 +124,5 @@ await Promise.all(
 await rm(generatedDebugApkPath, { force: true });
 
 console.log(
-  "Applied Loom's Android policy, launcher icons, orientation, and clean APK output.",
+  "Applied Loom's Android policy, launcher icons, orientation, home-app filter, and clean APK output.",
 );

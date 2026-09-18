@@ -3,6 +3,7 @@ import { onBackButtonPress } from "@tauri-apps/api/app";
 import { isTauri } from "@tauri-apps/api/core";
 import { useNavigate } from "react-router-dom";
 
+import { isActingAsLauncher } from "@/adapters/mobileLauncher";
 import { QuitConfirmDialog } from "@/components/QuitConfirmDialog";
 import { useMobileKioskMode } from "@/components/mobileKioskMode";
 import { BackHandlerStack } from "@loom/ui-kit/lib/back-handler-stack";
@@ -21,6 +22,18 @@ export function MobileBackNavigation({ children }: { children: React.ReactNode }
   const navigate = useNavigate();
   const kiosk = useMobileKioskMode();
   const [quitOpen, setQuitOpen] = React.useState(false);
+  const [actingAsLauncher, setActingAsLauncher] = React.useState(false);
+
+  // Asked once per launch, because that is the lifetime of the answer.
+  React.useEffect(() => {
+    let cancelled = false;
+    void isActingAsLauncher().then((value) => {
+      if (!cancelled) setActingAsLauncher(value);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   const handleBackRef = React.useRef<() => void>(() => undefined);
   handleBackRef.current = () => {
@@ -33,6 +46,13 @@ export function MobileBackNavigation({ children }: { children: React.ReactNode }
       navigate(-1);
       return;
     }
+
+    // Back at the true root while Loom *is* the home screen does nothing, the
+    // way back on any other home screen does nothing: there is nowhere behind
+    // the home screen to go, and offering to quit would leave the device with
+    // no home app on screen. Every tier above this one is untouched, and so is
+    // the kiosk exit gesture, which is its own authenticated flow.
+    if (actingAsLauncher) return;
 
     setQuitOpen(true);
   };

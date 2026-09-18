@@ -11,6 +11,7 @@
 //! presentation is active — see `immersive` and ADR 0036.
 
 mod immersive;
+mod launcher;
 
 use tauri::Manager;
 
@@ -19,7 +20,11 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_http::init())
         .plugin(tauri_plugin_process::init())
-        .invoke_handler(tauri::generate_handler![immersive::set_immersive_mode])
+        .invoke_handler(tauri::generate_handler![
+            immersive::set_immersive_mode,
+            launcher::is_acting_as_launcher,
+            launcher::open_home_app_settings
+        ])
         .setup(|app| {
             let salt_path = app
                 .path()

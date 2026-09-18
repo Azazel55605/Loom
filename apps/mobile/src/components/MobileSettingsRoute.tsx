@@ -1,6 +1,7 @@
 import { Outlet, useLocation, useNavigate } from "react-router-dom";
 
 import { MobileAppShell } from "@/components/MobileAppShell";
+import { MobileHomeAppSettingsCard } from "@/components/MobileHomeAppSettingsCard";
 import { MobileKioskSettingsCard } from "@/components/MobileKioskSettingsCard";
 import { ServerSwitcherTrigger } from "@loom/ui-kit/components/ServerSwitcher";
 import { SettingsLayout } from "@loom/ui-kit/components/SettingsLayout";
@@ -28,6 +29,7 @@ export function MobileSettingsRoute() {
         <div className="flex flex-col gap-4">
           <GeneralPanel />
           <MobileKioskSettingsCard />
+          <MobileHomeAppSettingsCard />
           <Card>
             <CardHeader>
               <CardTitle className="text-lg">Server</CardTitle>

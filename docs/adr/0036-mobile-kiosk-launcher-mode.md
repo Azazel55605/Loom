@@ -127,6 +127,47 @@ Subscribing adjacent dashboards ahead of time would put many instances on the
 socket for readings nobody is looking at. Live status stays the business of the
 visible dashboard.
 
+### Home-app (launcher) registration
+
+Mobile's Activity declares a second intent filter — `MAIN` + `HOME` +
+`DEFAULT` — which makes Loom *selectable* in Android's home-app chooser. It
+does not make Loom the launcher: Android owns the home role, the user grants it
+explicitly through the system's own dialog or settings screen, and it is
+revocable from Settings at any time. That is the distinction this ADR's
+least-privilege position rests on. A launcher is an ordinary, user-granted,
+user-revocable app capability; it administers nothing, survives no factory
+policy, and grants Loom no authority over the device or over any other app.
+Device-owner and MDM provisioning, rejected above, remain rejected: nothing
+here requests an elevated operating-system privilege, and Loom still holds only
+normal application permissions.
+
+Tauri's configuration has no manifest customization — its Android config covers
+`minSdkVersion` and the version code and nothing else — so the filter is
+applied by `scripts/configure-mobile-android.mjs` alongside the network-security
+policy, launcher icons and orientation already patched there, idempotently,
+because `gen/android` is generated and untracked. The generated activity is
+already `launchMode="singleTask"`, which is what a home app needs so Home does
+not stack instances; the script adds `stateNotNeeded="true"` for the same
+reason.
+
+Being the home app and being a kiosk are independent settings that compose.
+Kiosk mode decides how Loom presents dashboards once open; the home role
+decides what opens when the Home button is pressed. Either is useful alone, and
+a wall-mounted tablet typically wants both.
+
+Back behaviour is the one thing that changes with the home role, and it changes
+only at the last tier of the back-handler stack. A launch is classified per
+instance by asking the Activity's own start Intent whether it carried
+`CATEGORY_HOME`, which is what the system's home intent sets and what tapping
+the app icon (`CATEGORY_LAUNCHER`) does not. Nothing is persisted: the same
+installation is the home screen on one start and an ordinary app on the next,
+and only the starting Intent knows which. When this instance is the home
+screen, back at the true root does nothing, matching every other Android home
+screen — there is nowhere behind the home screen, and quitting would leave the
+device with no home app on screen. When it is not, the existing quit
+confirmation is unchanged. The overlay-dismissal and router-history tiers above
+it, and the authenticated kiosk exit gesture, behave identically either way.
+
 ## Rejected alternative: Android device-owner or MDM provisioning
 
 Android Enterprise device-owner or MDM enrollment would grant substantially
