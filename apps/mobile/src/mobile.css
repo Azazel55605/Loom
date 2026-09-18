@@ -91,10 +91,12 @@
   --mobile-kiosk-inset-bottom: env(safe-area-inset-bottom, 0px);
   --mobile-kiosk-inset-left: env(safe-area-inset-left, 0px);
   position: fixed;
-  top: var(--mobile-kiosk-inset-top);
-  right: var(--mobile-kiosk-inset-right);
-  bottom: var(--mobile-kiosk-inset-bottom);
-  left: var(--mobile-kiosk-inset-left);
+  inset: 0;
+  padding:
+    var(--mobile-kiosk-inset-top)
+    var(--mobile-kiosk-inset-right)
+    var(--mobile-kiosk-inset-bottom)
+    var(--mobile-kiosk-inset-left);
   overflow-y: auto;
   overscroll-behavior: contain;
   background: hsl(var(--background));
@@ -124,14 +126,33 @@
   width: 0.5rem;
   height: 0.5rem;
   border-radius: 9999px;
-  background: hsl(var(--muted-foreground) / 0.45);
+  background: hsl(var(--muted-foreground) / 0.7);
+  transition: width var(--motion-base) var(--motion-ease-standard);
 }
 
 /* The active dot is styled here rather than with a `bg-primary` utility: this
    rule's two-class selector outranks a single-class Tailwind utility, so the
-   inactive background above would always win and every dot would look alike. */
+   inactive background above would always win and every dot would look alike.
+   It also lengthens, because colour alone was not enough to read at a glance
+   from across a room. */
 .mobile-platform .mobile-kiosk-dot[data-active="true"] {
+  width: 1.25rem;
   background: hsl(var(--primary));
+}
+
+/* The name of the dashboard on screen. Dots give the position in the rotation;
+   they cannot say which dashboard that position is. */
+.mobile-platform .mobile-kiosk-dot-label {
+  max-width: 12rem;
+  overflow: hidden;
+  padding-inline: 0.5rem 0.75rem;
+  border-left: 1px solid hsl(var(--border));
+  margin-left: 0.25rem;
+  color: hsl(var(--foreground));
+  font-size: 0.8125rem;
+  line-height: 1.2;
+  white-space: nowrap;
+  text-overflow: ellipsis;
 }
 
 /* Deliberately the opposite corner from the exit hold: a single tap that sleeps
@@ -170,19 +191,25 @@
     hsl(var(--muted) / 0.35);
 }
 
+/* Full-bleed on purpose: the insets become padding rather than offsets, so the
+   ambient background reaches every edge while the clock and reading stay clear
+   of a cutout. Offsetting the element instead left the page background showing
+   as a band along the top and bottom once immersive mode removed the system
+   bars, because the app-wide inset variables floor at a touch-safe 1.5rem. */
 .mobile-platform .mobile-kiosk-screensaver {
   position: fixed;
-  top: var(--mobile-safe-area-top);
-  right: var(--mobile-safe-area-right);
-  bottom: var(--mobile-safe-area-bottom);
-  left: var(--mobile-safe-area-left);
+  inset: 0;
   display: flex;
   flex-direction: column;
   align-items: center;
   justify-content: center;
   gap: clamp(3rem, 12vh, 7rem);
   overflow: hidden;
-  padding: 2rem;
+  padding:
+    calc(env(safe-area-inset-top, 0px) + 2rem)
+    calc(env(safe-area-inset-right, 0px) + 2rem)
+    calc(env(safe-area-inset-bottom, 0px) + 2rem)
+    calc(env(safe-area-inset-left, 0px) + 2rem);
   color: hsl(var(--foreground));
   background:
     radial-gradient(circle at 50% 40%, hsl(var(--accent) / 0.12), transparent 42%),

@@ -282,6 +282,9 @@ export function MobileKioskShell({ onExited }: { onExited: () => void }) {
               />
             </Button>
           ))}
+          {activeDashboard !== undefined ? (
+            <span className="mobile-kiosk-dot-label">{activeDashboard.name}</span>
+          ) : null}
         </div>
       ) : null}
 
