@@ -66,7 +66,15 @@ import { useApiClient, useConnectorStatusSocket } from "@loom/ui-kit/lib/api-con
 import { describeConnectorError } from "@loom/ui-kit/lib/connector-error";
 import { useAppearance } from "@loom/ui-kit/components/AccentThemeProvider";
 
-const dashboardQueryKey = (dashboardId: string) => ["dashboard", dashboardId] as const;
+/**
+ * The cache key for one dashboard's structure and placements.
+ *
+ * Exported so a host can warm a dashboard it is about to show — prefetching
+ * this key fills the cache without mounting the view, and therefore without
+ * opening that dashboard's connector status subscriptions.
+ */
+export const dashboardQueryKey = (dashboardId: string) =>
+  ["dashboard", dashboardId] as const;
 
 /**
  * Grid geometry.

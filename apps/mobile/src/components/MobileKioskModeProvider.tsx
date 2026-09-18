@@ -8,6 +8,7 @@ import {
   setMobileScreensaverEnabled,
   setMobileScreensaverIdleSeconds,
 } from "@/adapters/mobileKioskSettings";
+import { setMobileImmersiveMode } from "@/adapters/mobileImmersiveMode";
 import { MobileKioskModeContext } from "@/components/mobileKioskMode";
 
 export function MobileKioskModeProvider({ children }: { children: React.ReactNode }) {
@@ -42,6 +43,19 @@ export function MobileKioskModeProvider({ children }: { children: React.ReactNod
       cancelled = true;
     };
   }, []);
+
+  // Kiosk presentation is full-screen, so the system bars go away with it and
+  // come back the moment it ends — including the authenticated exit, which
+  // clears `enabled`, and an unmount. Driving it from the flag rather than from
+  // the shell keeps the screensaver immersive too: it replaces the dashboard
+  // tree inside the same active kiosk session.
+  React.useEffect(() => {
+    if (isLoading) return;
+    void setMobileImmersiveMode(enabled);
+    return () => {
+      if (enabled) void setMobileImmersiveMode(false);
+    };
+  }, [enabled, isLoading]);
 
   const enable = React.useCallback(async (nextAccountId: string) => {
     await enableMobileKioskMode(nextAccountId);

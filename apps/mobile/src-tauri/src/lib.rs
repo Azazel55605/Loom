@@ -1,11 +1,16 @@
 //! Loom mobile client.
 //!
 //! The window hosts the same React UI the web frontend uses; all privileged
-//! work happens in `web-backend` over its HTTP API, so this shell exposes only
-//! persistence and native HTTP transport plugins, not app-specific commands.
+//! work happens in `web-backend` over its HTTP API, so this shell exposes
+//! persistence and native HTTP transport plugins plus one window-decoration
+//! command, and no privileged app-specific commands.
 //! Public server configuration is persisted by Store; authentication tokens
 //! are encrypted by Stronghold. See
-//! `docs/adr/0010-desktop-secure-storage-and-network-config.md`.
+//! `docs/adr/0010-desktop-secure-storage-and-network-config.md`. The single
+//! command, `set_immersive_mode`, hides the Android system bars while kiosk
+//! presentation is active — see `immersive` and ADR 0036.
+
+mod immersive;
 
 use tauri::Manager;
 
@@ -14,6 +19,7 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_http::init())
         .plugin(tauri_plugin_process::init())
+        .invoke_handler(tauri::generate_handler![immersive::set_immersive_mode])
         .setup(|app| {
             let salt_path = app
                 .path()

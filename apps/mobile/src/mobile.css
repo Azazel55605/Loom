@@ -75,13 +75,26 @@
 }
 
 /* Kiosk presentation is its own safe-area owner because it deliberately skips
-   AppShell and therefore has no sticky header to reserve the system bars. */
+   AppShell and therefore has no sticky header to reserve the system bars.
+
+   It reads `env()` directly rather than the app-wide `--mobile-safe-area-*`
+   variables, which floor the top and bottom insets at a touch-safe 1.5rem to
+   protect content from system bars that are always visible elsewhere. Kiosk
+   mode hides both bars (see ADR 0036), so that floor would reserve space for
+   chrome that is not on screen. Reading the live inset means the shell follows
+   whatever the device actually reports — the full cutout while the bars are
+   coming down, zero once they are gone, and the real value again if immersive
+   mode is unavailable — with no fixed assumption about either. */
 .mobile-platform .mobile-kiosk-shell {
+  --mobile-kiosk-inset-top: env(safe-area-inset-top, 0px);
+  --mobile-kiosk-inset-right: env(safe-area-inset-right, 0px);
+  --mobile-kiosk-inset-bottom: env(safe-area-inset-bottom, 0px);
+  --mobile-kiosk-inset-left: env(safe-area-inset-left, 0px);
   position: fixed;
-  top: var(--mobile-safe-area-top);
-  right: var(--mobile-safe-area-right);
-  bottom: var(--mobile-safe-area-bottom);
-  left: var(--mobile-safe-area-left);
+  top: var(--mobile-kiosk-inset-top);
+  right: var(--mobile-kiosk-inset-right);
+  bottom: var(--mobile-kiosk-inset-bottom);
+  left: var(--mobile-kiosk-inset-left);
   overflow-y: auto;
   overscroll-behavior: contain;
   background: hsl(var(--background));
@@ -89,7 +102,7 @@
 
 .mobile-platform .mobile-kiosk-dots {
   position: fixed;
-  bottom: calc(var(--mobile-safe-area-bottom) + 0.5rem);
+  bottom: calc(var(--mobile-kiosk-inset-bottom) + 0.5rem);
   left: 50%;
   display: flex;
   max-width: calc(100vw - 7rem);
@@ -121,10 +134,28 @@
   background: hsl(var(--primary));
 }
 
+/* Deliberately the opposite corner from the exit hold: a single tap that sleeps
+   the display and a three-second hold that opens an authentication boundary
+   must never be reachable by the same misjudged touch. Kept small and faint so
+   it recedes behind the dashboard it sits on. */
+.mobile-platform .mobile-kiosk-sleep {
+  position: fixed;
+  top: calc(var(--mobile-kiosk-inset-top) + 0.5rem);
+  right: calc(var(--mobile-kiosk-inset-right) + 0.5rem);
+  min-width: 2.75rem;
+  min-height: 2.75rem;
+  opacity: 0.3;
+}
+
+.mobile-platform .mobile-kiosk-sleep svg {
+  width: 1rem;
+  height: 1rem;
+}
+
 .mobile-platform .mobile-kiosk-exit-hold {
   position: fixed;
-  right: calc(var(--mobile-safe-area-right) + 0.5rem);
-  bottom: calc(var(--mobile-safe-area-bottom) + 0.5rem);
+  right: calc(var(--mobile-kiosk-inset-right) + 0.5rem);
+  bottom: calc(var(--mobile-kiosk-inset-bottom) + 0.5rem);
   min-width: 2.75rem;
   min-height: 2.75rem;
   opacity: 0.35;

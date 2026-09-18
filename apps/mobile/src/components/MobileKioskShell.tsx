@@ -1,10 +1,10 @@
 import * as React from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { LockKeyhole } from "lucide-react";
+import { LockKeyhole, MoonStar } from "lucide-react";
 
 import { KioskExitDialog } from "@/components/KioskExitDialog";
 import { dashboardsQueryKey } from "@loom/ui-kit/components/DashboardSidebar";
-import { DashboardView } from "@loom/ui-kit/components/DashboardView";
+import { DashboardView, dashboardQueryKey } from "@loom/ui-kit/components/DashboardView";
 import { MotionContent } from "@loom/ui-kit/components/MotionContent";
 import { NetworkAdvisoryBanner } from "@loom/ui-kit/components/NetworkAdvisoryBanner";
 import { Alert, AlertDescription, AlertTitle } from "@loom/ui-kit/components/ui/alert";
@@ -18,6 +18,8 @@ import { useMobileKioskMode } from "@/components/mobileKioskMode";
 
 const SWIPE_THRESHOLD_PX = 60;
 const EXIT_HOLD_MS = 3_000;
+/** Long enough that swiping through the rotation does not refetch each step. */
+const PREFETCH_STALE_MS = 60_000;
 
 export function MobileKioskShell({ onExited }: { onExited: () => void }) {
   const api = useApiClient();
@@ -54,6 +56,61 @@ export function MobileKioskShell({ onExited }: { onExited: () => void }) {
   React.useEffect(() => {
     if (index !== boundedIndex) setIndex(boundedIndex);
   }, [boundedIndex, index]);
+
+  // Warm the dashboards a swipe can reach next.
+  //
+  // Only the *structure* query is prefetched, and deliberately so: filling this
+  // cache key removes the loading skeleton on arrival, while opening a
+  // connector status subscription for a dashboard nobody is looking at would
+  // put many instances on the socket for no visible benefit. Live status stays
+  // the business of the mounted `DashboardView`, which subscribes when a
+  // dashboard actually becomes visible.
+  //
+  // It waits for the visible dashboard to settle first — `ensureQueryData`
+  // resolves immediately when it is already cached — so a prefetch never
+  // competes with the fetch the person is waiting on.
+  React.useEffect(() => {
+    if (activeDashboard === undefined || dashboardList.length < 2) return;
+    let cancelled = false;
+
+    void (async () => {
+      try {
+        await queryClient.ensureQueryData({
+          queryKey: dashboardQueryKey(activeDashboard.id),
+          queryFn: ({ signal }) => api.getDashboard(activeDashboard.id, signal),
+        });
+      } catch {
+        // The visible view owns reporting its own failure.
+        return;
+      }
+      if (cancelled) return;
+
+      const neighbours = new Set<string>();
+      const current = dashboardList.findIndex(
+        (dashboard) => dashboard.id === activeDashboard.id,
+      );
+      if (current >= 0) {
+        const { length } = dashboardList;
+        // Wrapped, matching the swipe: at either end the neighbour is the
+        // dashboard on the other side of the rotation.
+        neighbours.add(dashboardList[(current + 1) % length].id);
+        neighbours.add(dashboardList[(current - 1 + length) % length].id);
+      }
+      neighbours.delete(activeDashboard.id);
+
+      for (const dashboardId of neighbours) {
+        void queryClient.prefetchQuery({
+          queryKey: dashboardQueryKey(dashboardId),
+          queryFn: ({ signal }) => api.getDashboard(dashboardId, signal),
+          staleTime: PREFETCH_STALE_MS,
+        });
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [activeDashboard, api, dashboardList, queryClient]);
 
   React.useEffect(
     () => () => {
@@ -113,6 +170,15 @@ export function MobileKioskShell({ onExited }: { onExited: () => void }) {
   function showRotationIndex(nextIndex: number) {
     setOffRotationId(null);
     setIndex(nextIndex);
+  }
+
+  function sleepNow() {
+    // The idle watcher treats any pointer event as activity, including the tap
+    // that lands here, so the timestamp is moved along with the state: without
+    // it the watcher would immediately see fresh activity and wake the display
+    // back up on the next tick.
+    lastActivityAt.current = Date.now();
+    setScreensaverVisible(true);
   }
 
   if (screensaverVisible) {
@@ -218,6 +284,17 @@ export function MobileKioskShell({ onExited }: { onExited: () => void }) {
           ))}
         </div>
       ) : null}
+
+      <Button
+        type="button"
+        variant="ghost"
+        size="icon"
+        className="mobile-kiosk-sleep"
+        aria-label="Sleep this display now"
+        onClick={sleepNow}
+      >
+        <MoonStar aria-hidden="true" />
+      </Button>
 
       <Button
         type="button"

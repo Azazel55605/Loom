@@ -51,7 +51,10 @@ interaction timestamp with that device-local timeout. Once idle it replaces the
 dashboard tree with a dedicated ambient view: a large clock and date plus one
 configured live reading at a time, rotating every eight seconds. A wake tap
 only resumes the already-authorized dashboard session; it never crosses or
-weakens the separately authenticated exit boundary. Reading transitions are
+weakens the separately authenticated exit boundary. A faint corner button
+starts the same ambient view immediately, for someone who wants the display
+dark now rather than after the timeout; it is placed in the opposite corner
+from the exit hold so a tap and a three-second hold cannot be confused. Reading transitions are
 instant when either Loom or the operating system requests reduced motion.
 
 Exiting kiosk presentation is an authentication boundary, not a UI affordance.
@@ -79,6 +82,45 @@ There is no kiosk-specific token or storage path. Kiosk sessions are ordinary
 refresh-token sessions, so every device remains independently visible,
 auditable, and revocable through the existing administrative Sessions panel
 without new session machinery.
+
+### Immersive presentation and adjacent-dashboard preloading
+
+Kiosk presentation hides the Android status and navigation bars while it is
+active, and restores them the moment it ends. Tauri 2 offers no way to ask for
+this: its window API, `setFullscreen` included, is desktop-only, and hiding the
+system bars on Android remains an open request against the framework. No
+first-party plugin covers it either — the community plugins in this area manage
+the status bar's appearance rather than an immersive window, and adding one
+would be a dependency for a single call.
+
+Loom therefore makes the documented platform calls itself, over JNI from the
+mobile crate: `WindowInsetsController.hide(systemBars())` with
+`BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE` on API 30 and above, and the deprecated
+`setSystemUiVisibility` sticky-immersive flags below it. It is exposed as one
+command, `set_immersive_mode`, driven by the device-local kiosk flag, so the
+bars are hidden for dashboard browsing and the screensaver alike and return on
+the authenticated exit. The calls live in Rust rather than in `MainActivity`
+because `gen/android` is generated and untracked — Kotlin added there would
+have to be re-applied by the configure script on every machine and would still
+need a bridge for the frontend to toggle it. This changes window decoration
+only: back gestures are still dispatched to the activity and still reach the
+existing back handler. It also requests no elevated operating-system privilege,
+so the checklist above is unaffected.
+
+With the bars gone, kiosk chrome reads `env(safe-area-inset-*)` directly
+instead of the app-wide insets, which floor at a touch-safe minimum for screens
+that keep their system bars. The rotation selector then sits against the true
+bottom edge when immersive mode is in effect and against the real inset when it
+is not, with no fixed assumption either way.
+
+Swipe navigation prefetches the structure query of the next and previous
+dashboards in the rotation once the visible one has settled, so an arriving
+dashboard is already laid out instead of showing a skeleton. Deliberately only
+that query: a prefetch fills the cache without mounting a view, and mounting is
+what subscribes a dashboard's connector instances to the status socket.
+Subscribing adjacent dashboards ahead of time would put many instances on the
+socket for readings nobody is looking at. Live status stays the business of the
+visible dashboard.
 
 ## Rejected alternative: Android device-owner or MDM provisioning
 
