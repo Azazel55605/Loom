@@ -114,6 +114,13 @@
   background: hsl(var(--muted-foreground) / 0.45);
 }
 
+/* The active dot is styled here rather than with a `bg-primary` utility: this
+   rule's two-class selector outranks a single-class Tailwind utility, so the
+   inactive background above would always win and every dot would look alike. */
+.mobile-platform .mobile-kiosk-dot[data-active="true"] {
+  background: hsl(var(--primary));
+}
+
 .mobile-platform .mobile-kiosk-exit-hold {
   position: fixed;
   right: calc(var(--mobile-safe-area-right) + 0.5rem);

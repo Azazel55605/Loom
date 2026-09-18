@@ -13,7 +13,6 @@ import { Skeleton } from "@loom/ui-kit/components/ui/skeleton";
 import { useApiClient } from "@loom/ui-kit/lib/api-context";
 import { useAuth } from "@loom/ui-kit/lib/auth-context";
 import { describeConnectorError } from "@loom/ui-kit/lib/connector-error";
-import { cn } from "@loom/ui-kit/lib/utils";
 import { ScreensaverView } from "@/components/ScreensaverView";
 import { useMobileKioskMode } from "@/components/mobileKioskMode";
 
@@ -30,15 +29,27 @@ export function MobileKioskShell({ onExited }: { onExited: () => void }) {
     queryFn: ({ signal }) => api.getDashboards(signal),
   });
   const [index, setIndex] = React.useState(0);
+  const [offRotationId, setOffRotationId] = React.useState<string | null>(null);
   const [exitOpen, setExitOpen] = React.useState(false);
   const [screensaverVisible, setScreensaverVisible] = React.useState(false);
   const lastActivityAt = React.useRef(Date.now());
   const touchStart = React.useRef<{ x: number; y: number } | null>(null);
   const holdTimer = React.useRef<ReturnType<typeof setTimeout> | null>(null);
 
-  const dashboardList = dashboards.data ?? [];
+  const allDashboards = React.useMemo(() => dashboards.data ?? [], [dashboards.data]);
+  // Hidden dashboards stay out of the swipeable rotation exactly as they stay
+  // out of `DashboardSidebar`'s listings. They remain reachable by id, which is
+  // what a `navigate` tile pointing at one needs — see ADR 0035.
+  const dashboardList = React.useMemo(
+    () => allDashboards.filter((dashboard) => !dashboard.hidden),
+    [allDashboards],
+  );
   const boundedIndex = Math.min(index, Math.max(dashboardList.length - 1, 0));
-  const activeDashboard = dashboardList[boundedIndex];
+  const offRotationDashboard =
+    offRotationId === null
+      ? undefined
+      : allDashboards.find((dashboard) => dashboard.id === offRotationId);
+  const activeDashboard = offRotationDashboard ?? dashboardList[boundedIndex];
 
   React.useEffect(() => {
     if (index !== boundedIndex) setIndex(boundedIndex);
@@ -87,7 +98,21 @@ export function MobileKioskShell({ onExited }: { onExited: () => void }) {
 
   function navigateToDashboard(dashboardId: string) {
     const nextIndex = dashboardList.findIndex((dashboard) => dashboard.id === dashboardId);
-    if (nextIndex >= 0) setIndex(nextIndex);
+    if (nextIndex >= 0) {
+      setOffRotationId(null);
+      setIndex(nextIndex);
+      return;
+    }
+    // A tile may target a hidden dashboard, which has no rotation slot. Show it
+    // outside the rotation; the next swipe or dot tap returns to the rotation.
+    if (allDashboards.some((dashboard) => dashboard.id === dashboardId)) {
+      setOffRotationId(dashboardId);
+    }
+  }
+
+  function showRotationIndex(nextIndex: number) {
+    setOffRotationId(null);
+    setIndex(nextIndex);
   }
 
   if (screensaverVisible) {
@@ -112,16 +137,18 @@ export function MobileKioskShell({ onExited }: { onExited: () => void }) {
       onTouchEnd={(event) => {
         const start = touchStart.current;
         touchStart.current = null;
-        if (start === null || dashboardList.length < 2) return;
+        const rotationLength = dashboardList.length;
+        if (start === null || rotationLength === 0) return;
+        if (rotationLength < 2 && offRotationId === null) return;
         const touch = event.changedTouches[0];
         const deltaX = touch.clientX - start.x;
         const deltaY = touch.clientY - start.y;
         if (Math.abs(deltaX) < SWIPE_THRESHOLD_PX || Math.abs(deltaX) <= Math.abs(deltaY)) return;
-        setIndex((current) =>
-          deltaX < 0
-            ? Math.min(current + 1, dashboardList.length - 1)
-            : Math.max(current - 1, 0),
-        );
+        const step = deltaX < 0 ? 1 : -1;
+        setOffRotationId(null);
+        // The rotation wraps: past the last dashboard is the first, and before
+        // the first is the last.
+        setIndex((current) => (current + step + rotationLength) % rotationLength);
       }}
     >
       <NetworkAdvisoryBanner />
@@ -140,7 +167,7 @@ export function MobileKioskShell({ onExited }: { onExited: () => void }) {
         ) : null}
         {dashboards.isSuccess && activeDashboard === undefined ? (
           <div className="flex min-h-[70dvh] items-center justify-center text-center text-sm text-muted-foreground">
-            No dashboards are assigned to this kiosk account.
+            No visible dashboards are assigned to this kiosk account.
           </div>
         ) : null}
         {activeDashboard !== undefined ? (
@@ -157,7 +184,11 @@ export function MobileKioskShell({ onExited }: { onExited: () => void }) {
       {dashboardList.length > 1 ? (
         <div
           className="mobile-kiosk-dots surface-elevated"
-          aria-label={`Dashboard ${boundedIndex + 1} of ${dashboardList.length}`}
+          aria-label={
+            offRotationDashboard === undefined
+              ? `Dashboard ${boundedIndex + 1} of ${dashboardList.length}`
+              : `Showing ${offRotationDashboard.name}, which is not part of the rotation`
+          }
         >
           {dashboardList.map((dashboard, dashboardIndex) => (
             <Button
@@ -167,11 +198,20 @@ export function MobileKioskShell({ onExited }: { onExited: () => void }) {
               size="icon"
               className="mobile-kiosk-dot-hit"
               aria-label={`Show ${dashboard.name}`}
-              aria-current={dashboardIndex === boundedIndex ? "page" : undefined}
-              onClick={() => setIndex(dashboardIndex)}
+              aria-current={
+                offRotationDashboard === undefined && dashboardIndex === boundedIndex
+                  ? "page"
+                  : undefined
+              }
+              onClick={() => showRotationIndex(dashboardIndex)}
             >
               <span
-                className={cn("mobile-kiosk-dot", dashboardIndex === boundedIndex && "bg-primary")}
+                className="mobile-kiosk-dot"
+                data-active={
+                  offRotationDashboard === undefined && dashboardIndex === boundedIndex
+                    ? "true"
+                    : "false"
+                }
                 aria-hidden="true"
               />
             </Button>
