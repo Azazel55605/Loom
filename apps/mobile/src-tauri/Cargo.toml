@@ -30,12 +30,11 @@ tauri-plugin-stronghold = "2"
 serde = { version = "1", features = ["derive"] }
 
 # Android immersive mode is not exposed by Tauri or by any first-party plugin,
-# so the system-bar calls are made over JNI. `jni` performs the calls and
-# `ndk-context` supplies the JavaVM and Activity the NDK already holds; both are
-# already in the Android dependency graph beneath Tauri.
+# so the system-bar calls are made over JNI. Only `jni` is needed: the
+# environment and Activity come from Tauri's own webview handle, and this is the
+# same `jni` version Tauri already uses on Android.
 [target.'cfg(target_os = "android")'.dependencies]
 jni = "0.21"
-ndk-context = "0.1"
 serde_json = "1"
 
 # Stronghold's password derivation is intentionally expensive. Optimising only

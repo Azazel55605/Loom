@@ -49,8 +49,14 @@ export function MobileKioskModeProvider({ children }: { children: React.ReactNod
   // clears `enabled`, and an unmount. Driving it from the flag rather than from
   // the shell keeps the screensaver immersive too: it replaces the dashboard
   // tree inside the same active kiosk session.
+  const immersiveApplied = React.useRef(false);
   React.useEffect(() => {
     if (isLoading) return;
+    // A launch with kiosk mode off has nothing to restore: Android gives a
+    // newly created activity its normal decoration, so the first call is made
+    // only when kiosk mode is actually entered.
+    if (!enabled && !immersiveApplied.current) return;
+    immersiveApplied.current = enabled;
     void setMobileImmersiveMode(enabled);
     return () => {
       if (enabled) void setMobileImmersiveMode(false);

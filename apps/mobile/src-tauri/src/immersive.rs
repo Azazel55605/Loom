@@ -13,20 +13,20 @@
 //! have to be re-applied by the configure script on every machine, and would
 //! still need a bridge for the frontend to toggle it per kiosk state.
 //!
+//! The JNI environment and the Activity come from Tauri's own webview handle
+//! (`PlatformWebview::jni_handle`), which runs the closure on the thread that
+//! owns the webview. Deliberately **not** from `ndk_context`: that crate's
+//! context is installed by `ndk-glue`-style runtimes, nothing in Tauri's
+//! Android stack installs it, and `ndk_context::android_context()` panics when
+//! it was never initialized — on the UI thread, which takes the whole app down.
+//!
 //! Non-Android builds keep a no-op so the command exists on every platform the
 //! mobile shell can be compiled for.
 
 #[cfg(target_os = "android")]
 mod android {
-    use jni::objects::JObject;
-    use jni::JavaVM;
-
-    /// `WindowInsetsController.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE`.
-    ///
-    /// Keeps a swipe from the edge revealing the bars briefly instead of
-    /// exiting immersive mode, which is what an unattended display wants: an
-    /// accidental swipe must not leave the bars on screen for the next hour.
-    const BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE: &str = "BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE";
+    use jni::objects::{JObject, JValue};
+    use jni::JNIEnv;
 
     const LEGACY_FLAGS: [&str; 6] = [
         "SYSTEM_UI_FLAG_IMMERSIVE_STICKY",
@@ -37,16 +37,18 @@ mod android {
         "SYSTEM_UI_FLAG_LAYOUT_HIDE_NAVIGATION",
     ];
 
-    /// Must be called on the UI thread; `run_on_main_thread` provides that.
-    pub fn set_system_bars_hidden(hidden: bool) -> Result<(), jni::errors::Error> {
-        let context = ndk_context::android_context();
-        let vm = unsafe { JavaVM::from_raw(context.vm().cast()) }?;
-        let activity = unsafe { JObject::from_raw(context.context().cast()) };
-        let mut env = vm.attach_current_thread()?;
-
+    /// Runs on the webview's thread, which is the Android UI thread.
+    pub fn set_system_bars_hidden(
+        env: &mut JNIEnv<'_>,
+        activity: &JObject<'_>,
+        hidden: bool,
+    ) -> Result<(), jni::errors::Error> {
         let window = env
-            .call_method(&activity, "getWindow", "()Landroid/view/Window;", &[])?
+            .call_method(activity, "getWindow", "()Landroid/view/Window;", &[])?
             .l()?;
+        if window.is_null() {
+            return Ok(());
+        }
 
         let sdk_int = env
             .get_static_field("android/os/Build$VERSION", "SDK_INT", "I")?
@@ -59,7 +61,7 @@ mod android {
                 &window,
                 "setDecorFitsSystemWindows",
                 "(Z)V",
-                &[jni::objects::JValue::Bool(u8::from(!hidden))],
+                &[JValue::Bool(u8::from(!hidden))],
             )?;
 
             let controller = env
@@ -79,10 +81,14 @@ mod android {
                 .i()?;
 
             if hidden {
+                // BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE: an edge swipe reveals
+                // the bars briefly instead of leaving immersive mode, which is
+                // what an unattended display wants — an accidental swipe must
+                // not put the bars back for the next hour.
                 let behavior = env
                     .get_static_field(
                         "android/view/WindowInsetsController",
-                        BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE,
+                        "BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE",
                         "I",
                     )?
                     .i()?;
@@ -90,21 +96,11 @@ mod android {
                     &controller,
                     "setSystemBarsBehavior",
                     "(I)V",
-                    &[jni::objects::JValue::Int(behavior)],
+                    &[JValue::Int(behavior)],
                 )?;
-                env.call_method(
-                    &controller,
-                    "hide",
-                    "(I)V",
-                    &[jni::objects::JValue::Int(system_bars)],
-                )?;
+                env.call_method(&controller, "hide", "(I)V", &[JValue::Int(system_bars)])?;
             } else {
-                env.call_method(
-                    &controller,
-                    "show",
-                    "(I)V",
-                    &[jni::objects::JValue::Int(system_bars)],
-                )?;
+                env.call_method(&controller, "show", "(I)V", &[JValue::Int(system_bars)])?;
             }
 
             return Ok(());
@@ -113,6 +109,9 @@ mod android {
         let decor_view = env
             .call_method(&window, "getDecorView", "()Landroid/view/View;", &[])?
             .l()?;
+        if decor_view.is_null() {
+            return Ok(());
+        }
 
         let mut flags = 0;
         if hidden {
@@ -124,7 +123,7 @@ mod android {
             &decor_view,
             "setSystemUiVisibility",
             "(I)V",
-            &[jni::objects::JValue::Int(flags)],
+            &[JValue::Int(flags)],
         )?;
 
         Ok(())
@@ -138,25 +137,32 @@ mod android {
 /// the moment the authenticated exit completes. It changes only window
 /// decoration: back gestures continue to be dispatched to the activity and
 /// reach the existing `onBackButtonPress` handler unchanged.
+///
+/// Every failure is reported, never fatal. Losing immersive mode is cosmetic —
+/// a display that keeps its system bars is still a working kiosk — and this
+/// runs on the UI thread, where panicking would take the app down with it.
 #[tauri::command]
-pub fn set_immersive_mode(app: tauri::AppHandle, enabled: bool) -> Result<(), String> {
+pub fn set_immersive_mode(webview: tauri::Webview, enabled: bool) -> Result<(), String> {
     #[cfg(target_os = "android")]
     {
-        app.run_on_main_thread(move || {
-            if let Err(error) = android::set_system_bars_hidden(enabled) {
-                // Logged rather than surfaced: losing immersive mode is a
-                // cosmetic degradation, and failing the call would make the
-                // kiosk shell's state depend on window decoration.
-                eprintln!("could not change Android system bar visibility: {error}");
-            }
-        })
-        .map_err(|error| error.to_string())?;
+        webview
+            .with_webview(move |platform| {
+                platform.jni_handle().exec(move |env, activity, _webview| {
+                    if let Err(error) = android::set_system_bars_hidden(env, activity, enabled) {
+                        eprintln!("could not change Android system bar visibility: {error}");
+                        // A pending Java exception must be cleared, or the next
+                        // JNI call on this thread aborts the process.
+                        let _ = env.exception_clear();
+                    }
+                });
+            })
+            .map_err(|error| error.to_string())?;
     }
     #[cfg(not(target_os = "android"))]
     {
         // Every other platform the mobile shell builds for draws its own
         // window decoration; there is nothing to hide.
-        let _ = (&app, enabled);
+        let _ = (&webview, enabled);
     }
     Ok(())
 }

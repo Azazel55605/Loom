@@ -99,7 +99,12 @@ mobile crate: `WindowInsetsController.hide(systemBars())` with
 `setSystemUiVisibility` sticky-immersive flags below it. It is exposed as one
 command, `set_immersive_mode`, driven by the device-local kiosk flag, so the
 bars are hidden for dashboard browsing and the screensaver alike and return on
-the authenticated exit. The calls live in Rust rather than in `MainActivity`
+the authenticated exit. The JNI environment and the Activity come from Tauri's
+own webview handle, `PlatformWebview::jni_handle`, which runs the closure on the
+thread owning the webview. They must not come from `ndk_context`: nothing in
+Tauri's Android stack initializes that context, and its accessor panics when
+uninitialized — on the UI thread, which ends the process rather than failing the
+call. The calls live in Rust rather than in `MainActivity`
 because `gen/android` is generated and untracked — Kotlin added there would
 have to be re-applied by the configure script on every machine and would still
 need a bridge for the frontend to toggle it. This changes window decoration
