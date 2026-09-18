@@ -4,7 +4,8 @@ import { LockKeyhole, MoonStar } from "lucide-react";
 
 import { KioskExitDialog } from "@/components/KioskExitDialog";
 import { dashboardsQueryKey } from "@loom/ui-kit/components/DashboardSidebar";
-import { DashboardView, dashboardQueryKey } from "@loom/ui-kit/components/DashboardView";
+import { DashboardView } from "@loom/ui-kit/components/DashboardView";
+import { dashboardQueryKey } from "@loom/ui-kit/lib/dashboard-query-keys";
 import { MotionContent } from "@loom/ui-kit/components/MotionContent";
 import { NetworkAdvisoryBanner } from "@loom/ui-kit/components/NetworkAdvisoryBanner";
 import { Alert, AlertDescription, AlertTitle } from "@loom/ui-kit/components/ui/alert";
@@ -32,6 +33,9 @@ export function MobileKioskShell({ onExited }: { onExited: () => void }) {
   });
   const [index, setIndex] = React.useState(0);
   const [offRotationId, setOffRotationId] = React.useState<string | null>(null);
+  // The dashboard a button tile was pressed on, so the one it opened can offer
+  // the same Back control it offers in the normal app.
+  const [navigationSourceId, setNavigationSourceId] = React.useState<string | null>(null);
   const [exitOpen, setExitOpen] = React.useState(false);
   const [screensaverVisible, setScreensaverVisible] = React.useState(false);
   const lastActivityAt = React.useRef(Date.now());
@@ -154,6 +158,9 @@ export function MobileKioskShell({ onExited }: { onExited: () => void }) {
   }
 
   function navigateToDashboard(dashboardId: string) {
+    if (activeDashboard !== undefined && activeDashboard.id !== dashboardId) {
+      setNavigationSourceId(activeDashboard.id);
+    }
     const nextIndex = dashboardList.findIndex((dashboard) => dashboard.id === dashboardId);
     if (nextIndex >= 0) {
       setOffRotationId(null);
@@ -169,7 +176,25 @@ export function MobileKioskShell({ onExited }: { onExited: () => void }) {
 
   function showRotationIndex(nextIndex: number) {
     setOffRotationId(null);
+    setNavigationSourceId(null);
     setIndex(nextIndex);
+  }
+
+  /** Returns to the dashboard a button tile was pressed on. */
+  function returnToSource(dashboardId: string | null) {
+    setNavigationSourceId(null);
+    if (dashboardId === null) {
+      // The source is gone or no longer shared: fall back to the rotation.
+      setOffRotationId(null);
+      return;
+    }
+    const sourceIndex = dashboardList.findIndex((dashboard) => dashboard.id === dashboardId);
+    if (sourceIndex >= 0) {
+      setOffRotationId(null);
+      setIndex(sourceIndex);
+      return;
+    }
+    setOffRotationId(dashboardId);
   }
 
   function sleepNow() {
@@ -212,6 +237,7 @@ export function MobileKioskShell({ onExited }: { onExited: () => void }) {
         if (Math.abs(deltaX) < SWIPE_THRESHOLD_PX || Math.abs(deltaX) <= Math.abs(deltaY)) return;
         const step = deltaX < 0 ? 1 : -1;
         setOffRotationId(null);
+        setNavigationSourceId(null);
         // The rotation wraps: past the last dashboard is the first, and before
         // the first is the last.
         setIndex((current) => (current + step + rotationLength) % rotationLength);
@@ -242,6 +268,11 @@ export function MobileKioskShell({ onExited }: { onExited: () => void }) {
               dashboardId={activeDashboard.id}
               onDeleted={() => undefined}
               onNavigateDashboard={navigateToDashboard}
+              backNavigation={
+                navigationSourceId === null || navigationSourceId === activeDashboard.id
+                  ? undefined
+                  : { fromDashboardId: navigationSourceId, onBack: returnToSource }
+              }
             />
           </MotionContent>
         ) : null}

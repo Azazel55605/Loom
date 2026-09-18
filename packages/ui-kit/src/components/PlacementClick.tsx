@@ -1,10 +1,14 @@
 import * as React from "react";
-import { useMutation } from "@tanstack/react-query";
+import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
 
 import { ApiError, type DashboardPlacement } from "@loom/ui-kit/lib/api";
 import { useApiClient } from "@loom/ui-kit/lib/api-context";
 import { describeConnectorError } from "@loom/ui-kit/lib/connector-error";
+import {
+  DASHBOARD_PREFETCH_STALE_MS,
+  dashboardQueryKey,
+} from "@loom/ui-kit/lib/dashboard-query-keys";
 import { cn } from "@loom/ui-kit/lib/utils";
 
 /**
@@ -38,11 +42,41 @@ export function usePlacementClick({
   onNavigateDashboard?: (dashboardId: string) => void;
 }) {
   const api = useApiClient();
+  const queryClient = useQueryClient();
   const action = placement.placementAction;
   const label = placement.label ?? placement.connector?.name ?? "This tile";
+  const navigateTargetId = action?.type === "navigate" ? action.targetDashboardId : null;
+
+  /**
+   * Warms the dashboard this tile navigates to.
+   *
+   * The click endpoint answers "may you, and where to" — it does not carry the
+   * target's contents — so without this the target is fetched only once the
+   * permission answer has come back, and the two round trips run end to end.
+   * Warming the cache turns them into one wait: on a pointer entering the tile
+   * the structure is usually already there when the answer arrives, and on the
+   * click itself the two requests at least overlap.
+   *
+   * It is only a cache fill. Nothing is rendered from it, and navigation still
+   * happens exclusively on the endpoint's verdict — a prefetch by someone
+   * without access simply fails and is discarded, exactly as the same GET would
+   * fail anywhere else.
+   */
+  const prefetchNavigateTarget = React.useCallback(() => {
+    if (navigateTargetId === null || onNavigateDashboard === undefined) return;
+    void queryClient.prefetchQuery({
+      queryKey: dashboardQueryKey(navigateTargetId),
+      queryFn: ({ signal }) => api.getDashboard(navigateTargetId, signal),
+      staleTime: DASHBOARD_PREFETCH_STALE_MS,
+    });
+  }, [api, navigateTargetId, onNavigateDashboard, queryClient]);
 
   const click = useMutation({
-    mutationFn: () => api.clickDashboardPlacement(dashboardId, placement.id),
+    mutationFn: () => {
+      // Started alongside the permission check rather than after it.
+      prefetchNavigateTarget();
+      return api.clickDashboardPlacement(dashboardId, placement.id);
+    },
     onSuccess: (result) => {
       if ("targetDashboardId" in result) {
         onNavigateDashboard?.(result.targetDashboardId);
@@ -87,7 +121,13 @@ export function usePlacementClick({
     action !== null &&
     (action.type !== "navigate" || onNavigateDashboard !== undefined);
 
-  return { clickable, pending: click.isPending, run: () => click.mutate() };
+  return {
+    clickable,
+    pending: click.isPending,
+    run: () => click.mutate(),
+    /** Call when a press looks imminent — pointer entering or going down. */
+    prefetch: prefetchNavigateTarget,
+  };
 }
 
 /**
@@ -148,6 +188,7 @@ export function PlacementClickSurface({
   pending,
   label,
   onActivate,
+  onPrefetch,
   children,
 }: {
   active: boolean;
@@ -156,6 +197,13 @@ export function PlacementClickSurface({
    *  control. */
   label: string;
   onActivate: () => void;
+  /**
+   * Warms whatever the activation will need, on the earliest honest signal
+   * that it is coming: a pointer arriving over the tile, or a press starting.
+   * Both are cheap and idempotent — a fill of a cache that is already full
+   * does nothing.
+   */
+  onPrefetch?: () => void;
   children: React.ReactNode;
 }) {
   if (!active) return <>{children}</>;
@@ -166,6 +214,9 @@ export function PlacementClickSurface({
       tabIndex={0}
       aria-label={label}
       aria-busy={pending || undefined}
+      onPointerEnter={onPrefetch}
+      onPointerDown={onPrefetch}
+      onFocus={onPrefetch}
       onClick={(event) => {
         if (fromInsideAControl(event.target, event.currentTarget)) return;
         onActivate();

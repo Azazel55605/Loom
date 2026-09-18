@@ -65,16 +65,9 @@ import type {
 import { useApiClient, useConnectorStatusSocket } from "@loom/ui-kit/lib/api-context";
 import { describeConnectorError } from "@loom/ui-kit/lib/connector-error";
 import { useAppearance } from "@loom/ui-kit/components/AccentThemeProvider";
+import { dashboardQueryKey } from "@loom/ui-kit/lib/dashboard-query-keys";
 
-/**
- * The cache key for one dashboard's structure and placements.
- *
- * Exported so a host can warm a dashboard it is about to show — prefetching
- * this key fills the cache without mounting the view, and therefore without
- * opening that dashboard's connector status subscriptions.
- */
-export const dashboardQueryKey = (dashboardId: string) =>
-  ["dashboard", dashboardId] as const;
+
 
 /**
  * Grid geometry.
@@ -337,7 +330,12 @@ export function DashboardView({
   const accessibleDashboards = useQuery({
     queryKey: dashboardsQueryKey,
     queryFn: ({ signal }) => api.getDashboards(signal),
-    enabled: backNavigation !== undefined,
+    // Never fetched on arrival: `returnToSourceDashboard` refetches this list
+    // when Back is actually pressed, because the question it answers — is the
+    // source still shared with me *now* — can only be answered then. Fetching
+    // it eagerly added a request to every button-tile arrival and answered
+    // nothing sooner.
+    enabled: false,
   });
 
   const returnToSourceDashboard = React.useCallback(async () => {

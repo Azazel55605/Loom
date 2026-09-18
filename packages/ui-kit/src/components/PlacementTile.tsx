@@ -410,6 +410,7 @@ function ConnectorPlacementTile({
         pending={click.pending}
         label={clickLabel(placement, instance.name)}
         onActivate={click.run}
+        onPrefetch={click.prefetch}
       >
       <Card
         className={cn(
@@ -760,6 +761,7 @@ function StaticPlacementTile({
       pending={click.pending}
       label={clickLabel(placement, label)}
       onActivate={click.run}
+      onPrefetch={click.prefetch}
     >
       <Card
         className={cn(
