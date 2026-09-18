@@ -27,6 +27,7 @@ import { MobileKioskModeProvider } from "@/components/MobileKioskModeProvider";
 import { useMobileKioskMode } from "@/components/mobileKioskMode";
 import { MobileKioskShell } from "@/components/MobileKioskShell";
 import { KioskRecoveryScreen } from "@/components/KioskRecoveryScreen";
+import { KioskReconnectingScreen } from "@/components/KioskReconnectingScreen";
 import { MobileBackNavigation } from "@/components/MobileBackNavigation";
 import { ConnectorsPage } from "@/pages/ConnectorsPage";
 import {
@@ -41,7 +42,7 @@ import {
   useServerSwitcher,
 } from "@loom/ui-kit/components/ServerSwitcher";
 import { Alert, AlertDescription, AlertTitle } from "@loom/ui-kit/components/ui/alert";
-import { BootScreen } from "@loom/ui-kit/components/BootScreen";
+import { BootScreen, RECONNECTING_MESSAGE } from "@loom/ui-kit/components/BootScreen";
 import { Button } from "@loom/ui-kit/components/ui/button";
 import { Toaster } from "@loom/ui-kit/components/ui/sonner";
 import { AuthProvider, useAuth } from "@loom/ui-kit/lib/auth-context";
@@ -290,12 +291,22 @@ function MobileRoutes() {
 
 function MobileExperience({ children }: { children: React.ReactNode }) {
   const kiosk = useMobileKioskMode();
-  const { isAuthenticated, isRestoring, user } = useAuth();
+  const { isAuthenticated, isRestoring, sessionRecovery, serverBaseUrl, user } = useAuth();
   const navigate = useNavigate();
 
   if (kiosk.isLoading || kiosk.isTransitioning || isRestoring) return null;
   if (!kiosk.enabled) return <>{children}</>;
-  if (!isAuthenticated || user === null || user.id !== kiosk.accountId) {
+  // Only a cleared session — which nothing but a genuine 401 or a deliberate
+  // sign-out produces — reaches the credential prompt.
+  if (!isAuthenticated) {
+    return <KioskRecoveryScreen expectedAccountId={kiosk.accountId} />;
+  }
+  if (user === null) {
+    return sessionRecovery === "reconnecting" ? (
+      <KioskReconnectingScreen serverBaseUrl={serverBaseUrl} />
+    ) : null;
+  }
+  if (user.id !== kiosk.accountId) {
     return <KioskRecoveryScreen expectedAccountId={kiosk.accountId} />;
   }
   return <MobileKioskShell onExited={() => navigate("/dashboards", { replace: true })} />;
@@ -313,9 +324,14 @@ function RequireSetup({ children }: { children: React.ReactNode }) {
 }
 
 function RequireAuth({ children }: { children: React.ReactNode }) {
-  const { isAuthenticated, isRestoring } = useAuth();
+  const { isAuthenticated, isRestoring, sessionRecovery, serverBaseUrl, user } = useAuth();
   const location = useLocation();
   if (isRestoring) return null;
+  // A session held but not yet verifiable because the server is unreachable:
+  // wait for it rather than sending a signed-in user to the login screen.
+  if (isAuthenticated && user === null && sessionRecovery === "reconnecting") {
+    return <BootScreen baseUrl={serverBaseUrl} title="Reconnecting to Loom" message={RECONNECTING_MESSAGE} />;
+  }
   if (!isAuthenticated) {
     return <Navigate to="/login" replace state={{ from: location.pathname }} />;
   }

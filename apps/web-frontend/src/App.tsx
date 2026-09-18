@@ -4,6 +4,7 @@ import { Navigate, Route, Routes, useLocation } from "react-router-dom";
 import { ConnectorsPage } from "@/pages/ConnectorsPage";
 import { DashboardDetailPage, DashboardsIndexPage } from "@/pages/DashboardsPage";
 import { LoginPage } from "@/pages/LoginPage";
+import { BootScreen, RECONNECTING_MESSAGE } from "@loom/ui-kit/components/BootScreen";
 import { useAuth } from "@loom/ui-kit/lib/auth-context";
 import { useSetupStatus } from "@loom/ui-kit/lib/use-setup-status";
 
@@ -190,13 +191,25 @@ function RequireSetup({ children }: { children: React.ReactNode }) {
 }
 
 function RequireAuth({ children }: { children: React.ReactNode }) {
-  const { isAuthenticated, isRestoring } = useAuth();
+  const { isAuthenticated, isRestoring, sessionRecovery, serverBaseUrl, user } = useAuth();
   const location = useLocation();
 
   // Render nothing while a stored token is being validated. Redirecting on a
   // not-yet-known session would bounce a signed-in user to the login screen on
   // every reload, which reads as being randomly signed out.
   if (isRestoring) return null;
+
+  // A session held but not yet verifiable because the server is unreachable:
+  // wait for it rather than sending a signed-in user to the login screen.
+  if (isAuthenticated && user === null && sessionRecovery === "reconnecting") {
+    return (
+      <BootScreen
+        baseUrl={serverBaseUrl}
+        title="Reconnecting to Loom"
+        message={RECONNECTING_MESSAGE}
+      />
+    );
+  }
 
   if (!isAuthenticated) {
     // Remember where they were headed so signing in returns them there.

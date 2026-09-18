@@ -31,7 +31,7 @@ import {
 import { LoginPage } from "@/pages/LoginPage";
 import { SetupPage } from "@/pages/SetupPage";
 import { Alert, AlertDescription, AlertTitle } from "@loom/ui-kit/components/ui/alert";
-import { BootScreen } from "@loom/ui-kit/components/BootScreen";
+import { BootScreen, RECONNECTING_MESSAGE } from "@loom/ui-kit/components/BootScreen";
 import { Button } from "@loom/ui-kit/components/ui/button";
 import { AddServerFlow, type ServerConnection } from "@loom/ui-kit/components/ConnectToServer";
 import {
@@ -290,9 +290,21 @@ function RequireSetup({ children }: { children: React.ReactNode }) {
 }
 
 function RequireAuth({ children }: { children: React.ReactNode }) {
-  const { isAuthenticated, isRestoring } = useAuth();
+  const { isAuthenticated, isRestoring, sessionRecovery, serverBaseUrl, user } = useAuth();
   const location = useLocation();
   if (isRestoring) return null;
+  // A session held but not yet verifiable because the server is unreachable:
+  // wait for it rather than sending a signed-in user to the login screen.
+  if (isAuthenticated && user === null && sessionRecovery === "reconnecting") {
+    return (
+      <BootScreen
+        baseUrl={serverBaseUrl}
+        title="Reconnecting to Loom"
+        message={RECONNECTING_MESSAGE}
+      />
+    );
+  }
+
   if (!isAuthenticated) {
     return <Navigate to="/login" replace state={{ from: location.pathname }} />;
   }

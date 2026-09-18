@@ -1,9 +1,7 @@
 import * as React from "react";
 
 import {
-  ApiError,
   createApiClient,
-  SessionExpiredError,
   type BaseUrlProvider,
   type HttpTransport,
   type Account,
@@ -12,6 +10,11 @@ import {
 import { ApiClientProvider } from "@loom/ui-kit/lib/api-context";
 import { BootErrorScreen, BootScreen } from "@loom/ui-kit/components/BootScreen";
 import { ConnectorStatusSocket } from "@loom/ui-kit/lib/connector-socket";
+import {
+  INITIAL_RETRY_DELAY_MS,
+  isSessionRejection,
+  nextRetryDelayMs,
+} from "@loom/ui-kit/lib/session-failure";
 import type { StoredTokens, TokenStorageAdapter } from "@loom/ui-kit/lib/token-store";
 import { useConnectionBootstrap } from "@loom/ui-kit/lib/use-connection-bootstrap";
 import type { WebSocketTransport } from "@loom/ui-kit/lib/websocket-transport";
@@ -31,10 +34,23 @@ export type AuthenticationCandidate = {
   tokens: StoredTokens;
 };
 
+/**
+ * Whether the stored session is currently unverifiable for network reasons.
+ *
+ * `"reconnecting"` means the server never answered — the tokens are untouched
+ * and a retry is scheduled. It is deliberately *not* reachable from a 401,
+ * which clears the session instead and is observed as `isAuthenticated` going
+ * false.
+ */
+export type SessionRecoveryState = "idle" | "reconnecting";
+
 type AuthContextValue = {
   isAuthenticated: boolean;
   user: CurrentUser | null;
   isRestoring: boolean;
+  sessionRecovery: SessionRecoveryState;
+  /** The configured backend, for screens that name it while reconnecting. */
+  serverBaseUrl: string;
   signIn: (username: string, password: string) => Promise<void>;
   authenticateWithoutPersisting: (
     username: string,
@@ -88,6 +104,10 @@ export function AuthProvider({
   );
   const [user, setUser] = React.useState<CurrentUser | null>(null);
   const [isRestoring, setIsRestoring] = React.useState(true);
+  const [sessionRecovery, setSessionRecovery] =
+    React.useState<SessionRecoveryState>("idle");
+  const [recoveryAttempt, setRecoveryAttempt] = React.useState(0);
+  const recoveryDelayMs = React.useRef(INITIAL_RETRY_DELAY_MS);
 
   React.useEffect(() => {
     let cancelled = false;
@@ -120,16 +140,25 @@ export function AuthProvider({
     if (session === null) {
       setUser(null);
       setIsRestoring(false);
+      setSessionRecovery("idle");
+      recoveryDelayMs.current = INITIAL_RETRY_DELAY_MS;
       return;
     }
 
     const controller = new AbortController();
     let cancelled = false;
+    let retryTimer: ReturnType<typeof setTimeout> | null = null;
 
     void (async () => {
       try {
         if (client.tokenStore.expiresWithin(PROACTIVE_REFRESH_BUFFER_MS)) {
+          // The rotated tokens land in the store, which re-runs this effect and
+          // reads the session below.
           await client.refreshSession();
+          if (!cancelled) {
+            setSessionRecovery("idle");
+            recoveryDelayMs.current = INITIAL_RETRY_DELAY_MS;
+          }
           return;
         }
 
@@ -140,17 +169,33 @@ export function AuthProvider({
             username: current.username,
             permissions: current.permissions,
           });
+          setSessionRecovery("idle");
+          recoveryDelayMs.current = INITIAL_RETRY_DELAY_MS;
         }
       } catch (error: unknown) {
         if (cancelled) return;
         if (error instanceof DOMException && error.name === "AbortError") return;
-        if (
-          error instanceof SessionExpiredError ||
-          (error instanceof ApiError && error.isUnauthorized)
-        ) {
+        if (isSessionRejection(error)) {
+          // The server itself rejected the refresh token. Only this clears the
+          // session and sends the app back to a sign-in prompt.
           await client.tokenStore.clear();
           setUser(null);
+          setSessionRecovery("idle");
+          recoveryDelayMs.current = INITIAL_RETRY_DELAY_MS;
+          return;
         }
+        // No answer arrived — DNS, a refused connection, a timeout, a gateway
+        // in front of a backend that is still starting. The stored session is
+        // very probably still valid, so it is left exactly as it is and the
+        // check is repeated with backoff, indefinitely: the device may simply
+        // be waiting out an outage, and there may be nobody there to sign in.
+        setSessionRecovery("reconnecting");
+        const delay = recoveryDelayMs.current;
+        recoveryDelayMs.current = nextRetryDelayMs(delay);
+        retryTimer = setTimeout(() => {
+          retryTimer = null;
+          setRecoveryAttempt((current) => current + 1);
+        }, delay);
       } finally {
         if (!cancelled) setIsRestoring(false);
       }
@@ -159,8 +204,9 @@ export function AuthProvider({
     return () => {
       cancelled = true;
       controller.abort();
+      if (retryTimer !== null) clearTimeout(retryTimer);
     };
-  }, [client, runtimeReady, session]);
+  }, [client, recoveryAttempt, runtimeReady, session]);
 
   const signIn = React.useCallback(
     async (username: string, password: string) => {
@@ -247,6 +293,8 @@ export function AuthProvider({
       isAuthenticated: session !== null,
       user,
       isRestoring,
+      sessionRecovery,
+      serverBaseUrl: bootstrapBaseUrl,
       signIn,
       authenticateWithoutPersisting,
       activateAuthentication,
@@ -258,6 +306,8 @@ export function AuthProvider({
       session,
       user,
       isRestoring,
+      sessionRecovery,
+      bootstrapBaseUrl,
       signIn,
       authenticateWithoutPersisting,
       activateAuthentication,
@@ -277,6 +327,7 @@ export function AuthProvider({
         message={bootstrap.error}
         onRetry={bootstrap.retry}
         onChangeServer={onChangeServer}
+        retrying={bootstrap.retrying}
       />
     );
   }

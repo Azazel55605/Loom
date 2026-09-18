@@ -8,9 +8,11 @@ import type {
   TransportSocket,
   WebSocketTransport,
 } from "@loom/ui-kit/lib/websocket-transport";
+import {
+  INITIAL_RETRY_DELAY_MS as INITIAL_RECONNECT_DELAY_MS,
+  nextRetryDelayMs,
+} from "@loom/ui-kit/lib/session-failure";
 
-const INITIAL_RECONNECT_DELAY_MS = 1_000;
-const MAX_RECONNECT_DELAY_MS = 30_000;
 
 export type ConnectorStatusUpdate = {
   type: "status";
@@ -295,7 +297,7 @@ export class ConnectorStatusSocket {
       return;
     }
     const delay = this.reconnectDelayMs;
-    this.reconnectDelayMs = Math.min(this.reconnectDelayMs * 2, MAX_RECONNECT_DELAY_MS);
+    this.reconnectDelayMs = nextRetryDelayMs(this.reconnectDelayMs);
     this.reconnectTimer = setTimeout(() => {
       this.reconnectTimer = null;
       this.ensureConnected();
