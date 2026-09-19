@@ -41,7 +41,9 @@ use crate::connectors::config_secrets::{
     decrypt_sensitive_fields, encrypt_sensitive_fields, merge_sensitive_update,
     redact_sensitive_fields,
 };
-use crate::connectors::runtime::{BuildError, ConnectorStatusSnapshot, PendingOperation};
+use crate::connectors::runtime::{
+    BuildError, ConnectorStatusSnapshot, EnsureError, PendingOperation,
+};
 use crate::error::{internal_error, ErrorBody};
 use crate::media_groups::MediaGroupMode;
 use crate::state::AppState;
@@ -441,8 +443,13 @@ pub async fn get_instance(
 
 /// `POST /connector-instances/{id}/reconnect`
 ///
-/// Forces one status poll immediately, outside the backed-off schedule. This
-/// is observation rather than control of the remote service, so the same
+/// Forces one attempt immediately, outside the backed-off schedule: a status
+/// poll for a built connector, or another construction attempt for an instance
+/// whose factory has been failing. Either way the caller gets the resulting
+/// snapshot, so pressing Reconnect on a connector that was broken at startup is
+/// a real retry rather than a refusal.
+///
+/// This is observation rather than control of the remote service, so the same
 /// `connectors.view` grant used to read status is sufficient.
 pub async fn reconnect_instance(
     _caller: RequirePermission<ConnectorsView>,
@@ -460,6 +467,9 @@ pub async fn reconnect_instance(
 
     match state.connectors.reconnect(uuid).await {
         Some(snapshot) => Json(snapshot).into_response(),
+        // Only for a row this process holds nothing at all for — an
+        // unregistered type, or stored configuration it could not read. A
+        // pending instance is retried above and answers with its snapshot.
         None => ErrorBody::message(
             StatusCode::BAD_REQUEST,
             "reconnect is unavailable because this connector instance is not loaded",
@@ -486,11 +496,9 @@ pub async fn discover_instance(
     let Ok(uuid) = Uuid::parse_str(&row.id) else {
         return not_found(&id);
     };
-    let Some(connector) = state.connectors.get(&uuid).await else {
-        return ErrorBody::message(
-            StatusCode::BAD_REQUEST,
-            "discovery is unavailable because this connector instance is not loaded",
-        );
+    let connector = match state.connectors.ensure_live(&uuid).await {
+        Ok(connector) => connector,
+        Err(error) => return unavailable("discovery", &error),
     };
     discover_with(connector.as_ref(), "this connector instance").await
 }
@@ -1914,12 +1922,18 @@ pub async fn execute_action(
         return denied;
     }
 
-    let connector = match Uuid::parse_str(&id) {
-        Ok(uuid) => state.connectors.get(&uuid).await,
-        Err(_) => None,
-    };
-    let Some(connector) = connector else {
+    // Built on demand when the instance is still pending: a person pressing an
+    // action button is exactly the moment to try its connector again.
+    let Ok(uuid) = Uuid::parse_str(&id) else {
         return not_found(&id);
+    };
+    let connector = match state.connectors.ensure_live(&uuid).await {
+        Ok(connector) => connector,
+        // Unchanged for a genuinely absent instance: this handler has always
+        // answered 404 rather than distinguishing the two, and the action log
+        // downstream is keyed on the instance existing.
+        Err(EnsureError::Unknown) => return not_found(&id),
+        Err(error @ EnsureError::Construction(_)) => return unavailable("actions", &error),
     };
 
     // Read raw bytes rather than using the `Json` extractor, so an absent body
@@ -2709,12 +2723,20 @@ pub(crate) async fn resolve_action(
         .find(|action| action.id == action_id)
 }
 
-/// Resolves a durable instance id to its loaded connector.
+/// Resolves a durable instance id to its connector, building it if it is still
+/// pending.
 ///
 /// The two-step lookup is not redundant: a row can exist while its connector
 /// failed to build, and those are different answers — 404 for "no such
 /// instance", 400 for "it is there but nothing is behind it". `subject` names
 /// what the caller wanted, so the 400 says which capability is unavailable.
+///
+/// A pending instance is *built here*, not refused. Everything reaching this
+/// helper is a person asking for something now, and telling them to wait for a
+/// background retry when the attempt takes a second and might well succeed is a
+/// dead end with no upside. When it does fail, the objection is the connector's
+/// own rather than the previous bare "not loaded", which named a state instead
+/// of a cause.
 async fn live_connector(
     state: &AppState,
     id: &str,
@@ -2728,12 +2750,29 @@ async fn live_connector(
     let Ok(uuid) = Uuid::parse_str(&row.id) else {
         return Err(Box::new(not_found(id)));
     };
-    match state.connectors.get(&uuid).await {
-        Some(connector) => Ok(connector),
-        None => Err(Box::new(ErrorBody::message(
+    state
+        .connectors
+        .ensure_live(&uuid)
+        .await
+        .map_err(|error| Box::new(unavailable(subject, &error)))
+}
+
+/// The refusal for a request that needs a connector there is not one for.
+///
+/// `Unknown` keeps the original wording: the row exists but this process holds
+/// nothing for it, which is what an unregistered type or unreadable stored
+/// configuration leaves behind. `Construction` carries the failure of the
+/// attempt that was just made on the caller's behalf.
+fn unavailable(subject: &str, error: &EnsureError) -> Response {
+    match error {
+        EnsureError::Unknown => ErrorBody::message(
             StatusCode::BAD_REQUEST,
             format!("{subject} are unavailable because this connector instance is not loaded"),
-        ))),
+        ),
+        EnsureError::Construction(error) => ErrorBody::message(
+            StatusCode::BAD_REQUEST,
+            format!("{subject} are unavailable: this connector instance could not be connected ({error})"),
+        ),
     }
 }
 
@@ -2831,10 +2870,17 @@ async fn discover_with(connector: &dyn Connector, subject: &str) -> Response {
 
 /// Builds a list entry from the last completed status poll.
 ///
-/// `live` is `None` for a row that failed to load at startup. Such a row still
+/// `live` is `None` for a row with no built connector. Such a row still
 /// appears, with a synthetic metadata block and a `statusError` explaining why
 /// there is nothing behind it — otherwise a broken connector would be invisible
 /// and therefore undeletable.
+///
+/// Two different rows arrive that way, and the snapshot is what tells them
+/// apart. A **pending** instance has one, seeded by the runtime with Down and
+/// the factory's own objection, and it is reported as-is: that row is being
+/// retried and the reading is real. A row the runtime holds *nothing* for — an
+/// unregistered type, stored configuration that will not parse — has no
+/// snapshot, and only then is the type-level sentence synthesized here.
 fn entry_for(
     row: &InstanceRow,
     tags: Vec<String>,
@@ -2863,12 +2909,16 @@ fn entry_for(
         ),
         None => (
             unloaded_metadata(row),
-            None,
-            Some(ConnectorError::Internal(format!(
-                "this instance was not loaded: no connector of type {} could be built from its \
-                 stored configuration",
-                row.connector_type
-            ))),
+            snapshot.and_then(|value| value.status.clone()),
+            snapshot
+                .and_then(|value| value.status_error.clone())
+                .or_else(|| {
+                    Some(ConnectorError::Internal(format!(
+                        "this instance was not loaded: no connector of type {} could be built \
+                         from its stored configuration",
+                        row.connector_type
+                    )))
+                }),
             Vec::new(),
         ),
     };

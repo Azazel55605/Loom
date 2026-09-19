@@ -166,3 +166,81 @@ unresponsive service are excluded because they do not support the same
 cross-host inference. Multiple connector instances aimed at one host count
 once. Clients may dismiss one activation for their current UI session, but a
 later inactive-to-active transition is presented again.
+
+## Construction failures are retryable, like every other failure
+
+A later report of connectors going permanently dark after a backend restart
+traced to the one failure mode this ADR had not covered. Everything above is
+about a connector that **exists** and is failing. Building one was treated as a
+different kind of event: `ConnectorRuntime::load` called each type's factory in
+turn, and a factory that returned an error produced a log line and a `continue`,
+leaving that row out of the instance map entirely.
+
+Nothing polls what is not in the map. An instance excluded that way could not
+produce a failed poll, could not earn a backoff, could not be diagnosed, and
+could not recover — it reported "no reading" forever, and the only way back was
+to edit and re-save it by hand, one instance at a time. That was the only
+failure mode in the pipeline with no recovery path, and it was reached by the
+most ordinary event there is: the process restarting while a dependency was not
+yet up.
+
+Construction fails for the same reasons and just as temporarily as a poll. A
+Docker daemon is pinged, a Music Assistant socket is opened, a Pi-hole session
+is authenticated — all at construction time, all against a service that might be
+thirty seconds behind this one in a boot order nobody controls.
+
+**An instance is therefore `Live` or `Pending`, never absent.** A row whose
+factory fails is inserted as `Pending`, holding the type id, the decrypted
+configuration and the real error, with a status of Down carrying that error and
+a due-now poll schedule. `poll_due` treats a due `Pending` entry as a
+construction retry rather than a status poll; success promotes it to `Live` and
+polls it immediately, and failure goes down the **same** `record_poll_outcome`
+path a failed poll uses — one backoff curve, one diagnosis debounce, one
+broadcast. There is deliberately no second retry mechanism, because two
+implementations of "keep trying, but less often" is exactly how one of them ends
+up never firing.
+
+A pending instance is therefore indistinguishable from a live-but-Down one in
+every way that matters: it backs off to the same two-minute ceiling, it is
+probed by the same TCP diagnostic — asked of the type's no-I/O connection-test
+constructor, since there is no connector object to ask — it contributes to the
+same correlated-outage advisory, and it recovers on its own the moment its
+service answers.
+
+**Loading is concurrent and bounded.** Sequential construction under a single
+write lock made startup cost the *sum* of every connector's handshake, and the
+HTTP listener waited behind all of it. Each row is now built in its own task
+under a twelve-second `CONSTRUCTION_TIMEOUT`, and the map lock is taken per
+insert rather than held across every factory call. A factory that hangs is a
+failed attempt like any other, retried on the ordinary schedule.
+
+**What is still skipped, and why.** A row that cannot be *addressed* — an
+unparseable id, stored configuration that is not JSON, a type this build does
+not register, configuration that will not decrypt — is still logged and left out
+of the map. None of those become true later, so retrying them would be a loop
+with no exit. Such a row remains listed with stand-in metadata and a
+`statusError` naming its type, exactly as before, so it can still be fixed or
+deleted.
+
+**Requests act on a pending instance rather than refusing it.** Reconnect,
+discovery, sub-targets, resource browsing, media control and actions all go
+through a helper that builds a pending instance on demand before answering.
+A person pressing a button is the strongest available signal that somebody is
+waiting, and the attempt takes about as long as the request they already made.
+A failed on-demand attempt is recorded through the ordinary path, so pressing
+repeatedly cannot reset a backoff the connector has earned, and the refusal now
+carries the connector's own objection instead of the bare "not loaded", which
+named a state rather than a cause.
+
+The startup log line changed with the behaviour. `"skipping connector
+instance…"` described a permanent exclusion that no longer happens; a factory
+failure now logs that the instance is pending and will be retried
+automatically, and the summary line reports live and pending counts separately.
+
+One scheduling detail changed with it. An instance's next-due time used to move
+only when its attempt *finished*, so anything outlasting the one-second tick —
+a connector spending its full timeout, a construction retry waiting on a dead
+host — was dispatched again on every tick until it returned, piling concurrent
+attempts onto the one service least able to absorb them. The due time is now
+claimed when the attempt is dispatched and overwritten by the interval the
+outcome earns, so one instance has at most one attempt in flight.

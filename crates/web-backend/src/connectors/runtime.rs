@@ -1,7 +1,9 @@
 //! The live connectors this instance currently has.
 //!
-//! One [`Connector`] object per row in `connector_instances`, constructed at
-//! startup and kept for the process's lifetime. The map exists because a
+//! One entry per row in `connector_instances`, constructed at startup and kept
+//! for the process's lifetime. An entry is either [`InstanceState::Live`] — a
+//! built [`Connector`] — or [`InstanceState::Pending`], a row whose factory
+//! failed and which is waiting to be built again. The map exists because a
 //! connector is not a value that can be rebuilt per request: a real one will
 //! hold a client, a connection pool, a token cache, and rebuilding it on every
 //! poll would throw all of that away. The database row is the durable record;
@@ -12,6 +14,23 @@
 //! from both, and updating replaces the live entry with one built from the new
 //! configuration. Nothing else may hold a long-lived reference to a connector,
 //! or an update would leave a stale one in use.
+//!
+//! # Construction is a failure mode like any other
+//!
+//! Building a connector contacts its service — a Docker daemon is pinged, a
+//! Music Assistant socket is opened, a Pi-hole session is authenticated — so
+//! construction fails for exactly the reasons a poll fails, and just as
+//! temporarily. A row whose factory fails therefore becomes a `Pending` entry
+//! rather than being dropped: it keeps a place in the map, reports Down with
+//! the real error, and is retried by the poller on the same backoff schedule a
+//! live-but-failing connector earns. There is deliberately no second retry
+//! system for construction — [`ConnectorRuntime::poll_due`] drives both, so
+//! one instance cannot be "retried" by machinery the other does not share.
+//!
+//! Before this, a factory failure at startup logged a line and excluded the
+//! row from the map, and nothing polled what was not in the map: the instance
+//! stayed dark until somebody re-saved it by hand, even after its service came
+//! back. See `docs/adr/0018-connector-offline-handling.md`.
 
 use std::collections::HashMap;
 use std::net::IpAddr;
@@ -19,7 +38,9 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use chrono::{DateTime, Utc};
-use loom_core::connector::{Connector, ConnectorError, ConnectorStatus, HealthState};
+use loom_core::connector::{
+    Connector, ConnectorError, ConnectorStatus, HealthState, NetworkTarget,
+};
 use serde::Serialize;
 use serde_json::Value;
 use sqlx::SqlitePool;
@@ -76,6 +97,17 @@ pub const PENDING_OPERATION_TIMEOUT: Duration = Duration::from_secs(120);
 /// is a stable fact anyway: a host that was unreachable a minute ago is
 /// overwhelmingly likely to still be unreachable now.
 pub const DIAGNOSIS_INTERVAL: Duration = Duration::from_secs(60);
+
+/// How long one instance's factory may run before it is treated as failed.
+///
+/// Construction opens real connections, and a service that is half-up can
+/// accept a socket and then never answer. Without a bound, one such instance
+/// would hold up every other instance's construction and delay the HTTP
+/// listener binding behind it — which is how a single sick dependency used to
+/// turn into a server that looked hung at startup. Twelve seconds is longer
+/// than any healthy handshake and short enough that a stuck one is simply a
+/// failed attempt, retried on the ordinary schedule like any other.
+pub const CONSTRUCTION_TIMEOUT: Duration = Duration::from_secs(12);
 
 /// Recent TCP-connect failures remain relevant to the shared-outage advisory
 /// for this long. A rolling window avoids declaring a network incident from
@@ -326,6 +358,58 @@ pub enum BuildError {
     Rejected(ConnectorError),
 }
 
+/// An instance whose connector could not be built, kept so it can be retried.
+///
+/// Holds everything the next attempt needs, so a retry does not have to go back
+/// to the database: the type id to look the factory up with, the decrypted
+/// configuration to hand it, and what went wrong last time. The configuration
+/// is held in plaintext because that is the only form a factory accepts — the
+/// same form a live connector already holds internally, so this is not a new
+/// exposure.
+pub struct PendingInstance {
+    connector_type: String,
+    config: Value,
+    last_error: ConnectorError,
+}
+
+/// One entry in the instance map: either built, or waiting to be built.
+///
+/// An enum rather than "present or absent", because absence cannot be retried
+/// and cannot be reported. A row that failed to build is a thing this process
+/// knows about and has an opinion on, and both of those need somewhere to live.
+#[derive(Clone)]
+enum InstanceState {
+    Live(Arc<dyn Connector>),
+    Pending(Arc<PendingInstance>),
+}
+
+/// Why [`ConnectorRuntime::ensure_live`] could not produce a connector.
+pub enum EnsureError {
+    /// This process has no entry for the id at all.
+    Unknown,
+    /// An attempt was made just now, and this is what it said.
+    Construction(ConnectorError),
+}
+
+/// The status a pending instance reports.
+///
+/// Down rather than "no reading", and the distinction is not cosmetic: "no
+/// reading" means Loom does not know, whereas a factory that has just failed is
+/// positive knowledge that the service is not usable. The real error travels
+/// alongside in `status_error`, so the tile says Down and says why.
+fn pending_status() -> ConnectorStatus {
+    ConnectorStatus::new(HealthState::Down, Value::Object(Default::default()))
+}
+
+/// The error a client is shown for an instance that has no connector behind it.
+///
+/// Keeps the established "was not loaded" phrasing, which clients already
+/// render, and adds what was previously only ever written to the log: the
+/// factory's own objection.
+fn not_loaded_error(error: &ConnectorError) -> ConnectorError {
+    ConnectorError::Internal(format!("this instance was not loaded: {error}"))
+}
+
 /// The live connectors, plus the registry they were built from.
 ///
 /// Cloned per request as part of [`crate::state::AppState`]; both fields are
@@ -338,7 +422,7 @@ pub struct ConnectorRuntime {
     /// both async) and must not hold the map's lock while doing so. Cloning the
     /// `Arc` out and releasing the guard is what keeps one slow connector from
     /// blocking every other request.
-    instances: Arc<RwLock<HashMap<Uuid, Arc<dyn Connector>>>>,
+    instances: Arc<RwLock<HashMap<Uuid, InstanceState>>>,
     statuses: Arc<RwLock<HashMap<Uuid, ConnectorStatusSnapshot>>>,
     /// Per-instance backoff and debounce bookkeeping. A separate map from
     /// `statuses` because none of it is ever sent to a client, and folding it
@@ -351,6 +435,10 @@ pub struct ConnectorRuntime {
     /// Overridable so a test can watch the safety net fire without waiting two
     /// minutes for it. Never changed in production.
     pending_timeout: Duration,
+    /// Overridable for the same reason as `pending_timeout`: a test that proves
+    /// a hung factory cannot hold up the others should not take twelve seconds
+    /// to say so. Never changed in production.
+    construction_timeout: Duration,
 }
 
 impl ConnectorRuntime {
@@ -367,6 +455,7 @@ impl ConnectorRuntime {
             network_failures: Arc::new(RwLock::new(NetworkOutageTracker::default())),
             network_advisory,
             pending_timeout: PENDING_OPERATION_TIMEOUT,
+            construction_timeout: CONSTRUCTION_TIMEOUT,
         }
     }
 
@@ -381,29 +470,57 @@ impl ConnectorRuntime {
         self
     }
 
+    /// Shortens the per-instance construction bound, for tests only.
+    #[cfg(test)]
+    pub fn with_construction_timeout(mut self, timeout: Duration) -> Self {
+        self.construction_timeout = timeout;
+        self
+    }
+
     /// Builds a runtime and populates it from `connector_instances`.
     ///
-    /// A row that cannot be turned into a live connector — unknown type,
-    /// unparseable id, configuration the factory rejects — is **logged and
-    /// skipped**, not fatal. The alternative is a server that refuses to start
-    /// because of one bad connector, which would take authentication and every
-    /// other connector down with it; the row survives on disk and can be fixed
-    /// or deleted through the API. See `docs/adr/0004-zero-config-startup.md`
-    /// for why startup fails as rarely as possible.
+    /// Every row ends up in the map. A row whose factory fails is inserted as
+    /// [`InstanceState::Pending`] carrying the real error and a due-now poll
+    /// schedule, so the poller retries it exactly as it retries a connector
+    /// that is built but failing. Only a row that cannot be *addressed* at all
+    /// is skipped — an unparseable id, configuration that is not JSON, a type
+    /// this build does not register, configuration that will not decrypt —
+    /// because none of those become true later and retrying them forever would
+    /// be a loop with no exit. Those rows survive on disk, remain listed, and
+    /// can be fixed or deleted through the API. See
+    /// `docs/adr/0004-zero-config-startup.md` for why startup fails as rarely
+    /// as possible.
+    ///
+    /// Construction runs concurrently, one task per row, each bounded by
+    /// [`CONSTRUCTION_TIMEOUT`]. Sequential construction under a single write
+    /// lock meant total startup time was the *sum* of every connector's
+    /// handshake, and one unreachable service delayed every other connector and
+    /// the HTTP listener behind it. The lock is now taken per instance, for the
+    /// insert alone, never across a factory call.
     pub async fn load(
         pool: &SqlitePool,
         types: ConnectorTypeRegistry,
         config_encryption_key: &ConfigEncryptionKey,
     ) -> Result<Self, sqlx::Error> {
-        let runtime = Self::new(types);
+        Self::new(types)
+            .load_into(pool, config_encryption_key)
+            .await
+    }
 
+    /// [`ConnectorRuntime::load`] onto an already-configured runtime, so a test
+    /// can shorten the construction bound before rows are read.
+    async fn load_into(
+        self,
+        pool: &SqlitePool,
+        config_encryption_key: &ConfigEncryptionKey,
+    ) -> Result<Self, sqlx::Error> {
         let rows = sqlx::query_as::<_, (String, String, String)>(
             "SELECT id, connector_type, config FROM connector_instances",
         )
         .fetch_all(pool)
         .await?;
 
-        let mut live = runtime.instances.write().await;
+        let mut builds = JoinSet::new();
         for (id, connector_type, config) in rows {
             let Ok(uuid) = Uuid::parse_str(&id) else {
                 tracing::warn!(instance = %id, "skipping connector instance with an unparseable id");
@@ -422,51 +539,119 @@ impl ConnectorRuntime {
                 }
             };
 
-            let Some(registration) = runtime.registration(&connector_type) else {
-                tracing::warn!(
-                    instance = %id,
-                    connector_type,
-                    "skipping connector instance of a type this build does not register"
-                );
-                continue;
-            };
-            let config = match decrypt_sensitive_fields(
-                &config,
-                &registration.schema,
-                config_encryption_key,
-            ) {
-                Ok(config) => config,
-                Err(error) => {
+            // Decryption happens here rather than in the task because it needs
+            // the registration's schema, which is borrowed from `self`.
+            let config = {
+                let Some(registration) = self.registration(&connector_type) else {
                     tracing::warn!(
                         instance = %id,
-                        %error,
-                        "skipping connector instance whose sensitive config cannot be decrypted"
+                        connector_type,
+                        "skipping connector instance of a type this build does not register"
                     );
                     continue;
+                };
+                match decrypt_sensitive_fields(&config, &registration.schema, config_encryption_key)
+                {
+                    Ok(config) => config,
+                    Err(error) => {
+                        tracing::warn!(
+                            instance = %id,
+                            %error,
+                            "skipping connector instance whose sensitive config cannot be decrypted"
+                        );
+                        continue;
+                    }
                 }
             };
 
-            match runtime.build(&connector_type, config).await {
-                Ok(connector) => {
-                    live.insert(uuid, connector);
-                }
-                Err(BuildError::UnknownType(type_id)) => tracing::warn!(
-                    instance = %id,
-                    connector_type = %type_id,
-                    "skipping connector instance of a type this build does not register"
-                ),
-                Err(BuildError::Rejected(error)) => tracing::warn!(
-                    instance = %id,
-                    %error,
-                    "skipping connector instance the connector refused to be built from"
-                ),
+            let runtime = self.clone();
+            builds.spawn(async move {
+                runtime.load_one(uuid, connector_type, config).await;
+            });
+        }
+
+        while let Some(result) = builds.join_next().await {
+            if let Err(error) = result {
+                tracing::error!(%error, "connector construction task failed");
             }
         }
-        drop(live);
 
-        tracing::info!(count = runtime.len().await, "loaded connector instances");
+        let (live, pending) = self.counts().await;
+        tracing::info!(live, pending, "loaded connector instances");
 
-        Ok(runtime)
+        Ok(self)
+    }
+
+    /// Builds one row into the map, as `Live` or as `Pending`.
+    async fn load_one(&self, id: Uuid, connector_type: String, config: Value) {
+        match self.construct(&connector_type, &config).await {
+            Ok(connector) => {
+                self.instances
+                    .write()
+                    .await
+                    .insert(id, InstanceState::Live(connector));
+            }
+            Err(error) => {
+                // Deliberately not "skipping": the row is in the map, it is
+                // reported to clients as Down with this error, and the poller
+                // will build it again without anyone asking.
+                tracing::warn!(
+                    instance = %id,
+                    connector_type = %connector_type,
+                    %error,
+                    "connector instance could not be built yet; it is pending and will be \
+                     retried automatically on the poll schedule"
+                );
+                self.insert_pending(
+                    id,
+                    PendingInstance {
+                        connector_type,
+                        config,
+                        last_error: error,
+                    },
+                )
+                .await;
+            }
+        }
+    }
+
+    /// One bounded construction attempt, with both failure kinds flattened into
+    /// the connector's own error type.
+    ///
+    /// `BuildError::UnknownType` cannot happen on a retry — the registration was
+    /// checked before the entry was created — but it is mapped rather than
+    /// unwrapped, because a panic here would take down the poller.
+    async fn construct(
+        &self,
+        type_id: &str,
+        config: &Value,
+    ) -> Result<Arc<dyn Connector>, ConnectorError> {
+        match time::timeout(
+            self.construction_timeout,
+            self.build(type_id, config.clone()),
+        )
+        .await
+        {
+            Ok(Ok(connector)) => Ok(connector),
+            Ok(Err(BuildError::Rejected(error))) => Err(error),
+            Ok(Err(BuildError::UnknownType(type_id))) => Err(ConnectorError::Internal(format!(
+                "no connector of type `{type_id}` is registered in this build"
+            ))),
+            Err(_) => Err(ConnectorError::unreachable(format!(
+                "the connector did not finish connecting within {} seconds",
+                self.construction_timeout.as_secs().max(1)
+            ))),
+        }
+    }
+
+    /// How many entries are built, and how many are waiting to be.
+    async fn counts(&self) -> (usize, usize) {
+        let instances = self.instances.read().await;
+        let pending = instances
+            .values()
+            .filter(|state| matches!(state, InstanceState::Pending(_)))
+            .count();
+        (instances.len() - pending, pending)
     }
 
     /// The registered connector types.
@@ -531,13 +716,40 @@ impl ConnectorRuntime {
     /// connection were accepted successfully. The process poller picks this up
     /// on its next one-second tick and publishes the resulting snapshot.
     pub async fn insert(&self, id: Uuid, connector: Arc<dyn Connector>) {
-        self.instances.write().await.insert(id, connector);
+        self.instances
+            .write()
+            .await
+            .insert(id, InstanceState::Live(connector));
         self.statuses.write().await.remove(&id);
         self.schedules
             .write()
             .await
             .insert(id, PollSchedule::due_now());
         self.record_network_failure(id, None).await;
+    }
+
+    /// Records an instance that could not be built, due for a retry now.
+    ///
+    /// The mirror of [`ConnectorRuntime::insert`] for the failing case, and
+    /// deliberately the same shape: an entry in the map, a seeded status, and a
+    /// due-now schedule. A fresh schedule rather than a backed-off one because
+    /// this is the *first* attempt's outcome — the backoff is earned by the
+    /// retries that follow, through the same path a failing poll uses.
+    async fn insert_pending(&self, id: Uuid, pending: PendingInstance) {
+        let reported = not_loaded_error(&pending.last_error);
+        self.instances
+            .write()
+            .await
+            .insert(id, InstanceState::Pending(Arc::new(pending)));
+        self.schedules
+            .write()
+            .await
+            .insert(id, PollSchedule::due_now());
+        self.update_snapshot(id, |snapshot| {
+            snapshot.status = Some(pending_status());
+            snapshot.status_error = Some(reported);
+        })
+        .await;
     }
 
     /// Drops the live connector for `id`.
@@ -553,13 +765,45 @@ impl ConnectorRuntime {
     /// Returns a clone of the `Arc` and releases the lock, so the caller can
     /// await on it freely.
     pub async fn get(&self, id: &Uuid) -> Option<Arc<dyn Connector>> {
-        self.instances.read().await.get(id).cloned()
+        match self.instances.read().await.get(id) {
+            Some(InstanceState::Live(connector)) => Some(Arc::clone(connector)),
+            Some(InstanceState::Pending(_)) | None => None,
+        }
     }
 
-    /// How many live connectors there are.
+    /// The live connector for `id`, building it first if it is still pending.
     ///
-    /// Used for the startup log line and by tests; listing goes through the
-    /// database, which is the ordering authority.
+    /// For anything a person just asked for. [`ConnectorRuntime::get`] answers
+    /// "is there one right now", which is what rendering wants; this answers
+    /// "get me one", which is what pressing a button wants — and a button press
+    /// is the strongest possible signal that somebody is waiting, so it does not
+    /// wait for the backoff to come around. A failed attempt still records
+    /// itself through the ordinary path, so pressing repeatedly cannot reset the
+    /// backoff a connector has earned.
+    pub async fn ensure_live(&self, id: &Uuid) -> Result<Arc<dyn Connector>, EnsureError> {
+        let state = self.instances.read().await.get(id).cloned();
+        match state {
+            Some(InstanceState::Live(connector)) => Ok(connector),
+            Some(InstanceState::Pending(pending)) => {
+                self.retry_construction(*id, Arc::clone(&pending)).await;
+                match self.instances.read().await.get(id) {
+                    Some(InstanceState::Live(connector)) => Ok(Arc::clone(connector)),
+                    Some(InstanceState::Pending(current)) => {
+                        Err(EnsureError::Construction(current.last_error.clone()))
+                    }
+                    None => Err(EnsureError::Unknown),
+                }
+            }
+            None => Err(EnsureError::Unknown),
+        }
+    }
+
+    /// How many entries there are, built or pending.
+    ///
+    /// Used by tests; listing goes through the database, which is the ordering
+    /// authority, and the startup log reports `counts()` instead so that live
+    /// and pending instances are distinguishable in it.
+    #[cfg(test)]
     pub async fn len(&self) -> usize {
         self.instances.read().await.len()
     }
@@ -671,8 +915,13 @@ impl ConnectorRuntime {
     /// failure and keeps backing off. Cache updates and WebSocket pushes also
     /// pass through the same single path used by scheduled polls.
     pub async fn reconnect(&self, id: Uuid) -> Option<ConnectorStatusSnapshot> {
-        let connector = self.get(&id).await?;
-        self.poll_connector(id, connector).await;
+        let state = self.instances.read().await.get(&id).cloned()?;
+        match state {
+            InstanceState::Live(connector) => self.poll_connector(id, connector).await,
+            // A pending instance retried here is the whole point of the button
+            // for somebody who has just fixed the service it could not reach.
+            InstanceState::Pending(pending) => self.retry_construction(id, pending).await,
+        }
         self.cached_status(&id).await
     }
 
@@ -688,12 +937,12 @@ impl ConnectorRuntime {
     /// connectors from being polled.
     #[cfg(test)]
     pub async fn poll_once(&self) {
-        let instances: Vec<(Uuid, Arc<dyn Connector>)> = self
+        let instances: Vec<(Uuid, InstanceState)> = self
             .instances
             .read()
             .await
             .iter()
-            .map(|(id, connector)| (*id, Arc::clone(connector)))
+            .map(|(id, state)| (*id, state.clone()))
             .collect();
         self.poll_all(instances).await;
     }
@@ -705,7 +954,7 @@ impl ConnectorRuntime {
     pub async fn poll_due(&self) {
         let now = time::Instant::now();
 
-        let due: Vec<(Uuid, Arc<dyn Connector>)> = {
+        let due: Vec<(Uuid, InstanceState)> = {
             let instances = self.instances.read().await;
             let mut schedules = self.schedules.write().await;
             instances
@@ -715,13 +964,23 @@ impl ConnectorRuntime {
                     // the loop, so it is due on this very tick — hence
                     // `due_at(now)` rather than `due_now()`, which would read a
                     // later clock and defer it by one tick for no reason.
-                    schedules
+                    let schedule = schedules
                         .entry(**id)
-                        .or_insert_with(|| PollSchedule::due_at(now))
-                        .next_due
-                        <= now
+                        .or_insert_with(|| PollSchedule::due_at(now));
+                    if schedule.next_due > now {
+                        return false;
+                    }
+                    // Claimed for this pass. The due time only moved when the
+                    // attempt *finished* before, so anything outlasting a tick
+                    // — a connector timing out, a construction retry waiting on
+                    // a dead host — was dispatched again every second until it
+                    // came back, piling concurrent connection attempts onto the
+                    // one service least able to take them. The outcome
+                    // overwrites this with the interval it has earned.
+                    schedule.next_due = now + schedule.interval();
+                    true
                 })
-                .map(|(id, connector)| (*id, Arc::clone(connector)))
+                .map(|(id, state)| (*id, state.clone()))
                 .collect()
         };
 
@@ -734,13 +993,24 @@ impl ConnectorRuntime {
         self.prune_network_failures().await;
     }
 
-    /// Polls the given instances concurrently, one task each.
-    async fn poll_all(&self, instances: Vec<(Uuid, Arc<dyn Connector>)>) {
+    /// Works the given instances concurrently, one task each.
+    ///
+    /// What "working" one means depends on what it is: a built connector is
+    /// polled, and one that is still pending gets another construction attempt.
+    /// Both outcomes land in [`ConnectorRuntime::record_poll_outcome`], so a
+    /// pending instance backs off, gets diagnosed, and feeds the shared-outage
+    /// advisory on exactly the terms a live-but-Down one does.
+    async fn poll_all(&self, instances: Vec<(Uuid, InstanceState)>) {
         let mut polls = JoinSet::new();
-        for (id, connector) in instances {
+        for (id, state) in instances {
             let runtime = self.clone();
             polls.spawn(async move {
-                runtime.poll_connector(id, connector).await;
+                match state {
+                    InstanceState::Live(connector) => runtime.poll_connector(id, connector).await,
+                    InstanceState::Pending(pending) => {
+                        runtime.retry_construction(id, pending).await
+                    }
+                }
             });
         }
 
@@ -817,16 +1087,126 @@ impl ConnectorRuntime {
         // An update can replace a connector while its old status call is in
         // flight. Never let that late result overwrite the replacement's
         // freshly seeded snapshot.
-        let is_current = self
-            .instances
-            .read()
-            .await
-            .get(&id)
-            .is_some_and(|current| Arc::ptr_eq(current, &connector));
+        let is_current = matches!(
+            self.instances.read().await.get(&id),
+            Some(InstanceState::Live(current)) if Arc::ptr_eq(current, &connector)
+        );
         if !is_current {
             return;
         }
 
+        self.record_poll_outcome(id, outcome, connector.network_target())
+            .await;
+    }
+
+    /// Tries once more to build a pending instance.
+    ///
+    /// Success is the same event as a create or an update completing: the entry
+    /// becomes `Live`, the "was not loaded" snapshot is dropped, and the
+    /// schedule returns to the base cadence. The instance is then polled
+    /// immediately rather than on the next tick, so recovery shows up as a real
+    /// reading instead of an empty one.
+    ///
+    /// Failure is the same event as a poll failing, and goes down the same path
+    /// — one backoff curve, one diagnosis debounce, one broadcast — because two
+    /// implementations of "keep trying, but less often" is precisely how one of
+    /// them ends up never firing.
+    async fn retry_construction(&self, id: Uuid, pending: Arc<PendingInstance>) {
+        let attempt = self
+            .construct(&pending.connector_type, &pending.config)
+            .await;
+
+        // Whether this entry is still the one that was retried. An update or a
+        // delete landing mid-attempt wins: its result is newer than this one.
+        let replaced = |instances: &HashMap<Uuid, InstanceState>| {
+            !matches!(
+                instances.get(&id),
+                Some(InstanceState::Pending(current)) if Arc::ptr_eq(current, &pending)
+            )
+        };
+
+        match attempt {
+            Ok(connector) => {
+                {
+                    let mut instances = self.instances.write().await;
+                    if replaced(&instances) {
+                        return;
+                    }
+                    instances.insert(id, InstanceState::Live(Arc::clone(&connector)));
+                }
+                self.statuses.write().await.remove(&id);
+                self.schedules
+                    .write()
+                    .await
+                    .insert(id, PollSchedule::due_now());
+                self.record_network_failure(id, None).await;
+                tracing::info!(
+                    instance = %id,
+                    connector_type = %pending.connector_type,
+                    "a pending connector instance was built successfully and is now live"
+                );
+                self.poll_connector(id, connector).await;
+            }
+            Err(error) => {
+                let reported = not_loaded_error(&error);
+                let target = self.pending_network_target(&pending).await;
+                {
+                    let mut instances = self.instances.write().await;
+                    if replaced(&instances) {
+                        return;
+                    }
+                    instances.insert(
+                        id,
+                        InstanceState::Pending(Arc::new(PendingInstance {
+                            connector_type: pending.connector_type.clone(),
+                            config: pending.config.clone(),
+                            last_error: error,
+                        })),
+                    );
+                }
+                self.record_poll_outcome(
+                    id,
+                    ConnectorStatusSnapshot::from_poll(Some(pending_status()), Some(reported)),
+                    target,
+                )
+                .await;
+            }
+        }
+    }
+
+    /// Where a pending instance *would have* connected, for the diagnosis.
+    ///
+    /// Asked of the type's **no-I/O** connection-test constructor, which exists
+    /// so a connector can be built without contacting anything. Never the
+    /// ordinary factory: contacting the service is the thing that just failed,
+    /// and doing it twice per retry would double the load on a struggling host.
+    /// A type without such a constructor simply gets no network diagnosis,
+    /// exactly like a live connector that publishes no target.
+    async fn pending_network_target(&self, pending: &PendingInstance) -> Option<NetworkTarget> {
+        let factory = self
+            .registration(&pending.connector_type)?
+            .connection_test_factory?;
+        // Bounded anyway. "No I/O" is a property of each registration that this
+        // code cannot verify, and a diagnosis must never outlast the failure it
+        // is explaining.
+        time::timeout(diagnostics::PROBE_TIMEOUT, factory(pending.config.clone()))
+            .await
+            .ok()?
+            .ok()?
+            .network_target()
+    }
+
+    /// Records what an attempt produced: backoff, diagnosis, advisory, publish.
+    ///
+    /// The single tail shared by a status poll and a construction retry. Every
+    /// decision about *how often to try again* and *what to say about it* is
+    /// made here and nowhere else.
+    async fn record_poll_outcome(
+        &self,
+        id: Uuid,
+        outcome: ConnectorStatusSnapshot,
+        target: Option<NetworkTarget>,
+    ) {
         let failing = outcome.is_failing();
         let interval = {
             let mut schedules = self.schedules.write().await;
@@ -849,7 +1229,7 @@ impl ConnectorRuntime {
         // never sees a Down status without its explanation and then the same
         // status with one a moment later.
         let diagnosis = if failing {
-            self.diagnose_if_due(id, connector.as_ref()).await
+            self.diagnose_if_due(id, target).await
         } else {
             DiagnosticProbe::Completed(None)
         };
@@ -887,8 +1267,8 @@ impl ConnectorRuntime {
     /// `Skipped` means the debounce blocked a real probe and existing evidence
     /// must remain intact. `Completed(None)` means there is no target worth
     /// probing and clears any observation left by an older connector config.
-    async fn diagnose_if_due(&self, id: Uuid, connector: &dyn Connector) -> DiagnosticProbe {
-        let Some(target) = connector.network_target() else {
+    async fn diagnose_if_due(&self, id: Uuid, target: Option<NetworkTarget>) -> DiagnosticProbe {
+        let Some(target) = target else {
             return DiagnosticProbe::Completed(None);
         };
 
@@ -944,10 +1324,129 @@ impl ConnectorRuntime {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::{LazyLock, Mutex};
+
     use super::*;
-    use crate::connectors::registry::builtin_registry;
-    use loom_core::connector::debug::TYPE_ID as DEBUG_TYPE_ID;
+    use crate::connectors::registry::{builtin_registry, ConnectorTypeRegistration};
+    use loom_core::connector::debug::{DebugConnector, TYPE_ID as DEBUG_TYPE_ID};
     use serde_json::json;
+
+    /// How many construction attempts each fixture instance has seen, keyed by
+    /// the `slot` in its stored configuration.
+    ///
+    /// Keyed rather than a single counter because a [`ConnectorFactory`] is a
+    /// plain `fn` pointer that can capture nothing, so the state has to be
+    /// global — and these tests run in one process at the same time. The slot
+    /// gives each test its own tally.
+    static FLAKY_ATTEMPTS: LazyLock<Mutex<HashMap<String, u64>>> =
+        LazyLock::new(|| Mutex::new(HashMap::new()));
+
+    const FLAKY_TYPE_ID: &str = "flaky-test-connector";
+    const HANGING_TYPE_ID: &str = "hanging-test-connector";
+
+    /// Configuration for the flaky fixture: fail `failures` times in this slot,
+    /// then succeed.
+    fn flaky_config(slot: &str, failures: u64) -> Value {
+        json!({ "slot": slot, "failures": failures })
+    }
+
+    /// A registry of two fixtures that model the two ways construction goes
+    /// wrong: a factory that refuses for a while and then works, and one that
+    /// never comes back at all.
+    fn flaky_registry() -> ConnectorTypeRegistry {
+        fn registration(
+            type_id: &'static str,
+            factory: crate::connectors::registry::ConnectorFactory,
+        ) -> ConnectorTypeRegistration {
+            ConnectorTypeRegistration {
+                type_id,
+                display_name: "Test Connector",
+                icon: None,
+                factory,
+                connection_test_factory: None,
+                schema: json!({ "type": "object" }),
+                setup_guide: None,
+                discoverable_type: None,
+                discovery_target_field: None,
+            }
+        }
+
+        let mut types = HashMap::new();
+        types.insert(
+            FLAKY_TYPE_ID,
+            registration(FLAKY_TYPE_ID, |config| {
+                Box::pin(async move {
+                    let slot = config["slot"].as_str().unwrap_or_default().to_owned();
+                    let failures = config["failures"].as_u64().unwrap_or(0);
+                    let attempt = {
+                        let mut attempts =
+                            FLAKY_ATTEMPTS.lock().expect("the tally is not poisoned");
+                        let seen = attempts.entry(slot).or_insert(0);
+                        *seen += 1;
+                        *seen
+                    };
+                    if attempt <= failures {
+                        return Err(ConnectorError::unreachable("the service is not up yet"));
+                    }
+                    DebugConnector::from_config_value(json!({}))
+                        .map(|connector| Box::new(connector) as Box<dyn Connector>)
+                })
+            }),
+        );
+        types.insert(
+            HANGING_TYPE_ID,
+            registration(HANGING_TYPE_ID, |_config| {
+                Box::pin(async move {
+                    // A service that accepts the socket and then says nothing:
+                    // the case a timeout exists for, since it never errors.
+                    std::future::pending::<()>().await;
+                    unreachable!("the construction timeout fires first")
+                })
+            }),
+        );
+        Arc::new(types)
+    }
+
+    /// An in-memory database holding just the columns `load` reads.
+    async fn instances_pool(rows: &[(Uuid, &str, Value)]) -> SqlitePool {
+        let pool = SqlitePool::connect("sqlite::memory:")
+            .await
+            .expect("an in-memory database");
+        sqlx::query(
+            "CREATE TABLE connector_instances (id TEXT PRIMARY KEY, connector_type TEXT NOT \
+             NULL, config TEXT NOT NULL)",
+        )
+        .execute(&pool)
+        .await
+        .expect("the table is created");
+
+        for (id, connector_type, config) in rows {
+            sqlx::query(
+                "INSERT INTO connector_instances (id, connector_type, config) VALUES (?, ?, ?)",
+            )
+            .bind(id.to_string())
+            .bind(connector_type)
+            .bind(config.to_string())
+            .execute(&pool)
+            .await
+            .expect("the row is inserted");
+        }
+
+        pool
+    }
+
+    async fn is_pending(runtime: &ConnectorRuntime, id: &Uuid) -> bool {
+        matches!(
+            runtime.instances.read().await.get(id),
+            Some(InstanceState::Pending(_))
+        )
+    }
+
+    /// Any key at all: these fixtures store nothing sensitive, so decryption is
+    /// a pass-through and the value only has to be well-formed.
+    fn test_key() -> ConfigEncryptionKey {
+        ConfigEncryptionKey::clone_from_slice(&[7u8; 32])
+    }
 
     /// A connector whose polls always fail, for exercising backoff without
     /// waiting on anything real.
@@ -957,7 +1456,11 @@ mod tests {
             .build(DEBUG_TYPE_ID, json!({ "failMode": "unreachable" }))
             .await
             .expect("the fixture builds");
-        runtime.instances.write().await.insert(id, connector);
+        runtime
+            .instances
+            .write()
+            .await
+            .insert(id, InstanceState::Live(connector));
         id
     }
 
@@ -1119,7 +1622,11 @@ mod tests {
             .build(DEBUG_TYPE_ID, json!({}))
             .await
             .expect("the fixture builds");
-        runtime.instances.write().await.insert(id, healthy);
+        runtime
+            .instances
+            .write()
+            .await
+            .insert(id, InstanceState::Live(healthy));
         runtime.poll_once().await;
 
         let recovered = schedule_of(&runtime, &id).await;
@@ -1145,7 +1652,11 @@ mod tests {
             .build(DEBUG_TYPE_ID, json!({}))
             .await
             .expect("the fixture builds");
-        runtime.instances.write().await.insert(id, healthy);
+        runtime
+            .instances
+            .write()
+            .await
+            .insert(id, InstanceState::Live(healthy));
         runtime
             .schedules
             .write()
@@ -1188,7 +1699,11 @@ mod tests {
             .build(DEBUG_TYPE_ID, json!({}))
             .await
             .expect("the fixture builds");
-        runtime.instances.write().await.insert(id, healthy);
+        runtime
+            .instances
+            .write()
+            .await
+            .insert(id, InstanceState::Live(healthy));
         let mut updates = runtime.subscribe_statuses();
 
         let snapshot = runtime.reconnect(id).await.expect("live instance");
@@ -1326,7 +1841,11 @@ mod tests {
             )
             .await
             .expect("the fixture builds");
-        runtime.instances.write().await.insert(id, connector);
+        runtime
+            .instances
+            .write()
+            .await
+            .insert(id, InstanceState::Live(connector));
 
         runtime.poll_once().await;
         let snapshot = runtime.cached_status(&id).await.expect("status");
@@ -1364,7 +1883,11 @@ mod tests {
             .build(DEBUG_TYPE_ID, json!({}))
             .await
             .expect("the fixture builds");
-        runtime.instances.write().await.insert(id, healthy);
+        runtime
+            .instances
+            .write()
+            .await
+            .insert(id, InstanceState::Live(healthy));
         runtime.poll_once().await;
         assert!(runtime
             .cached_status(&id)
@@ -1385,7 +1908,11 @@ mod tests {
             .build(DEBUG_TYPE_ID, json!({ "simulatedHealth": "down" }))
             .await
             .expect("the fixture builds");
-        runtime.instances.write().await.insert(id, connector);
+        runtime
+            .instances
+            .write()
+            .await
+            .insert(id, InstanceState::Live(connector));
 
         runtime.poll_once().await;
         let snapshot = runtime.cached_status(&id).await.expect("status");
@@ -1559,5 +2086,187 @@ mod tests {
             loom_core::connector::details::get_detail(&details, None, "label"),
             Some(&json!("new"))
         );
+    }
+
+    /// The bug this whole state exists for: a factory that fails at startup
+    /// must leave a retryable instance behind, and the ordinary poller must
+    /// recover it with nobody touching anything.
+    #[tokio::test]
+    async fn a_construction_failure_becomes_a_pending_instance_the_poller_recovers() {
+        let id = Uuid::new_v4();
+        let pool = instances_pool(&[(id, FLAKY_TYPE_ID, flaky_config("recovers", 1))]).await;
+        let runtime = ConnectorRuntime::new(flaky_registry())
+            .load_into(&pool, &test_key())
+            .await
+            .expect("the runtime loads");
+
+        // Not dropped: the row is in the map, reported Down rather than as an
+        // absence, and carrying the factory's own objection.
+        assert_eq!(runtime.len().await, 1);
+        assert!(is_pending(&runtime, &id).await);
+        assert!(runtime.get(&id).await.is_none());
+        let snapshot = runtime.cached_status(&id).await.expect("a seeded status");
+        assert_eq!(
+            snapshot.status.as_ref().map(|status| status.health),
+            Some(HealthState::Down)
+        );
+        let reported = snapshot
+            .status_error
+            .expect("the construction error")
+            .to_string();
+        assert!(
+            reported.contains("was not loaded") && reported.contains("the service is not up yet"),
+            "the seeded error should name the real cause: {reported}"
+        );
+        assert_eq!(runtime.counts().await, (0, 1));
+
+        // Due immediately, so one ordinary poller pass is all recovery takes.
+        runtime.poll_due().await;
+
+        assert!(!is_pending(&runtime, &id).await);
+        assert!(runtime.get(&id).await.is_some());
+        assert_eq!(runtime.counts().await, (1, 0));
+        let recovered = runtime.cached_status(&id).await.expect("a polled status");
+        assert_eq!(
+            recovered.status.as_ref().map(|status| status.health),
+            Some(HealthState::Healthy),
+            "a promoted instance is polled immediately rather than left empty"
+        );
+        assert!(recovered.status_error.is_none());
+    }
+
+    /// A pending instance that keeps failing must back off exactly as a live
+    /// instance that keeps failing does — the same curve, from the same code.
+    #[tokio::test]
+    async fn a_pending_instance_that_keeps_failing_backs_off_like_a_failing_poll() {
+        let id = Uuid::new_v4();
+        let pool =
+            instances_pool(&[(id, FLAKY_TYPE_ID, flaky_config("always-fails", u64::MAX))]).await;
+        let runtime = ConnectorRuntime::new(flaky_registry())
+            .load_into(&pool, &test_key())
+            .await
+            .expect("the runtime loads");
+
+        runtime.poll_due().await;
+        let after_one = schedule_of(&runtime, &id).await;
+        assert_eq!(after_one.consecutive_failures, 1);
+        assert_eq!(after_one.interval(), CONNECTOR_POLL_INTERVAL * 2);
+
+        // Still pending, still due later, still carrying the latest error.
+        assert!(is_pending(&runtime, &id).await);
+        assert!(after_one.next_due > time::Instant::now());
+    }
+
+    /// One factory that never returns must not hold up the others, and must not
+    /// hold up the process: `load` is what the HTTP listener waits behind.
+    #[tokio::test]
+    async fn a_hanging_factory_does_not_block_the_other_instances_from_loading() {
+        let hanging = Uuid::new_v4();
+        let healthy = Uuid::new_v4();
+        let pool = instances_pool(&[
+            (hanging, HANGING_TYPE_ID, json!({})),
+            (healthy, FLAKY_TYPE_ID, flaky_config("beside-a-hang", 0)),
+        ])
+        .await;
+
+        let started = time::Instant::now();
+        let runtime = ConnectorRuntime::new(flaky_registry())
+            .with_construction_timeout(Duration::from_millis(200))
+            .load_into(&pool, &test_key())
+            .await
+            .expect("the runtime loads");
+        let elapsed = started.elapsed();
+
+        assert!(
+            runtime.get(&healthy).await.is_some(),
+            "a reachable connector is built regardless of what the others are doing"
+        );
+        assert!(is_pending(&runtime, &hanging).await);
+        assert!(
+            elapsed < Duration::from_secs(2),
+            "load must be bounded by the construction timeout, not by the hung factory: {elapsed:?}"
+        );
+
+        // The hung one is a pending instance like any other, not a special case.
+        let snapshot = runtime
+            .cached_status(&hanging)
+            .await
+            .expect("a seeded status");
+        assert!(snapshot
+            .status_error
+            .expect("the timeout error")
+            .to_string()
+            .contains("did not finish connecting"));
+    }
+
+    /// Pressing Reconnect on an instance that is pending must be a real
+    /// attempt, not a refusal — and must succeed the moment the service is up.
+    #[tokio::test]
+    async fn reconnect_retries_construction_for_a_pending_instance() {
+        let id = Uuid::new_v4();
+        let pool = instances_pool(&[(id, FLAKY_TYPE_ID, flaky_config("reconnect", 1))]).await;
+        let runtime = ConnectorRuntime::new(flaky_registry())
+            .load_into(&pool, &test_key())
+            .await
+            .expect("the runtime loads");
+        assert!(is_pending(&runtime, &id).await);
+
+        let snapshot = runtime
+            .reconnect(id)
+            .await
+            .expect("a pending instance answers reconnect rather than refusing it");
+
+        assert_eq!(
+            snapshot.status.as_ref().map(|status| status.health),
+            Some(HealthState::Healthy)
+        );
+        assert!(runtime.get(&id).await.is_some());
+    }
+
+    /// The route helper behind actions, sub-targets and discovery: a pending
+    /// instance is built on demand, and its failure is reported as the
+    /// connector's own objection rather than as "not loaded".
+    #[tokio::test]
+    async fn ensure_live_builds_a_pending_instance_on_demand() {
+        let id = Uuid::new_v4();
+        let pool = instances_pool(&[(id, FLAKY_TYPE_ID, flaky_config("ensure-live", 2))]).await;
+        let runtime = ConnectorRuntime::new(flaky_registry())
+            .load_into(&pool, &test_key())
+            .await
+            .expect("the runtime loads");
+
+        // Second attempt: still failing, and the caller is told why.
+        match runtime.ensure_live(&id).await {
+            Err(EnsureError::Construction(error)) => {
+                assert!(error.to_string().contains("the service is not up yet"));
+            }
+            Err(EnsureError::Unknown) => panic!("the instance is known, just not built"),
+            Ok(_) => panic!("the fixture is configured to fail twice"),
+        }
+
+        // Third attempt: the service is up, so the caller simply gets it.
+        assert!(runtime.ensure_live(&id).await.is_ok());
+        assert!(runtime.get(&id).await.is_some());
+
+        // An id this process holds nothing for stays distinguishable.
+        assert!(matches!(
+            runtime.ensure_live(&Uuid::new_v4()).await,
+            Err(EnsureError::Unknown)
+        ));
+    }
+
+    /// A row of a type this build does not register is still not retried: there
+    /// is nothing to retry with, and the list response says so itself.
+    #[tokio::test]
+    async fn an_unregistered_type_is_skipped_rather_than_left_pending() {
+        let id = Uuid::new_v4();
+        let pool = instances_pool(&[(id, "no-such-connector-type", json!({}))]).await;
+        let runtime = ConnectorRuntime::new(flaky_registry())
+            .load_into(&pool, &test_key())
+            .await
+            .expect("the runtime loads");
+
+        assert_eq!(runtime.len().await, 0);
+        assert!(runtime.cached_status(&id).await.is_none());
     }
 }

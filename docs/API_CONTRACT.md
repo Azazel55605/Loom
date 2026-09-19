@@ -1657,18 +1657,34 @@ regardless of the instance's backed-off next-poll time. A successful check
 resets normal five-second polling, updates the cache, broadcasts the same
 snapshot over `/ws`, and returns it directly. A failed check is likewise
 returned as the fresh snapshot, including its `statusError` and network
-`diagnosis`; the request itself succeeded in performing the observation. An
-unknown instance is 404, and a stored instance that could not be loaded is 400.
+`diagnosis`; the request itself succeeded in performing the observation.
+
+An unknown instance is 404. An instance whose connector failed to build is
+**not** refused: the request retries its construction immediately, outside the
+backoff, and returns the resulting snapshot — Healthy if the service has come
+back, Down with the construction error if it has not. Only a row this process
+holds nothing at all for — an unregistered type, or stored configuration it
+could not read — is 400.
 
 **One failing connector does not fail the list.** A connector whose `status()`
 returns an error contributes `"status": null` plus a `statusError`, and every
 other instance still reports normally.
 
-**A row with no live connector is still listed.** If an instance could not be
-constructed at startup — its type is not registered in this build, or its stored
-configuration is no longer valid — it appears with stand-in `metadata`, an empty
-`displayFields`, and a `statusError` explaining that nothing was loaded. Hiding
-it would leave a user with a connector they can neither see nor delete.
+**A row with no live connector is still listed.** Such an instance appears with
+stand-in `metadata`, an empty `displayFields`, and a `statusError` explaining
+that nothing was loaded. Hiding it would leave a user with a connector they can
+neither see nor delete.
+
+Two different rows arrive that way, and the reading tells them apart. An
+instance whose **factory failed** — its service was not reachable when the
+backend started — reports `"status"` with health `down` and a `statusError`
+carrying the factory's own objection. It is retried automatically on the same
+backoff schedule a failing poll earns, and becomes fully live on its own once
+its service answers; see [ADR 0018](./adr/0018-connector-offline-handling.md).
+An instance the backend holds **nothing** for — an unregistered type, or stored
+configuration it could not read — reports `"status": null` and a `statusError`
+naming its type, and is not retried, because nothing about it will change until
+it is edited or the build changes.
 
 `GET /connector-instances` requires a **global** `connectors.view`, so a user
 holding only an instance-scoped view grant is refused rather than shown a
@@ -2487,7 +2503,7 @@ the behaviour it had.
 | Status | Meaning |
 | --- | --- |
 | 200 | Descriptors returned; an empty array means this connector browses nothing. |
-| 400 | The instance is not loaded. |
+| 400 | The instance has no connector: either the backend holds nothing for it, or building it on demand failed. The message carries the reason. |
 | 403 | The caller lacks a global `connectors.view` grant. |
 | 404 | No instance with that id. |
 
@@ -2524,7 +2540,7 @@ looking at a service holding nothing or at a typo.
 | Status | Meaning |
 | --- | --- |
 | 200 | Rows returned; an empty array means the kind exists and currently holds nothing. |
-| 400 | This connector instance has no resource kind by that name, or is not loaded. |
+| 400 | This connector instance has no resource kind by that name, or has no connector (see above). |
 | 400 | `ConnectorError::InvalidParams` / `InvalidConfig` from the listing. |
 | 403 | The caller lacks a global `connectors.view` grant. |
 | 404 | No instance with that id. |
@@ -2785,7 +2801,7 @@ then creates accepted resources through the ordinary
 | Status | Meaning |
 | --- | --- |
 | 200 | Discovery completed; `resources` may be empty. |
-| 400 | The instance does not support discovery or is not loaded. |
+| 400 | The instance does not support discovery, or has no connector (see above). |
 | 403 | The caller lacks a global `connectors.manage` grant. |
 | 404 | No instance with that id. |
 

@@ -1711,9 +1711,12 @@ pub(super) async fn click_placement(
                 Ok(uuid) => uuid,
                 Err(_) => return connectors::not_found(&connector_instance_id),
             };
-            let connector = state.connectors.get(&connector_uuid).await;
-            let Some(connector) = connector else {
-                return connectors::not_found(&connector_instance_id);
+            // `ensure_live`, matching the direct endpoint: an instance whose
+            // connector failed to build is retried here rather than refused,
+            // because a tile press is a person asking for it now.
+            let connector = match state.connectors.ensure_live(&connector_uuid).await {
+                Ok(connector) => connector,
+                Err(_) => return connectors::not_found(&connector_instance_id),
             };
 
             let PlacementActionState {
