@@ -53,6 +53,7 @@ import {
   matchesTarget,
   statusDetailsForTarget,
 } from "@loom/ui-kit/lib/connector-details";
+import { DRAG_HANDLE_CLASS } from "@loom/ui-kit/lib/horizontal-drag";
 import { hasPermission, PERMISSION_KEYS } from "@loom/ui-kit/lib/permissions";
 import { useRetainedStatusDetails } from "@loom/ui-kit/lib/use-retained-status-details";
 import { renderWidget } from "@loom/ui-kit/widgets/renderWidget";
@@ -70,8 +71,10 @@ export type LiveStatus = {
 };
 
 /** The class the grid is told to treat as the drag handle. Only the header
- *  carries it, so a drag can never start on a slider or a button. */
-export const DRAG_HANDLE_CLASS = "loom-drag-handle";
+ *  carries it, so a drag can never start on a slider or a button. Defined in
+ *  `lib/horizontal-drag`, which also teaches page-level swipe detection to
+ *  leave it alone. */
+export { DRAG_HANDLE_CLASS };
 
 /**
  * One placed connector: its card shell and every widget bound to it.

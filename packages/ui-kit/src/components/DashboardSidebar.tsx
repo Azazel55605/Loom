@@ -20,9 +20,10 @@ import { Tooltip, TooltipContent, TooltipTrigger } from "@loom/ui-kit/components
 import { useApiClient } from "@loom/ui-kit/lib/api-context";
 import type { DashboardFolder, DashboardSummary } from "@loom/ui-kit/lib/api";
 import { describeConnectorError } from "@loom/ui-kit/lib/connector-error";
+import { dashboardsQueryKey } from "@loom/ui-kit/lib/dashboard-query-keys";
 import { cn } from "@loom/ui-kit/lib/utils";
 
-export const dashboardsQueryKey = ["dashboards"] as const;
+export { dashboardsQueryKey };
 export const dashboardFoldersQueryKey = ["dashboard-folders"] as const;
 
 type ContainerKey = `folder:${string}` | "ungrouped:owner" | "ungrouped:shared";

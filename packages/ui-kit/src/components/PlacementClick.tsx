@@ -2,12 +2,17 @@ import * as React from "react";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
 
-import { ApiError, type DashboardPlacement } from "@loom/ui-kit/lib/api";
+import {
+  ApiError,
+  type DashboardPlacement,
+  type DashboardSummary,
+} from "@loom/ui-kit/lib/api";
 import { useApiClient } from "@loom/ui-kit/lib/api-context";
 import { describeConnectorError } from "@loom/ui-kit/lib/connector-error";
 import {
   DASHBOARD_PREFETCH_STALE_MS,
   dashboardQueryKey,
+  dashboardsQueryKey,
 } from "@loom/ui-kit/lib/dashboard-query-keys";
 import { cn } from "@loom/ui-kit/lib/utils";
 
@@ -31,6 +36,29 @@ import { cn } from "@loom/ui-kit/lib/utils";
  * Nothing about a disruptive `connectorAction` needs handling here. The pending
  * operation raised by the backend arrives on the existing status socket like
  * any other, so the overlay a restart shows is the one it has always shown.
+ *
+ * ## Navigating optimistically, when the answer is already on this machine
+ *
+ * A navigate tile used to wait a full round trip before anything moved, even
+ * when the target is a dashboard sitting in the sidebar's own cached list —
+ * i.e. one the server has already told this client, this session, that this
+ * user can open. When it is in that list the navigation happens immediately
+ * and the click endpoint is called behind it, purely to re-verify.
+ *
+ * **The trade-off, stated plainly:** for the length of one round trip the UI
+ * trusts locally cached access data rather than the server. That data can be
+ * out of date — a share revoked seconds ago is the case — so this is a bet
+ * that it is very likely still accurate, not a claim that it is. It is a bet
+ * worth making because it is self-correcting: the endpoint is still called
+ * every time, and a 403 or 404 coming back moves the user off the dashboard
+ * immediately with an explanation. The worst case is a brief glimpse of a
+ * dashboard's structure the client had already cached anyway; it is not a way
+ * to reach data the server would not serve, since every request the target
+ * view makes is still authorized on its own.
+ *
+ * A target that is *not* in any cached list — a dashboard only ever reachable
+ * through this button — takes the original path unchanged: nothing moves until
+ * the endpoint has answered.
  */
 export function usePlacementClick({
   dashboardId,
@@ -70,6 +98,66 @@ export function usePlacementClick({
       staleTime: DASHBOARD_PREFETCH_STALE_MS,
     });
   }, [api, navigateTargetId, onNavigateDashboard, queryClient]);
+
+  /**
+   * Whether the navigate target is in this client's cached list of dashboards
+   * the signed-in user can open.
+   *
+   * The sidebar's own query, read straight from the cache — no fetch is added
+   * and no second source of truth is introduced. It is read at click time
+   * rather than at render so a tile can never act on a snapshot of the list
+   * taken minutes ago, and `getQueryData` returning `undefined` (nothing
+   * cached, or the cache was cleared) simply means the optimistic path is off.
+   */
+  const cachedTargetIsAccessible = React.useCallback(() => {
+    if (navigateTargetId === null || onNavigateDashboard === undefined) return false;
+    const cached = queryClient.getQueryData<DashboardSummary[]>(dashboardsQueryKey);
+    return cached?.some((dashboard) => dashboard.id === navigateTargetId) ?? false;
+  }, [navigateTargetId, onNavigateDashboard, queryClient]);
+
+  /** Navigates now, verifies after. See the trade-off note on this hook. */
+  const navigateOptimistically = React.useCallback(() => {
+    if (navigateTargetId === null || onNavigateDashboard === undefined) return;
+    prefetchNavigateTarget();
+    onNavigateDashboard(navigateTargetId);
+
+    // Deliberately not the mutation below. The tile that started this unmounts
+    // as soon as the navigation renders the target, taking a mutation observer
+    // — and its callbacks — with it. A bare promise outlives that unmount,
+    // which is the whole point: the verification must land even though the
+    // thing that asked for it is gone.
+    void api.clickDashboardPlacement(dashboardId, placement.id).then(
+      (result) => {
+        if (!("targetDashboardId" in result)) return;
+        // The stored action was re-pointed since this client last looked:
+        // follow the server rather than sit on the guess.
+        if (result.targetDashboardId !== navigateTargetId) {
+          onNavigateDashboard(result.targetDashboardId);
+        }
+      },
+      (error) => {
+        const denied =
+          error instanceof ApiError && (error.isForbidden || error.status === 404);
+        // Anything else — offline, a 5xx — is a failure to verify, not a
+        // denial, and throwing the user off a dashboard because the network
+        // blinked would be worse than the risk it avoids. The target view's
+        // own request reports such a failure where it happened.
+        if (!denied) return;
+        toast.error("Access to this dashboard has changed", {
+          description:
+            "You can no longer open it, so you have been returned to the dashboard you came from.",
+        });
+        onNavigateDashboard(dashboardId);
+      },
+    );
+  }, [
+    api,
+    dashboardId,
+    navigateTargetId,
+    onNavigateDashboard,
+    placement.id,
+    prefetchNavigateTarget,
+  ]);
 
   const click = useMutation({
     mutationFn: () => {
@@ -124,7 +212,13 @@ export function usePlacementClick({
   return {
     clickable,
     pending: click.isPending,
-    run: () => click.mutate(),
+    run: () => {
+      if (cachedTargetIsAccessible()) {
+        navigateOptimistically();
+        return;
+      }
+      click.mutate();
+    },
     /** Call when a press looks imminent — pointer entering or going down. */
     prefetch: prefetchNavigateTarget,
   };

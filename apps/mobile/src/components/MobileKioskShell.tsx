@@ -14,6 +14,7 @@ import { Skeleton } from "@loom/ui-kit/components/ui/skeleton";
 import { useApiClient } from "@loom/ui-kit/lib/api-context";
 import { useAuth } from "@loom/ui-kit/lib/auth-context";
 import { describeConnectorError } from "@loom/ui-kit/lib/connector-error";
+import { ownsHorizontalDrag } from "@loom/ui-kit/lib/horizontal-drag";
 import { ScreensaverView } from "@/components/ScreensaverView";
 import { useMobileKioskMode } from "@/components/mobileKioskMode";
 
@@ -221,7 +222,21 @@ export function MobileKioskShell({ onExited }: { onExited: () => void }) {
   return (
     <main
       className="mobile-kiosk-shell app-canvas"
+      // Swipe detection is scoped to gestures that start on the dashboard
+      // itself. A finger going down inside a control that handles its own
+      // sideways drag — a `Slider` widget above all, plus the grid's resize
+      // grips and card drag handle while a layout is being edited — records no
+      // start point at all, so the release below has nothing to measure and the
+      // rotation stays put. Distance cannot decide this: dragging a volume
+      // slider across a tile is a longer horizontal movement than most real
+      // swipes, so any threshold generous enough to catch a swipe also catches
+      // the drag. See `@loom/ui-kit/lib/horizontal-drag` for why the target,
+      // rather than propagation, is what gets checked.
       onTouchStart={(event) => {
+        if (ownsHorizontalDrag(event.target)) {
+          touchStart.current = null;
+          return;
+        }
         const touch = event.changedTouches[0];
         touchStart.current = { x: touch.clientX, y: touch.clientY };
       }}

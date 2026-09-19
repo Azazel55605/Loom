@@ -6,6 +6,9 @@
  * import cycle between the two.
  */
 
+/** Every dashboard the signed-in user can open, as the sidebar lists them. */
+export const dashboardsQueryKey = ["dashboards"] as const;
+
 /** One dashboard's structure and placements. */
 export const dashboardQueryKey = (dashboardId: string) =>
   ["dashboard", dashboardId] as const;

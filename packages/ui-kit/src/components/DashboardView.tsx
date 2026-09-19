@@ -279,7 +279,7 @@ export function DashboardView({
   dashboardId,
   onDeleted,
   onNavigateDashboard,
-  backNavigation,
+  backNavigation: requestedBackNavigation,
 }: {
   dashboardId: string;
   onDeleted: () => void;
@@ -301,6 +301,14 @@ export function DashboardView({
     onBack: (dashboardId: string | null) => void;
   };
 }) {
+  // A Back control pointing at the dashboard it is on is not a Back control.
+  // A host can hand one over honestly: an optimistic navigation that the click
+  // endpoint then denies returns the user to the source they came from, and
+  // the state describing that trip names the same dashboard they land on.
+  const backNavigation =
+    requestedBackNavigation?.fromDashboardId === dashboardId
+      ? undefined
+      : requestedBackNavigation;
   const { density } = useAppearance();
   const gridGap = React.useMemo(dashboardGridGap, [density]);
   const compactGridGap = Math.min(gridGap, 12);
