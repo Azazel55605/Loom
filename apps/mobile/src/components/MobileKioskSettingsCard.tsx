@@ -12,6 +12,7 @@ import {
 import { Label } from "@loom/ui-kit/components/ui/label";
 import { Input } from "@loom/ui-kit/components/ui/input";
 import { Switch } from "@loom/ui-kit/components/ui/switch";
+import { accountQueryKey } from "@loom/ui-kit/lib/account-query-keys";
 import { useApiClient } from "@loom/ui-kit/lib/api-context";
 
 export function MobileKioskSettingsCard() {
@@ -20,7 +21,7 @@ export function MobileKioskSettingsCard() {
   const [failure, setFailure] = React.useState<string | null>(null);
   const [idleSeconds, setIdleSeconds] = React.useState("120");
   const account = useQuery({
-    queryKey: ["account"],
+    queryKey: accountQueryKey,
     queryFn: ({ signal }) => api.getAccount(signal),
   });
   const eligible = account.data?.isKiosk === true;

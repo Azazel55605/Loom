@@ -2769,6 +2769,16 @@ export type Account = {
   groups: AccountGroup[];
   /** Server-owned ordered readings for kiosk idle presentation. */
   screensaverConfig: ScreensaverDataPoint[];
+  /**
+   * The dashboard this user chose to land on, or null to use the client's
+   * heuristic (first pinned, else first owned).
+   *
+   * Null again on its own if that dashboard is deleted — the column is a
+   * foreign key with `ON DELETE SET NULL` — so a client never has to handle an
+   * id pointing at nothing. It can still name a dashboard that has since been
+   * *unshared*, which is why landing re-checks access rather than trusting it.
+   */
+  defaultDashboardId: string | null;
 };
 
 /**
@@ -2780,6 +2790,13 @@ export type Account = {
 export type UpdateAccountRequest = {
   username?: string;
   displayName?: string | null;
+  /**
+   * `null` clears the preference, returning to the landing heuristic. A value
+   * must name a dashboard you can already open, or the request is a 400 —
+   * setting a new one replaces whatever was there, so there is no need to clear
+   * the old one first.
+   */
+  defaultDashboardId?: string | null;
 };
 
 /** `POST /account/avatar` response. */
@@ -2807,11 +2824,13 @@ function getAccount(runtime: ApiRuntime, signal?: AbortSignal): Promise<Account>
 }
 
 /**
- * `PATCH /account` — change your own username and/or display name.
+ * `PATCH /account` — change your own username, display name and/or default
+ * dashboard.
  *
  * Throws an `ApiError` with status 409 when the username is taken by another
  * account; the check excludes your own row, so resubmitting your current
- * username is not a conflict.
+ * username is not a conflict. A 400 means `defaultDashboardId` named something
+ * this account cannot open.
  */
 function updateAccount(runtime: ApiRuntime, 
   data: UpdateAccountRequest,

@@ -44,13 +44,14 @@ import {
   ApiError,
   type Account,
 } from "@loom/ui-kit/lib/api";
+import { accountQueryKey } from "@loom/ui-kit/lib/account-query-keys";
 import { useApiClient } from "@loom/ui-kit/lib/api-context";
 import { useAuth } from "@loom/ui-kit/lib/auth-context";
 import { describeAdminFailure } from "@loom/ui-kit/lib/admin-error";
 import { cn } from "@loom/ui-kit/lib/utils";
 
 /** Query key for the caller's own profile, shared with the avatar mutations. */
-const ACCOUNT_QUERY_KEY = ["account"];
+
 
 /**
  * Your own account: profile, avatar, and password.
@@ -63,7 +64,7 @@ export function AccountPanel() {
   const api = useApiClient();
   const { signOut } = useAuth();
   const account = useQuery({
-    queryKey: ACCOUNT_QUERY_KEY,
+    queryKey: accountQueryKey,
     queryFn: ({ signal }) => api.getAccount(signal),
     retry: false,
   });
@@ -176,7 +177,7 @@ function ProfileForm({ account }: { account: Account }) {
     // from the auth context, which reads the token's claims and so still says
     // the old name until the next refresh. Refetching the account is what makes
     // this panel agree with itself immediately.
-    await queryClient.invalidateQueries({ queryKey: ACCOUNT_QUERY_KEY });
+    await queryClient.invalidateQueries({ queryKey: accountQueryKey });
     toast.success("Profile updated.");
   }
 
@@ -282,7 +283,7 @@ function AvatarSection({ account }: { account: Account }) {
     mutationFn: (file: File) => api.uploadAvatar(file),
     onSuccess: async () => {
       setFailure(null);
-      await queryClient.invalidateQueries({ queryKey: ACCOUNT_QUERY_KEY });
+      await queryClient.invalidateQueries({ queryKey: accountQueryKey });
       toast.success("Avatar updated.");
     },
     // The backend decides by decoding the bytes, so its message says what is
@@ -296,7 +297,7 @@ function AvatarSection({ account }: { account: Account }) {
     onSuccess: async () => {
       setFailure(null);
       setConfirmingRemoval(false);
-      await queryClient.invalidateQueries({ queryKey: ACCOUNT_QUERY_KEY });
+      await queryClient.invalidateQueries({ queryKey: accountQueryKey });
       toast.success("Avatar removed.");
     },
     onError: (error: unknown) => setFailure(describeAdminFailure(error).message),

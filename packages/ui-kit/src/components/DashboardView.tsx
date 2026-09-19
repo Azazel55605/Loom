@@ -14,6 +14,7 @@ import {
   Check,
   Eye,
   EyeOff,
+  Home,
   LayoutGrid,
   Pencil,
   Plus,
@@ -48,6 +49,7 @@ import { Skeleton } from "@loom/ui-kit/components/ui/skeleton";
 import { AddPlacementDialog } from "@loom/ui-kit/components/AddPlacementDialog";
 import { DashboardSharesDialog } from "@loom/ui-kit/components/DashboardSharesDialog";
 import { dashboardsQueryKey } from "@loom/ui-kit/components/DashboardSidebar";
+import { accountQueryKey } from "@loom/ui-kit/lib/account-query-keys";
 import { GroupTile } from "@loom/ui-kit/components/GroupTile";
 import { ConnectorIcon } from "@loom/ui-kit/components/ConnectorIcon";
 import {
@@ -335,6 +337,44 @@ export function DashboardView({
     queryKey: dashboardQueryKey(dashboardId),
     queryFn: ({ signal }) => api.getDashboard(dashboardId, signal),
   });
+  /**
+   * The caller's own account, for the landing preference this header can set.
+   *
+   * The same cache entry the settings panel and the dashboards index use, so
+   * setting a default here is visible to both without a refetch.
+   */
+  const account = useQuery({
+    queryKey: accountQueryKey,
+    queryFn: ({ signal }) => api.getAccount(signal),
+  });
+  const isDefaultDashboard = account.data?.defaultDashboardId === dashboardId;
+
+  /**
+   * Sets or clears this dashboard as where the caller lands.
+   *
+   * A personal navigation preference, so it is offered to every role rather
+   * than to owners — the same bar as pinning, and for the same reason: it
+   * changes nothing about the dashboard and nothing anyone else can see.
+   * Setting one replaces whatever was there, so there is no unset-then-set
+   * sequence to get wrong.
+   */
+  const setDefaultDashboard = useMutation({
+    mutationFn: (next: string | null) => api.updateAccount({ defaultDashboardId: next }),
+    onSuccess: (updated) => {
+      queryClient.setQueryData(accountQueryKey, updated);
+      toast.success(
+        updated.defaultDashboardId === dashboardId
+          ? "This is now the dashboard you land on"
+          : "Landing is back to the usual dashboard",
+      );
+    },
+    onError: (error) => {
+      toast.error("Could not change your default dashboard", {
+        description: describeConnectorError(error),
+      });
+    },
+  });
+
   const accessibleDashboards = useQuery({
     queryKey: dashboardsQueryKey,
     queryFn: ({ signal }) => api.getDashboards(signal),
@@ -738,6 +778,17 @@ export function DashboardView({
         </div>
 
         <div className="flex flex-wrap items-center justify-end gap-2">
+          <Button
+            type="button"
+            variant={isDefaultDashboard ? "secondary" : "outline"}
+            size="sm"
+            aria-pressed={isDefaultDashboard}
+            disabled={account.isPending || setDefaultDashboard.isPending}
+            onClick={() => setDefaultDashboard.mutate(isDefaultDashboard ? null : dashboardId)}
+          >
+            <Home aria-hidden="true" />
+            {isDefaultDashboard ? "Unset as default" : "Set as default"}
+          </Button>
           {canEdit ? (
             <>
               <Button

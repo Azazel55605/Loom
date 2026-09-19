@@ -7597,6 +7597,162 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_default_dashboard_can_be_set_by_anyone_who_can_open_it_and_clears_itself() {
+        let app = test_app().await;
+        let (owner, _) = setup_and_login(&app.router).await;
+
+        let (status, created) = send(
+            &app.router,
+            post_json_auth(
+                "/dashboards",
+                &owner,
+                serde_json::json!({ "name": "Landing" }),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED, "{created:#}");
+        let dashboard_id = created["id"].as_str().expect("dashboard id").to_owned();
+
+        // Nobody has one until they ask for one: the heuristic is the default
+        // default, and this field is how a client knows to skip it.
+        let (_, account) = send(&app.router, get_with_auth("/account", &bearer(&owner))).await;
+        assert_eq!(account["defaultDashboardId"], serde_json::Value::Null);
+
+        let viewer = user_with_grants(&app.router, &owner, "viewer", serde_json::json!([])).await;
+        let viewer_id = current_user_id(&app.router, &viewer).await;
+
+        // A dashboard the caller cannot open is refused, and the refusal says
+        // nothing about whether it exists.
+        let (status, denied) = send(
+            &app.router,
+            patch_json_auth(
+                "/account",
+                &viewer,
+                serde_json::json!({ "defaultDashboardId": dashboard_id }),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{denied:#}");
+        let (status, invented) = send(
+            &app.router,
+            patch_json_auth(
+                "/account",
+                &viewer,
+                serde_json::json!({ "defaultDashboardId": uuid::Uuid::new_v4().to_string() }),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{invented:#}");
+        assert_eq!(denied["error"], invented["error"]);
+
+        // Viewer access is enough: this is a personal navigation preference,
+        // not a control over the dashboard.
+        let (status, share) = send(
+            &app.router,
+            post_json_auth(
+                &format!("/dashboards/{dashboard_id}/shares"),
+                &owner,
+                serde_json::json!({
+                    "targetType": "user",
+                    "targetId": viewer_id,
+                    "role": "view",
+                }),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED, "{share:#}");
+
+        let (status, updated) = send(
+            &app.router,
+            patch_json_auth(
+                "/account",
+                &viewer,
+                serde_json::json!({ "defaultDashboardId": dashboard_id }),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{updated:#}");
+        assert_eq!(updated["defaultDashboardId"], dashboard_id);
+        let (_, account) = send(&app.router, get_with_auth("/account", &bearer(&viewer))).await;
+        assert_eq!(account["defaultDashboardId"], dashboard_id);
+
+        // Omitting the field leaves it alone; only an explicit null clears it.
+        let (_, untouched) = send(
+            &app.router,
+            patch_json_auth(
+                "/account",
+                &viewer,
+                serde_json::json!({ "displayName": "Housemate" }),
+            ),
+        )
+        .await;
+        assert_eq!(untouched["defaultDashboardId"], dashboard_id);
+
+        let (status, cleared) = send(
+            &app.router,
+            patch_json_auth(
+                "/account",
+                &viewer,
+                serde_json::json!({ "defaultDashboardId": null }),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{cleared:#}");
+        assert_eq!(cleared["defaultDashboardId"], serde_json::Value::Null);
+    }
+
+    /// The reason the column is a real foreign key: a deleted dashboard must
+    /// not leave anyone pointed at a row that is gone.
+    #[tokio::test]
+    async fn deleting_a_dashboard_reverts_everyone_who_defaulted_to_it() {
+        let app = test_app().await;
+        let (owner, _) = setup_and_login(&app.router).await;
+
+        let (_, created) = send(
+            &app.router,
+            post_json_auth(
+                "/dashboards",
+                &owner,
+                serde_json::json!({ "name": "Temporary" }),
+            ),
+        )
+        .await;
+        let dashboard_id = created["id"].as_str().expect("dashboard id").to_owned();
+
+        let (_, updated) = send(
+            &app.router,
+            patch_json_auth(
+                "/account",
+                &owner,
+                serde_json::json!({ "defaultDashboardId": dashboard_id }),
+            ),
+        )
+        .await;
+        assert_eq!(updated["defaultDashboardId"], dashboard_id);
+
+        let (status, _) = send(
+            &app.router,
+            delete_auth(&format!("/dashboards/{dashboard_id}"), &owner),
+        )
+        .await;
+        assert_eq!(status, StatusCode::NO_CONTENT);
+
+        // `ON DELETE SET NULL` does this, not the delete handler: nothing in
+        // the dashboard routes knows this preference exists.
+        let (status, account) = send(&app.router, get_with_auth("/account", &bearer(&owner))).await;
+        assert_eq!(status, StatusCode::OK, "{account:#}");
+        assert_eq!(
+            account["defaultDashboardId"],
+            serde_json::Value::Null,
+            "a deleted dashboard must revert the preference rather than dangle"
+        );
+
+        // And the account still loads, which is the part a client depends on
+        // to fall back to the heuristic without an error.
+        assert_eq!(account["username"], "admin");
+    }
+
+    #[tokio::test]
     async fn renaming_yourself_to_a_taken_username_conflicts() {
         let app = test_app().await;
         let (admin, _) = setup_and_login(&app.router).await;

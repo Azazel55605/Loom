@@ -28,6 +28,7 @@ use uuid::Uuid;
 use crate::auth::extract::AuthenticatedUser;
 use crate::auth::password::{hash_password, verify_password, MIN_PASSWORD_LENGTH};
 use crate::config::AVATARS_DIRNAME;
+use crate::dashboard_access::get_dashboard_role;
 use crate::error::{internal_error, ErrorBody};
 use crate::state::AppState;
 
@@ -83,6 +84,10 @@ pub struct AccountResponse {
     groups: Vec<AccountGroup>,
     /// Ordered ambient readings selected by an administrator for kiosk mode.
     screensaver_config: Vec<super::users::ScreensaverDataPoint>,
+    /// The dashboard this user has chosen to land on, or null to use the
+    /// client's heuristic. Null again by itself if that dashboard is deleted,
+    /// through the column's `ON DELETE SET NULL`.
+    default_dashboard_id: Option<String>,
 }
 
 /// A group the caller belongs to, named rather than just identified, since the
@@ -104,6 +109,11 @@ pub struct UpdateAccountRequest {
     /// storing one would render as a blank where a username should be.
     #[serde(default, deserialize_with = "crate::routes::present_option")]
     display_name: Option<Option<String>>,
+    /// Absent leaves it alone; present-and-null clears it, returning this user
+    /// to the client's landing heuristic. A value must name a dashboard the
+    /// caller can already open — see [`update_account`].
+    #[serde(default, deserialize_with = "crate::routes::present_option")]
+    default_dashboard_id: Option<Option<String>>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -129,6 +139,7 @@ struct AccountRow {
     avatar_path: Option<String>,
     created_at: String,
     screensaver_config: Option<String>,
+    default_dashboard_id: Option<String>,
 }
 
 /// `GET /account`
@@ -164,11 +175,40 @@ pub async fn get_account(caller: AuthenticatedUser, State(state): State<AppState
 /// off `sub`, the user id, which does not change. A stale `username` claim can
 /// therefore show an out-of-date name for a few minutes; it cannot address the
 /// wrong account.
+///
+/// ## Why the default dashboard is checked here and not only at landing
+///
+/// A default may only name a dashboard the caller can already open. The client
+/// re-checks access when it lands, because a share can be revoked at any time
+/// after this call — but that check cannot be the only one, or setting a
+/// default would be a way to ask "does this id exist?" about dashboards the
+/// caller has nothing to do with. Any role at all is enough: this is a personal
+/// navigation preference, the same bar as pinning, and being able to see a
+/// dashboard is the only thing choosing to start on it requires.
 pub async fn update_account(
     caller: AuthenticatedUser,
     State(state): State<AppState>,
     Json(request): Json<UpdateAccountRequest>,
 ) -> Response {
+    // Before the transaction, because it reads through the pool and answers a
+    // question about the request rather than about the update: an unusable
+    // value should be refused without having opened a write anywhere.
+    if let Some(Some(dashboard_id)) = &request.default_dashboard_id {
+        match get_dashboard_role(&state.pool, caller.id(), dashboard_id).await {
+            Ok(Some(_)) => {}
+            // Deliberately the same answer for "no such dashboard" and "not
+            // shared with you". Telling them apart would let anyone enumerate
+            // dashboard ids from a route that needs no permission at all.
+            Ok(None) => {
+                return ErrorBody::message(
+                    StatusCode::BAD_REQUEST,
+                    "that dashboard is not available to you".to_owned(),
+                )
+            }
+            Err(error) => return internal_error("checking access to the default dashboard", error),
+        }
+    }
+
     let mut tx = match state.pool.begin().await {
         Ok(tx) => tx,
         Err(error) => return internal_error("beginning the update-account transaction", error),
@@ -229,6 +269,17 @@ pub async fn update_account(
             .await
         {
             return internal_error("updating the display name", error);
+        }
+    }
+
+    if let Some(default_dashboard_id) = &request.default_dashboard_id {
+        if let Err(error) = sqlx::query("UPDATE users SET default_dashboard_id = ? WHERE id = ?")
+            .bind(default_dashboard_id.as_deref())
+            .bind(caller.id())
+            .execute(&mut *tx)
+            .await
+        {
+            return internal_error("updating the default dashboard", error);
         }
     }
 
@@ -624,8 +675,8 @@ async fn load_account(
     user_id: &str,
 ) -> Result<Option<AccountResponse>, sqlx::Error> {
     let row = sqlx::query_as::<_, AccountRow>(
-        "SELECT id, username, is_kiosk, display_name, avatar_path, created_at, screensaver_config \
-         FROM users WHERE id = ?",
+        "SELECT id, username, is_kiosk, display_name, avatar_path, created_at, \
+         screensaver_config, default_dashboard_id FROM users WHERE id = ?",
     )
     .bind(user_id)
     .fetch_optional(&mut *conn)
@@ -662,6 +713,7 @@ async fn load_account(
             .map(|(id, name)| AccountGroup { id, name })
             .collect(),
         screensaver_config,
+        default_dashboard_id: row.default_dashboard_id,
     }))
 }
 

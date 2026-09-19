@@ -4041,6 +4041,7 @@ the tables below.
   "displayName": "The Admin",
   "avatarUrl": "/avatars/2f1c8b90-5d3e-4a71-9c02-6b8d4e1f7a35.png",
   "createdAt": "2026-08-19T17:04:11.882401553+00:00",
+  "defaultDashboardId": "1f2e3d4c-5b6a-4978-8877-66554433221f",
   "screensaverConfig": [
     {
       "connectorInstanceId": "<connector instance id>",
@@ -4061,6 +4062,15 @@ for that account's kiosk idle screen. It is empty for clock-only presentation;
 `targetId: null` addresses the connector's host view.
 `displayName` and `avatarUrl` are `null` when unset. As everywhere else in this
 API, **there is no password field**.
+
+`defaultDashboardId` is the dashboard this user has chosen to land on, or `null`
+to use the client's own landing heuristic (first pinned, else first owned, else
+the empty state). It is stored as a foreign key with `ON DELETE SET NULL`, so
+deleting that dashboard reverts the preference to `null` by itself — a client
+never has to handle an id pointing at nothing. It *can* still name a dashboard
+that has since been **unshared**, which is deliberate: a revoked share is often
+temporary, so the value is kept and clients re-check access when they land,
+falling back to the heuristic for as long as it is unreachable.
 
 `groups` is included for context and is **read-only here**. Membership is an
 administrative decision made through [`PATCH /users/{id}`](#patch-usersid);
@@ -4096,10 +4106,14 @@ server *and* guess a random UUIDv4 filename.
 
 ### `PATCH /account`
 
-Both fields optional; an absent field is left alone.
+All fields optional; an absent field is left alone.
 
 ```json
-{ "username": "renamed", "displayName": "The Admin" }
+{
+  "username": "renamed",
+  "displayName": "The Admin",
+  "defaultDashboardId": "1f2e3d4c-5b6a-4978-8877-66554433221f"
+}
 ```
 
 `displayName` distinguishes **absent** from **present and null**: omitting it
@@ -4110,12 +4124,22 @@ belongs. Usernames are trimmed.
 Uniqueness is checked **excluding the caller's own row**, so submitting a form
 that echoes back the current username is not a conflict with itself.
 
+`defaultDashboardId` makes the same absent/null distinction, and must name a
+dashboard the caller can already open — **any** role, including Viewer, since
+choosing where to start is a personal navigation preference on the same footing
+as pinning rather than a control over the dashboard. Anything else is a 400, and
+"no such dashboard" and "not shared with you" give the *same* 400: telling them
+apart would let anyone enumerate dashboard ids from a route that requires no
+permission at all. Setting a value replaces whatever was stored, so there is no
+need to clear the previous one first; sending `null` returns the account to the
+landing heuristic.
+
 **Response 200** — the updated profile, in the `GET /account` shape.
 
 | Status | Meaning |
 | --- | --- |
 | 200 | Applied. |
-| 400 | Empty username. |
+| 400 | Empty username, or a `defaultDashboardId` this account cannot open. |
 | 409 | That username is taken by another account. |
 
 #### Renaming yourself and the token in your hand

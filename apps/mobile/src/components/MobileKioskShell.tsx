@@ -11,6 +11,7 @@ import { NetworkAdvisoryBanner } from "@loom/ui-kit/components/NetworkAdvisoryBa
 import { Alert, AlertDescription, AlertTitle } from "@loom/ui-kit/components/ui/alert";
 import { Button } from "@loom/ui-kit/components/ui/button";
 import { Skeleton } from "@loom/ui-kit/components/ui/skeleton";
+import { accountQueryKey } from "@loom/ui-kit/lib/account-query-keys";
 import { useApiClient } from "@loom/ui-kit/lib/api-context";
 import { useAuth } from "@loom/ui-kit/lib/auth-context";
 import { describeConnectorError } from "@loom/ui-kit/lib/connector-error";
@@ -149,7 +150,7 @@ export function MobileKioskShell({ onExited }: { onExited: () => void }) {
   }, [kiosk.screensaverEnabled, kiosk.screensaverIdleSeconds]);
 
   const account = useQuery({
-    queryKey: ["account"],
+    queryKey: accountQueryKey,
     queryFn: ({ signal }) => api.getAccount(signal),
   });
 
