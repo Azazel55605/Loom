@@ -1,5 +1,5 @@
 {
-  "core": "0.4.2",
+  "core": "0.4.3",
   "media": "0.2.0",
   "connector-docker": "0.6.0",
   "connector-govee": "0.1.5",
@@ -8,9 +8,9 @@
   "connector-tasmota": "0.1.5",
   "connector-truenas": "0.2.5",
   "connector-unifi-network": "0.9.1",
-  "web-backend": "0.5.6",
-  "web-frontend": "0.5.6",
-  "desktop": "0.4.7",
-  "mobile": "0.5.6",
-  "mobile-android-version-code": "056"
+  "web-backend": "0.5.7",
+  "web-frontend": "0.5.7",
+  "desktop": "0.4.9",
+  "mobile": "0.5.7",
+  "mobile-android-version-code": "057"
 }
